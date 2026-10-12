@@ -27,7 +27,7 @@ jobs:
       - name: Install
         run: pip install -e '.[dev]'
       - name: Lint
-        run: ruff check .
+        run: ruff check --output-format=github .
       - name: Test (GUI headless, screenshots saved)
         env:
           QT_QPA_PLATFORM: offscreen
