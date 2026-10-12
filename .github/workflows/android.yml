@@ -2,6 +2,7 @@ name: Android
 
 on:
   push:
+    branches: ["**"]
     paths:
       - "android/**"
       - "handheld_forge/distros.json"
