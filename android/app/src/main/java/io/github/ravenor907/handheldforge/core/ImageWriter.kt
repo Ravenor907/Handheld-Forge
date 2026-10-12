@@ -6,6 +6,9 @@ import java.security.MessageDigest
 
 class WriteException(msg: String) : IOException(msg)
 
+/** The image file couldn't be read or decoded (a damaged download), as opposed to a drive failure. */
+class CorruptImageException(cause: Throwable) : IOException("The image file is damaged: ${cause.message}", cause)
+
 /**
  * Writes an ISO to a block device byte for byte (Bazzite's ISO is a hybrid
  * image, so this is a bootable drive), then reads the drive back and compares.
@@ -56,12 +59,12 @@ object ImageWriter {
         log("Writing ${dev.name}")
         var done = 0L
         val raw = CountingStream(file.inputStream().buffered(CHUNK))
-        decode(raw).use { input ->
+        decoding { decode(raw) }.use { input ->
             while (true) {
                 if (cancel()) throw CancelledException()
                 var got = 0
                 while (got < CHUNK) {
-                    val n = input.read(buf, got, CHUNK - got)
+                    val n = decoding { input.read(buf, got, CHUNK - got) }
                     if (n < 0) break
                     got += n
                 }
@@ -69,7 +72,7 @@ object ImageWriter {
                 md.update(buf, 0, got)
                 val padded = roundUp(got, bs)
                 if (padded > got) java.util.Arrays.fill(buf, got, padded, 0)
-                if (done / bs + padded / bs > dev.blockCount - tailBlocks) {
+                if (done / bs + padded / bs > dev.blockCount) {
                     throw WriteException("This drive is too small for the image.")
                 }
                 dev.write(done / bs, padded / bs, buf)
@@ -104,6 +107,15 @@ object ImageWriter {
             )
         }
         log("Every byte on the drive matches the image")
+    }
+
+    /** Decoders report bad input as IOException or, for some malformed data, a RuntimeException. */
+    private inline fun <T> decoding(block: () -> T): T = try {
+        block()
+    } catch (e: IOException) {
+        throw CorruptImageException(e)
+    } catch (e: RuntimeException) {
+        throw CorruptImageException(e)
     }
 
     private fun roundUp(n: Int, to: Int) = (n + to - 1) / to * to

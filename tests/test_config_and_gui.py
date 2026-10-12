@@ -16,6 +16,11 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(b.images[0].require_signature)
         self.assertEqual(b.images[0].filename, "bazzite-deck-stable-live-amd64.iso")
         self.assertEqual((b.name, b.edition), ("Bazzite", "Handheld KDE"))
+        # SteamOS is a raw bzip2 disk image: offered on Android, not written by the desktop app.
+        s = get_distro("steamos", cat)
+        self.assertFalse(s.enabled)
+        self.assertTrue(s.android_only)
+        self.assertIsNone(s.images[0].checksum_url)
 
     def _load(self, distros):
         with tempfile.TemporaryDirectory() as d:

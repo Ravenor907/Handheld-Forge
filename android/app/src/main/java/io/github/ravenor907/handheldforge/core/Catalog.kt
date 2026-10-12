@@ -67,7 +67,7 @@ object Catalog {
                 minDriveGb = ((raw["min_drive_gb"] as? Long) ?: 16L).toInt(),
                 publicKey = raw["public_key"] as String?,
                 images = images,
-                format = raw["format"] as? String ?: "iso",
+                format = format,
             )
         }
     }

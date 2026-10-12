@@ -5,7 +5,7 @@ Pick a system, pick a USB drive, press **Create boot drive**. No terminal, no pa
 | System | Status |
 | --- | --- |
 | Bazzite (Handheld KDE) | Ready |
-| SteamOS | Planned |
+| SteamOS (Steam Deck recovery image) | Ready on Android |
 | CachyOS Handheld | Planned |
 
 ## What it does
@@ -55,8 +55,9 @@ There's also an Android app in [`android/`](android/). It makes the same boot dr
 - **One Android prompt.** The first time you plug a stick in, Android asks whether Handheld Forge may access it. Tick "always" and it won't ask again for that stick. That's Android's own USB permission; every app gets it.
 - **Space:** about 10 GB free on the phone for the download.
 - It runs in the background with a notification, so you can switch apps or let the screen turn off.
+- **SteamOS** is Android only for now. It writes Valve's Steam Deck recovery image, a bzip2-compressed disk image that's decompressed on the fly while writing. Valve publishes no checksum for it, so a damaged download is caught by bzip2's own block checksums instead, and the drive is still read back in full. A new image is downloaded when the server's file size or version tag changes.
 
-It reads the same `handheld_forge/distros.json` and Bazzite key as the desktop app, so adding a system adds it to both.
+It reads the same `handheld_forge/distros.json` and Bazzite key as the desktop app, so adding an ISO-based system adds it to both.
 
 ## Command line
 
@@ -70,7 +71,7 @@ handheld-forge create --device /dev/sdb
 
 ## Adding another system
 
-Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used.
+Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used. `"format": "raw-bz2"` marks a bzip2-compressed raw disk image (like SteamOS); those are written by the Android app only, and `checksum_url` may be `null` for them.
 
 ## Development
 

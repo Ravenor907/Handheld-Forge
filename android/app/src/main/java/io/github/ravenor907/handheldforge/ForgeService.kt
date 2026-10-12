@@ -17,6 +17,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import io.github.ravenor907.handheldforge.core.Catalog
 import io.github.ravenor907.handheldforge.core.CancelledException
+import io.github.ravenor907.handheldforge.core.CorruptImageException
 import io.github.ravenor907.handheldforge.core.Distro
 import io.github.ravenor907.handheldforge.core.Downloader
 import io.github.ravenor907.handheldforge.core.ImageWriter
@@ -24,6 +25,7 @@ import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.usb.UsbSticks
 import java.io.File
 import java.io.IOException
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 
 /** Runs download, verify, write and read-back in the foreground so the phone can sleep the screen. */
 class ForgeService : Service() {
@@ -79,20 +81,20 @@ class ForgeService : Service() {
             val again = sticks.device(stickKey)
                 ?: throw IOException("The USB drive was unplugged during the download. Plug it back in and try again.")
             sticks.open(again).use { s ->
-                if (distro.format == "raw-bz2") {
-                    try {
+                try {
+                    if (distro.format == "raw-bz2") {
+                        // No published checksum: bzip2's block CRCs catch a damaged download.
                         ImageWriter.writeStream(
-                            img.file,
-                            { org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream(it, true) },
+                            img.file, { BZip2CompressorInputStream(it, true) },
                             s.disk, null, stage, Jobs::log, cancel,
                         )
-                    } catch (e: IOException) {
-                        if (e is io.github.ravenor907.handheldforge.core.WriteException || e.message?.contains("CRC", true) != true) throw e
-                        img.file.delete() // corrupt download: fetch a fresh copy next time
-                        throw IOException("The download was corrupted, so it was deleted. Try again.")
+                    } else {
+                        ImageWriter.write(img.file, s.disk, img.sha256, stage, Jobs::log, cancel)
                     }
-                } else {
-                    ImageWriter.write(img.file, s.disk, img.sha256, stage, Jobs::log, cancel)
+                } catch (e: CorruptImageException) {
+                    Jobs.log(e.message ?: "")
+                    img.file.delete() // fetch a fresh copy next time
+                    throw IOException("The download was corrupted, so it was deleted. Try again.")
                 }
             }
             Jobs.finish(Outcome.OK, "")

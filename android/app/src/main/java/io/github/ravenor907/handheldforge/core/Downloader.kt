@@ -163,7 +163,13 @@ class Downloader(
             partStamp.delete()
             throw VerificationException("The download was corrupted, so it was deleted. Try again.")
         }
-        log(if (signed) "Checksum and signature verified" else "Checksum verified")
+        log(
+            when {
+                signed -> "Checksum and signature verified"
+                checksummed -> "Checksum verified"
+                else -> "Download complete"
+            },
+        )
         stamp.delete()
         iso.delete()
         if (!part.renameTo(iso)) throw IOException("Could not finalize the download")

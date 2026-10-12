@@ -122,4 +122,4 @@ jobs:
           fi
           gh release create "$tag" "HandheldForge-$v.apk" -R "${{ github.repository }}" --target "$GITHUB_SHA" \
             --title "Handheld Forge for Android $v" \
-            --notes "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite boot drive. Signed with the shared test key."
+            --notes "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite or SteamOS boot drive. Signed with the shared test key."

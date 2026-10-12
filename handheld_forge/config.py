@@ -17,7 +17,7 @@ CATALOG_PATH = PACKAGE_DIR / "distros.json"
 class ImageSource:
     label: str
     iso_url: str
-    checksum_url: str
+    checksum_url: str | None  # None when the publisher has no checksum (SteamOS)
     signature_url: str | None
     require_signature: bool
 
