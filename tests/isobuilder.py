@@ -43,7 +43,7 @@ def build_iso(files: dict[str, bytes], label: str = "Bazzite-Live", rock_ridge: 
         for i in range(1, len(parts)):
             d = "/".join(parts[:i])
             dirs.setdefault(d, {})
-    for path, data in files.items():
+    for path in files:
         parent = path.rsplit("/", 1)[0] if "/" in path else ""
         dirs[parent][path.rsplit("/", 1)[-1]] = ("file", path)
     for d in dirs:
