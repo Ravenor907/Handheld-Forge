@@ -28,11 +28,20 @@
     {
       "id": "steamos",
       "name": "SteamOS",
-      "edition": "Valve",
-      "enabled": false,
+      "edition": "Valve recovery",
+      "enabled": true,
       "min_drive_gb": 16,
       "public_key": null,
-      "images": []
+      "images": [
+        {
+          "label": "Steam Deck recovery image",
+          "iso_url": "https://steamdeck-images.steamos.cloud/recovery/steamdeck-repair-latest.img.bz2",
+          "checksum_url": null,
+          "signature_url": null,
+          "require_signature": false
+        }
+      ],
+      "format": "raw-bz2"
     },
     {
       "id": "cachyos-handheld",

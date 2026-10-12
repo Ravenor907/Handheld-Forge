@@ -444,7 +444,7 @@ class MainWindow(QMainWindow):
         self.os_group = QButtonGroup(self)
         self.os_group.setExclusive(True)
         for d in self.catalog:
-            t = Tile(d.name, d.edition, tag="" if d.enabled else "Soon")
+            t = Tile(d.name, d.edition, tag="" if d.enabled else ("Android" if d.android_only else "Soon"))
             t.setEnabled(d.enabled)
             t.setProperty("distro", d.id)
             self.os_group.addButton(t)

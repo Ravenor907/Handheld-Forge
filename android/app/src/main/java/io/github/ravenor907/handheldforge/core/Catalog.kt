@@ -4,7 +4,8 @@ package io.github.ravenor907.handheldforge.core
 data class ImageSource(
     val label: String,
     val isoUrl: String,
-    val checksumUrl: String,
+    /** Null when the publisher offers no checksum (SteamOS); bzip2 CRCs and read-back still apply. */
+    val checksumUrl: String?,
     val signatureUrl: String?,
     val requireSignature: Boolean,
 ) {
@@ -20,6 +21,8 @@ data class Distro(
     /** Path of the public key inside the catalog, e.g. "keys/bazzite-cosign.pub". */
     val publicKey: String?,
     val images: List<ImageSource>,
+    /** "iso" (written as-is) or "raw-bz2" (bzip2-compressed disk image, decompressed while writing). */
+    val format: String = "iso",
 ) {
     val minDriveBytes: Long get() = (minDriveGb * 1_000_000_000L * 0.93).toLong()
 }
@@ -39,7 +42,7 @@ object Catalog {
                 ImageSource(
                     label = img["label"] as String,
                     isoUrl = img["iso_url"] as String,
-                    checksumUrl = img["checksum_url"] as String,
+                    checksumUrl = img["checksum_url"] as String?,
                     signatureUrl = img["signature_url"] as String?,
                     requireSignature = img["require_signature"] == true,
                 )
@@ -53,6 +56,8 @@ object Catalog {
                 }
             }
             val enabled = raw["enabled"] == true
+            val format = raw["format"] as? String ?: "iso"
+            if (format !in setOf("iso", "raw-bz2")) throw CatalogException("$id: unknown format $format")
             if (enabled && images.isEmpty()) throw CatalogException("$id: enabled but has no images")
             Distro(
                 id = id,
@@ -62,6 +67,7 @@ object Catalog {
                 minDriveGb = ((raw["min_drive_gb"] as? Long) ?: 16L).toInt(),
                 publicKey = raw["public_key"] as String?,
                 images = images,
+                format = raw["format"] as? String ?: "iso",
             )
         }
     }

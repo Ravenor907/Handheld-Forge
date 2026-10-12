@@ -1,1 +1,9 @@
 # Handheld Forge uses no reflection or serialization frameworks; defaults are enough.
+
+# commons-compress: only bzip2 is used; optional codecs it can link to aren't bundled.
+-dontwarn org.tukaani.xz.**
+-dontwarn com.github.luben.zstd.**
+-dontwarn org.brotli.dec.**
+-dontwarn org.objectweb.asm.**
+-dontwarn org.osgi.**
+-dontwarn java.lang.invoke.**

@@ -13,6 +13,7 @@ class WriteException(msg: String) : IOException(msg)
 object ImageWriter {
     const val CHUNK = 1 shl 20
 
+    /** Writes a plain image file (an ISO); [expectedSha256] must match what's written. */
     fun write(
         iso: File,
         dev: BlockDevice,
@@ -21,10 +22,28 @@ object ImageWriter {
         log: LogFn,
         cancel: () -> Boolean,
     ) {
-        val size = iso.length()
+        if (dev.sizeBytes < iso.length()) throw WriteException("This drive is too small for the image.")
+        writeStream(iso, { it }, dev, expectedSha256, stage, log, cancel)
+    }
+
+    /**
+     * Writes whatever [decode] produces from [file] (identity for an ISO, a
+     * bzip2 decoder for SteamOS). Progress follows bytes read from [file], so it's
+     * accurate even when the decoded size isn't known in advance. The drive is
+     * read back and compared with the hash of what was actually written.
+     */
+    fun writeStream(
+        file: File,
+        decode: (java.io.InputStream) -> java.io.InputStream,
+        dev: BlockDevice,
+        expectedSha256: String?,
+        stage: StageFn,
+        log: LogFn,
+        cancel: () -> Boolean,
+    ) {
+        val fileSize = file.length()
         val bs = dev.blockSize
         require(CHUNK % bs == 0)
-        if (dev.sizeBytes < size) throw WriteException("This drive is too small for the image.")
         val buf = ByteArray(CHUNK)
         val md = MessageDigest.getInstance("SHA-256")
 
@@ -34,30 +53,37 @@ object ImageWriter {
         java.util.Arrays.fill(buf, 0)
         dev.write(dev.blockCount - tailBlocks, tailBlocks.toInt(), buf)
 
-        log("Writing ${"%.1f".format(size / 1e9)} GB to ${dev.name}")
+        log("Writing ${dev.name}")
         var done = 0L
-        iso.inputStream().use { input ->
-            while (done < size) {
+        val raw = CountingStream(file.inputStream().buffered(CHUNK))
+        decode(raw).use { input ->
+            while (true) {
                 if (cancel()) throw CancelledException()
-                val want = minOf(CHUNK.toLong(), size - done).toInt()
                 var got = 0
-                while (got < want) {
-                    val n = input.read(buf, got, want - got)
-                    if (n < 0) throw WriteException("The image file ended early")
+                while (got < CHUNK) {
+                    val n = input.read(buf, got, CHUNK - got)
+                    if (n < 0) break
                     got += n
                 }
+                if (got == 0) break
                 md.update(buf, 0, got)
                 val padded = roundUp(got, bs)
                 if (padded > got) java.util.Arrays.fill(buf, got, padded, 0)
+                if (done / bs + padded / bs > dev.blockCount - tailBlocks) {
+                    throw WriteException("This drive is too small for the image.")
+                }
                 dev.write(done / bs, padded / bs, buf)
                 done += got
-                stage(Stage.WRITE, done, size)
+                stage(Stage.WRITE, raw.count, fileSize)
+                if (got < CHUNK) break
             }
         }
-        if (md.digest().toHex() != expectedSha256) {
+        val size = done
+        val written = md.digest().toHex()
+        if (expectedSha256 != null && written != expectedSha256) {
             throw WriteException("The image changed while it was being written. Try again.")
         }
-        stage(Stage.WRITE, size, size)
+        stage(Stage.WRITE, fileSize, fileSize)
         dev.sync()
 
         log("Reading the drive back to confirm")
@@ -72,7 +98,7 @@ object ImageWriter {
             read += want
             stage(Stage.CHECK, read, size)
         }
-        if (check.digest().toHex() != expectedSha256) {
+        if (check.digest().toHex() != written) {
             throw WriteException(
                 "The drive didn't store the image correctly. It may be failing or counterfeit. Try another drive.",
             )
@@ -81,4 +107,10 @@ object ImageWriter {
     }
 
     private fun roundUp(n: Int, to: Int) = (n + to - 1) / to * to
+
+    private class CountingStream(inner: java.io.InputStream) : java.io.FilterInputStream(inner) {
+        var count = 0L
+        override fun read(): Int = super.read().also { if (it >= 0) count++ }
+        override fun read(b: ByteArray, off: Int, len: Int): Int = super.read(b, off, len).also { if (it > 0) count += it }
+    }
 }

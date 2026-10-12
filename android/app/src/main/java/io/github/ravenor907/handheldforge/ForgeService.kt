@@ -79,7 +79,21 @@ class ForgeService : Service() {
             val again = sticks.device(stickKey)
                 ?: throw IOException("The USB drive was unplugged during the download. Plug it back in and try again.")
             sticks.open(again).use { s ->
-                ImageWriter.write(img.file, s.disk, img.sha256, stage, Jobs::log, cancel)
+                if (distro.format == "raw-bz2") {
+                    try {
+                        ImageWriter.writeStream(
+                            img.file,
+                            { org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream(it, true) },
+                            s.disk, null, stage, Jobs::log, cancel,
+                        )
+                    } catch (e: IOException) {
+                        if (e is io.github.ravenor907.handheldforge.core.WriteException || e.message?.contains("CRC", true) != true) throw e
+                        img.file.delete() // corrupt download: fetch a fresh copy next time
+                        throw IOException("The download was corrupted, so it was deleted. Try again.")
+                    }
+                } else {
+                    ImageWriter.write(img.file, s.disk, img.sha256, stage, Jobs::log, cancel)
+                }
             }
             Jobs.finish(Outcome.OK, "")
             done("${distro.name} is ready to boot")

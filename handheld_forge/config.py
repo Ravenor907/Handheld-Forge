@@ -35,6 +35,11 @@ class Distro:
     min_drive_gb: int
     public_key: Path | None
     images: list[ImageSource] = field(default_factory=list)
+    format: str = "iso"
+
+    @property
+    def android_only(self) -> bool:
+        return self.format != "iso"
 
 
 class CatalogError(ValueError):
@@ -57,7 +62,7 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
             ImageSource(
                 label=img["label"],
                 iso_url=img["iso_url"],
-                checksum_url=img["checksum_url"],
+                checksum_url=img.get("checksum_url"),
                 signature_url=img.get("signature_url"),
                 require_signature=bool(img.get("require_signature", False)),
             )
@@ -82,7 +87,9 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
                 id=raw["id"],
                 name=raw["name"],
                 edition=raw.get("edition", ""),
-                enabled=bool(raw.get("enabled", False)),
+                # Raw disk images need a byte-for-byte write, which the desktop app doesn't do.
+                enabled=bool(raw.get("enabled", False)) and raw.get("format", "iso") == "iso",
+                format=raw.get("format", "iso"),
                 min_drive_gb=int(raw.get("min_drive_gb", 16)),
                 public_key=key_path,
                 images=images,

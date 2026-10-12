@@ -54,11 +54,15 @@ class Downloader(
     }
 
     /** Size from HEAD, or null if the file isn't published. */
-    fun remoteSize(url: String): Long? {
+    fun remoteSize(url: String): Long? = remoteMeta(url)?.first
+
+    /** (size, version tag from ETag/Last-Modified) from HEAD, or null if not published. */
+    fun remoteMeta(url: String): Pair<Long, String>? {
         val c = open(url, "HEAD")
         try {
             return when (c.responseCode) {
-                in 200..299 -> c.contentLengthLong.coerceAtLeast(0)
+                in 200..299 -> c.contentLengthLong.coerceAtLeast(0) to
+                    (c.getHeaderField("ETag") ?: c.getHeaderField("Last-Modified") ?: "").trim('"', ' ')
                 403, 404, 410 -> null
                 else -> throw HttpStatus(c.responseCode)
             }
@@ -67,14 +71,16 @@ class Downloader(
         }
     }
 
-    fun resolve(distro: Distro, log: LogFn): Pair<ImageSource, Long> {
+    fun resolve(distro: Distro, log: LogFn): Pair<ImageSource, Long> = resolveMeta(distro, log).let { it.first to it.second.first }
+
+    private fun resolveMeta(distro: Distro, log: LogFn): Pair<ImageSource, Pair<Long, String>> {
         if (!distro.enabled) throw DownloadException("${distro.name} is not available yet")
         for (img in distro.images) {
             try {
-                val size = remoteSize(img.isoUrl)
-                if (size != null) {
+                val meta = remoteMeta(img.isoUrl)
+                if (meta != null) {
                     log("Using ${img.label}: ${img.filename}")
-                    return img to size
+                    return img to meta
                 }
                 log("${img.label} not found upstream, trying next")
             } catch (e: IOException) {
@@ -86,9 +92,18 @@ class Downloader(
 
     fun prepare(distro: Distro, stage: StageFn, log: LogFn, cancel: () -> Boolean): PreparedImage {
         stage(Stage.LOOKUP, 0, 0)
-        val (img, remote) = resolve(distro, log)
-        val expected = Verify.parseChecksum(fetchText(img.checksumUrl), img.filename)
-        log("Latest ${img.filename} sha256 ${expected.take(16)}...")
+        val (img, meta) = resolveMeta(distro, log)
+        val remote = meta.first
+        // Without a published checksum, the cache is keyed on the server's size and version tag.
+        val checksummed = img.checksumUrl != null
+        val expected = if (checksummed) {
+            Verify.parseChecksum(fetchText(img.checksumUrl!!), img.filename).also {
+                log("Latest ${img.filename} sha256 ${it.take(16)}...")
+            }
+        } else {
+            log("${distro.name} publishes no checksum; the image's own CRCs and a full read-back will be checked")
+            "unchecked:$remote:${meta.second}"
+        }
 
         val signature: String? = img.signatureUrl?.let { url ->
             try {
@@ -138,7 +153,11 @@ class Downloader(
         download(img.isoUrl, part, stage, cancel)
 
         stage(Stage.VERIFY, 0, 0)
-        val (actual, signed) = Verify.hashAndVerify(part, signature, key, cancel) { d, t -> stage(Stage.VERIFY, d, t) }
+        val (actual, signed) = if (checksummed) {
+            Verify.hashAndVerify(part, signature, key, cancel) { d, t -> stage(Stage.VERIFY, d, t) }
+        } else {
+            (if (part.length() == remote) expected else "size-mismatch") to false
+        }
         if (actual != expected) {
             part.delete()
             partStamp.delete()
