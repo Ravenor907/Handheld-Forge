@@ -77,6 +77,7 @@ class GuiSmokeTests(unittest.TestCase):
             w.show()
             self.assertEqual(w._distro().id, "bazzite-deck")
             self.assertFalse(w.create_btn.isEnabled())
+            app.processEvents()
             self.assertTrue(w.empty_slot.isVisible())
             shot(w, "1-no-drive")
 
@@ -89,6 +90,7 @@ class GuiSmokeTests(unittest.TestCase):
         with mock.patch.object(gui, "list_drives", return_value=[sandisk, kingston]):
             w.refresh_drives()
             self.assertEqual(w._drive(), sandisk)  # selection survives a refresh
+            app.processEvents()
             tiles = [b for b in w.drive_group.buttons() if b.isVisible()]
             self.assertEqual([t.title for t in tiles], ["SanDisk Ultra Fit", "Kingston DataTraveler"])
             self.assertFalse(w.empty_slot.isVisible())
