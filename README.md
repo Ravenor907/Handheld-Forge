@@ -6,7 +6,7 @@ Pick a system, pick a USB drive, press **Create boot drive**. No terminal, no pa
 | --- | --- |
 | Bazzite (Handheld KDE) | Ready |
 | SteamOS (Steam Deck recovery image) | Ready on Android |
-| CachyOS Handheld | Planned |
+| CachyOS Handheld | Ready on Android |
 
 ## What it does
 
@@ -48,13 +48,20 @@ Then open **Handheld Forge** from your app menu. Needs Python 3.10+.
 
 ## Android
 
-There's also an Android app in [`android/`](android/). It makes the same boot drive from a phone: plug a USB stick into the phone with a USB-C adapter, pick Bazzite, tap **Create boot drive**.
+There's also an Android app in [`android/`](android/). It makes the same boot drive from a phone: plug a USB stick into the phone with a USB-C adapter, pick a system, tap **Create boot drive**.
 
 - **Download:** [the latest APK is on the Releases page](https://github.com/Ravenor907/Handheld-Forge/releases). Android will ask you to allow installs from your browser or file manager the first time.
 - **No root.** The app talks to the stick directly over USB, writes the verified image, then reads the whole drive back to confirm it.
 - **One Android prompt.** The first time you plug a stick in, Android asks whether Handheld Forge may access it. Tick "always" and it won't ask again for that stick. That's Android's own USB permission; every app gets it.
 - **Space:** about 10 GB free on the phone for the download.
-- It runs in the background with a notification, so you can switch apps or let the screen turn off.
+- **Leave the phone alone while it works.** Android pauses or cuts off apps it thinks you've stopped using, which can stop the download or leave the drive half written. Before it erases anything, the app checks a short list and asks you to agree to leave it be:
+  - Battery at 30% or more, or charging (required: the phone also powers the drive)
+  - Connected to the internet (required)
+  - On Wi-Fi rather than mobile data (recommended: the download is several GB)
+  - Allowed to run in the background (recommended: tap it to turn off battery optimization for the app)
+
+  While it works, the screen stays on and a reminder stays at the top. If you leave anyway, it keeps going with a notification and warns you on the way out; if Android does interrupt it, the error says so, and the download resumes where it left off next time.
+- **CachyOS Handheld** is Android only for now. The phone writes the ISO byte for byte, which is how CachyOS expects it; the desktop app's file-copy method hasn't been tested with CachyOS's boot setup yet. The checksum CachyOS publishes is checked; its GPG signature isn't yet.
 - **SteamOS** is Android only for now. It writes Valve's Steam Deck recovery image, a bzip2-compressed disk image that's decompressed on the fly while writing. Valve publishes no checksum for it, so a damaged download is caught by bzip2's own block checksums instead, and the drive is still read back in full. A new image is downloaded when the server's file size or version tag changes.
 
 It reads the same `handheld_forge/distros.json` and Bazzite key as the desktop app, so adding an ISO-based system adds it to both.
@@ -71,7 +78,7 @@ handheld-forge create --device /dev/sdb
 
 ## Adding another system
 
-Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used. `"format": "raw-bz2"` marks a bzip2-compressed raw disk image (like SteamOS); those are written by the Android app only, and `checksum_url` may be `null` for them.
+Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used. `"format": "raw-bz2"` marks a bzip2-compressed raw disk image (like SteamOS); those are written by the Android app only, and `checksum_url` may be `null` for them. `"desktop": false` keeps an ISO off the desktop app (like CachyOS). CachyOS names each build by date, so its entry lists the newest build first with the previous one as a fallback; CI checks every download link on each push, so a dead link shows up as a failed `catalog-links` job.
 
 ## Development
 

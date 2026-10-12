@@ -39,7 +39,8 @@ def _log(msg: str) -> None:
 
 def cmd_distros(_: argparse.Namespace) -> int:
     for d in load_catalog():
-        print(f"{d.id:<20} {'ready' if d.enabled else 'planned':<8} {d.name}")
+        state = "ready" if d.enabled else ("android" if d.android_only else "planned")
+        print(f"{d.id:<20} {state:<8} {d.name}")
     return 0
 
 

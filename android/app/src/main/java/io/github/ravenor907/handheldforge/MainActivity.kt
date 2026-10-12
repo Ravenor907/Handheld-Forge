@@ -2,10 +2,19 @@ package io.github.ravenor907.handheldforge
 
 import android.Manifest
 import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -42,7 +51,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import io.github.ravenor907.handheldforge.core.Distro
+import io.github.ravenor907.handheldforge.core.Fix
+import io.github.ravenor907.handheldforge.core.PhoneState
+import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Stage
+import io.github.ravenor907.handheldforge.ui.AckBox
+import io.github.ravenor907.handheldforge.ui.Banner
+import io.github.ravenor907.handheldforge.ui.CheckRow
 import io.github.ravenor907.handheldforge.ui.EmptySlot
 import io.github.ravenor907.handheldforge.ui.Forge
 import io.github.ravenor907.handheldforge.ui.Gap
@@ -78,6 +93,10 @@ class MainActivity : ComponentActivity() {
     private var receiver: BroadcastReceiver? = null
     private val permissionTick = MutableStateFlow(0)
 
+    /** Bumped on every resume so the checklist re-reads the phone after a trip to Settings. */
+    private val resumeTick = MutableStateFlow(0)
+    private var demoPhone: PhoneState? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Always light system-bar icons: the app is dark regardless of the phone's theme.
@@ -92,6 +111,26 @@ class MainActivity : ComponentActivity() {
         setContent { App(catalog, demo) }
     }
 
+    override fun onStart() {
+        super.onStart()
+        Jobs.setVisible(true)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumeTick.value++
+    }
+
+    override fun onStop() {
+        Jobs.setVisible(false)
+        if (Jobs.state.value is JobState.Running && !isChangingConfigurations) {
+            Toast.makeText(
+                this, "Handheld Forge is still working. Come back and leave it open until it's done.", Toast.LENGTH_LONG,
+            ).show()
+        }
+        super.onStop()
+    }
+
     override fun onDestroy() {
         receiver?.let { unregisterReceiver(it) }
         super.onDestroy()
@@ -102,6 +141,36 @@ class MainActivity : ComponentActivity() {
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
+    private fun phoneState(): PhoneState {
+        demoPhone?.let { return it }
+        val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val plugged = (battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val caps = cm?.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        val pm = getSystemService(PowerManager::class.java)
+        return PhoneState(
+            batteryPercent = if (level >= 0 && scale > 0) level * 100 / scale else null,
+            charging = plugged,
+            online = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true,
+            unmetered = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true,
+            backgroundAllowed = pm?.isIgnoringBatteryOptimizations(packageName) == true,
+        )
+    }
+
+    private fun fix(f: Fix) = when (f) {
+        Fix.BACKGROUND -> try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        } catch (e: Exception) {
+            // Some phones hide the one-tap prompt; the full list still works.
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private val demoSticks = listOf(
         Stick("demo1", "SanDisk Ultra Fit", true, 32_000_000_000),
         Stick("demo2", "Kingston DataTraveler", false, null),
@@ -110,6 +179,10 @@ class MainActivity : ComponentActivity() {
     private fun startDemo(demo: String, catalog: List<Distro>) {
         val name = catalog.first { it.enabled }.name
         val lines = listOf("09:12:01  Using Live ISO (current installer)", "09:12:02  Latest sha256 4c1f0e9a...")
+        demoPhone = when (demo) {
+            "confirm" -> PhoneState(18, charging = false, online = true, unmetered = false, backgroundAllowed = false)
+            else -> PhoneState(76, charging = true, online = true, unmetered = true, backgroundAllowed = true)
+        }
         when (demo) {
             "working" -> Jobs.demo(JobState.Running(name, "SanDisk Ultra Fit", Stage.WRITE, 4_100_000_000, 8_300_000_000), lines)
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
@@ -126,7 +199,7 @@ class MainActivity : ComponentActivity() {
         val tick by permissionTick.collectAsState()
         var distroId by rememberSaveable { mutableStateOf(catalog.firstOrNull { it.enabled }?.id) }
         var stickKey by rememberSaveable { mutableStateOf(if (demo != null && demo != "empty") "demo1" else null) }
-        var confirming by rememberSaveable { mutableStateOf(demo == "confirm") }
+        var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ready") }
         var hint by remember { mutableStateOf("") }
         var list by remember { mutableStateOf(if (demo != null && demo != "empty") demoSticks else emptyList()) }
 
@@ -162,7 +235,7 @@ class MainActivity : ComponentActivity() {
                         confirming = false
                     }
                     JobState.Idle -> if (confirming && distro != null && stick != null) {
-                        Confirm(distro, stick, onBack = { confirming = false }) {
+                        Confirm(distro, stick, ready = demo == "confirm-ready", onBack = { confirming = false }) {
                             if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                                     this@MainActivity, Manifest.permission.POST_NOTIFICATIONS,
                                 ) != PackageManager.PERMISSION_GRANTED
@@ -241,17 +314,44 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun ColumnScope.Confirm(distro: Distro, stick: Stick, onBack: () -> Unit, onErase: () -> Unit) {
-        Spacer(Modifier.weight(1f))
+    private fun ColumnScope.Confirm(distro: Distro, stick: Stick, ready: Boolean, onBack: () -> Unit, onErase: () -> Unit) {
+        val resumed by resumeTick.collectAsState()
+        var phone by remember { mutableStateOf(phoneState()) }
+        var agreed by rememberSaveable { mutableStateOf(ready) }
+        // Battery and network change while the person reads; keep the list current.
+        LaunchedEffect(resumed) {
+            while (true) {
+                phone = phoneState()
+                delay(2000)
+            }
+        }
+        val checks = Preflight.checks(phone)
+
         Txt("Erase this drive?", Forge.title)
         Gap(8)
         Txt("Everything on it will be replaced with ${distro.name}.", Forge.hint)
-        Gap(20)
+        Gap(14)
         Tile(stick.label, stick.sizeBytes?.let { gb(it) } ?: "", selected = true, usb = true, modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.weight(2f))
+        Gap(16)
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            Txt("Before you start", Forge.brand)
+            Gap(4)
+            checks.forEach { c ->
+                CheckRow(c.title, c.detail, c.ok, c.required, onClick = c.fix?.let { f -> { fix(f) } })
+            }
+            Gap(12)
+            AckBox(
+                "I'll leave the phone alone until it's done: this app stays open, the drive stays plugged in, " +
+                    "and I won't switch apps or lock the phone. This can take 30 minutes or more.",
+                agreed,
+            ) { agreed = it }
+        }
+        Gap(16)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             QuietButton("Go back", onClick = onBack)
-            MoltenButton("Erase and create", modifier = Modifier.weight(1f), onClick = onErase)
+            MoltenButton(
+                "Erase and create", enabled = Preflight.canStart(checks, agreed), modifier = Modifier.weight(1f), onClick = onErase,
+            )
         }
     }
 
@@ -261,9 +361,22 @@ class MainActivity : ComponentActivity() {
         val frac = if (j.total > 0) j.done.toFloat() / j.total else 0f
         val overall = (STEP_WEIGHT.take(step).sum() + STEP_WEIGHT[step] * frac) / STEP_WEIGHT.sum()
         var showLog by remember { mutableStateOf(false) }
+        var backWarned by remember { mutableStateOf(false) }
         val log by Jobs.log.collectAsState()
+        // Back would close the screen mid-job; warn first, let a second press through.
+        BackHandler(enabled = !backWarned) { backWarned = true }
 
         Txt("Creating ${j.distro} on ${j.drive}", Forge.title)
+        Gap(12)
+        Banner(
+            if (backWarned) {
+                "Press back again to leave. The job keeps going, but Android may pause it while you're away, " +
+                    "which can stop the download or ruin the drive. Staying here is safest."
+            } else {
+                "Leave the phone alone until this finishes. Keep this screen open, don't switch apps or lock the phone, " +
+                    "and don't unplug the drive."
+            },
+        )
         Spacer(Modifier.weight(1f))
         Txt("${(overall * 100).toInt()}%", Forge.big)
         HeatBar(overall, active = true)

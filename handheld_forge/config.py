@@ -36,10 +36,13 @@ class Distro:
     public_key: Path | None
     images: list[ImageSource] = field(default_factory=list)
     format: str = "iso"
+    # False for systems only the Android app writes (byte-for-byte images, or ISOs the
+    # desktop builder hasn't been tested with).
+    desktop: bool = True
 
     @property
     def android_only(self) -> bool:
-        return self.format != "iso"
+        return self.format != "iso" or not self.desktop
 
 
 class CatalogError(ValueError):
@@ -88,8 +91,10 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
                 name=raw["name"],
                 edition=raw.get("edition", ""),
                 # Raw disk images need a byte-for-byte write, which the desktop app doesn't do.
-                enabled=bool(raw.get("enabled", False)) and raw.get("format", "iso") == "iso",
+                enabled=bool(raw.get("enabled", False)) and raw.get("format", "iso") == "iso"
+                and bool(raw.get("desktop", True)),
                 format=raw.get("format", "iso"),
+                desktop=bool(raw.get("desktop", True)),
                 min_drive_gb=int(raw.get("min_drive_gb", 16)),
                 public_key=key_path,
                 images=images,

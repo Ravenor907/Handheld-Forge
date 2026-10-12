@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -19,6 +20,8 @@ import io.github.ravenor907.handheldforge.core.Catalog
 import io.github.ravenor907.handheldforge.core.CancelledException
 import io.github.ravenor907.handheldforge.core.CorruptImageException
 import io.github.ravenor907.handheldforge.core.Distro
+import io.github.ravenor907.handheldforge.core.DownloadException
+import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Downloader
 import io.github.ravenor907.handheldforge.core.ImageWriter
 import io.github.ravenor907.handheldforge.core.Stage
@@ -40,18 +43,49 @@ class ForgeService : Service() {
         if (distroId == null || stickKey == null || worker != null) return START_NOT_STICKY
 
         ensureChannel()
-        ServiceCompat.startForeground(
-            this, NOTIFY_ID, notification("Starting", 0, 0),
-            if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0,
-        )
+        goForeground()
         worker = Thread({ run(distroId, stickKey) }, "forge").also { it.start() }
         return START_NOT_STICKY
+    }
+
+    /**
+     * "Connected device" has no time limit and fits a job that drives a USB stick; the
+     * "data sync" type Android 15 caps at 6 hours a day is only the fallback.
+     */
+    private fun goForeground() {
+        val n = notification("Starting", 0, 0)
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                ServiceCompat.startForeground(this, NOTIFY_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                return
+            } catch (e: Exception) {
+                Jobs.log("Running as a data sync service (${e.javaClass.simpleName})")
+            }
+            ServiceCompat.startForeground(this, NOTIFY_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            ServiceCompat.startForeground(this, NOTIFY_ID, n, 0)
+        }
+    }
+
+    /** Android 15 calls this when a data sync service hits its daily limit; stop cleanly. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Jobs.cancel("Android stopped the job because it ran too long in the background. Keep the app open and try again.")
     }
 
     private fun run(distroId: String, stickKey: String) {
         val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:write")
         wake.acquire(4 * 60 * 60 * 1000L)
+        // Keeps Wi-Fi at full speed with the screen off; without it some phones throttle or drop it.
+        @Suppress("DEPRECATION")
+        val wifi = (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
+            .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "HandheldForge:download")
+            .apply { setReferenceCounted(false) }
+        try {
+            wifi.acquire()
+        } catch (e: Exception) {
+            Jobs.log("No Wi-Fi lock: ${e.message}")
+        }
         try {
             val distro = catalog(this).first { it.id == distroId }
             val sticks = UsbSticks(this)
@@ -103,18 +137,26 @@ class ForgeService : Service() {
             val wasWriting = (Jobs.state.value as? JobState.Running)?.stage?.let { it >= Stage.WRITE } == true
             Jobs.finish(
                 Outcome.CANCELLED,
-                if (wasWriting) {
-                    "Stopped. The drive is unfinished, so create it again before booting from it."
-                } else {
-                    "Download paused. It picks up where it left off next time."
-                },
+                listOfNotNull(
+                    Jobs.cancelReason,
+                    if (wasWriting) {
+                        "The drive is unfinished, so create it again before booting from it."
+                    } else {
+                        "Download paused. It picks up where it left off next time."
+                    },
+                ).joinToString(" "),
             )
             done("Stopped")
         } catch (e: Exception) {
             Jobs.log("${e.javaClass.simpleName}: ${e.message}")
-            Jobs.finish(Outcome.ERROR, e.message ?: e.javaClass.simpleName)
+            val networkError = e is java.net.SocketException || e is java.net.SocketTimeoutException ||
+                e is java.net.UnknownHostException || e is javax.net.ssl.SSLException ||
+                e.message == "Connection closed early" ||
+                (e is DownloadException && e.message?.startsWith("Couldn't reach") == true)
+            Jobs.finish(Outcome.ERROR, Preflight.explain(e.message ?: e.javaClass.simpleName, Jobs.leftDuringJob, networkError))
             done("The drive wasn't finished")
         } finally {
+            if (wifi.isHeld) wifi.release()
             if (wake.isHeld) wake.release()
             worker = null
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)

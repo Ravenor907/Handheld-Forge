@@ -21,6 +21,12 @@ class CatalogTests(unittest.TestCase):
         self.assertFalse(s.enabled)
         self.assertTrue(s.android_only)
         self.assertIsNone(s.images[0].checksum_url)
+        # CachyOS's ISO is written byte for byte on Android; the desktop builder is untested with it.
+        c = get_distro("cachyos-handheld", cat)
+        self.assertFalse(c.enabled)
+        self.assertTrue(c.android_only)
+        self.assertEqual(c.format, "iso")
+        self.assertTrue(c.images[0].checksum_url.endswith(".iso.sha256"))
 
     def _load(self, distros):
         with tempfile.TemporaryDirectory() as d:

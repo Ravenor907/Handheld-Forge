@@ -40,6 +40,17 @@ jobs:
           path: screenshots/
           if-no-files-found: ignore
 
+  catalog-links:
+    # Download URLs change upstream (CachyOS names each build by date), so check them from the internet.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Every enabled system has a working download
+        run: python tests/check_catalog_links.py
+
   real-udisks:
     # Real udisks daemon + loop device + an ISO built with Bazzite's own xorriso flags,
     # including a file over 4 GiB. The result is compared with the kernel's mount of the ISO.

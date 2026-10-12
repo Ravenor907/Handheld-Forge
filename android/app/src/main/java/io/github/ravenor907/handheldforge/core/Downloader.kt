@@ -181,13 +181,22 @@ class Downloader(
     private fun download(url: String, part: File, stage: StageFn, cancel: () -> Boolean) {
         var attempt = 0
         while (true) {
+            val before = if (part.exists()) part.length() else 0L
             try {
                 downloadOnce(url, part, stage, cancel)
                 return
             } catch (e: IOException) {
-                // Phones drop Wi-Fi; resume a few times before giving up.
-                if (++attempt >= 5 || cancel()) throw e
-                Thread.sleep(2_000L * attempt)
+                // Phones drop Wi-Fi, especially when the screen goes off or another app takes
+                // over. Resume as long as each try gets somewhere; give up after a run of
+                // tries that get nothing (about a minute and a half).
+                if (e is HttpStatus && e.code in 400..499 && e.code != 408 && e.code != 429) throw e
+                if (part.exists() && part.length() > before) attempt = 0
+                if (++attempt > MAX_STALLED_TRIES || cancel()) throw e
+                val until = System.nanoTime() + minOf(2_000L * attempt, 15_000L) * 1_000_000
+                while (System.nanoTime() < until) {
+                    if (cancel()) throw CancelledException()
+                    Thread.sleep(250)
+                }
             }
         }
     }
@@ -226,6 +235,8 @@ class Downloader(
         }
     }
 }
+
+private const val MAX_STALLED_TRIES = 8
 
 class HttpStatus(val code: Int) : IOException("HTTP $code")
 

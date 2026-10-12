@@ -37,10 +37,32 @@ object Jobs {
     var cancelRequested = false
         private set
 
+    /** Why the job was stopped when it wasn't the Stop button (Android's time limit). */
+    @Volatile
+    var cancelReason: String? = null
+        private set
+
+    /** Whether the app's screen is showing; the activity keeps this current. */
+    @Volatile
+    var appVisible = true
+        private set
+
+    /** The app went to the background at some point during the current job. */
+    @Volatile
+    var leftDuringJob = false
+        private set
+
+    fun setVisible(visible: Boolean) {
+        appVisible = visible
+        if (!visible && _state.value is JobState.Running) leftDuringJob = true
+    }
+
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     fun begin(distro: String, drive: String) {
         cancelRequested = false
+        cancelReason = null
+        leftDuringJob = !appVisible
         _log.value = emptyList()
         _state.value = JobState.Running(distro, drive)
     }
@@ -55,7 +77,8 @@ object Jobs {
         if (it is JobState.Running) JobState.Finished(outcome, message, it.distro, it.drive) else it
     }
 
-    fun cancel() {
+    fun cancel(reason: String? = null) {
+        if (reason != null) cancelReason = reason
         cancelRequested = true
         _state.update { if (it is JobState.Running) it.copy(stopping = true) else it }
     }

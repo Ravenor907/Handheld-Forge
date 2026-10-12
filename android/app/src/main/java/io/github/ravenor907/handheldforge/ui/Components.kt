@@ -261,3 +261,78 @@ fun StatusMark(kind: String) {
 fun Gap(h: Int) = Spacer(Modifier.height(h.dp))
 
 val RowGap = Arrangement.spacedBy(10.dp)
+
+/** One line of the "Before you start" list: ok, warning (optional) or blocking (required). */
+@Composable
+fun CheckRow(title: String, detail: String, ok: Boolean, required: Boolean, onClick: (() -> Unit)? = null) {
+    var m = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+    if (onClick != null) m = m.clickable(role = Role.Button, onClick = onClick)
+    Row(m.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        val color = when {
+            ok -> Forge.MoltenA
+            required -> Forge.Danger
+            else -> Forge.Ash
+        }
+        Canvas(Modifier.size(24.dp)) {
+            val u = size.width / 24f
+            drawCircle(color, 11 * u, center, style = Stroke(2 * u))
+            val st = Stroke(2.5f * u, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            when {
+                ok -> drawPath(Path().apply { moveTo(7 * u, 12.5f * u); lineTo(10.5f * u, 16 * u); lineTo(17 * u, 9 * u) }, color, style = st)
+                required -> {
+                    drawLine(color, Offset(8.5f * u, 8.5f * u), Offset(15.5f * u, 15.5f * u), 2.5f * u, StrokeCap.Round)
+                    drawLine(color, Offset(15.5f * u, 8.5f * u), Offset(8.5f * u, 15.5f * u), 2.5f * u, StrokeCap.Round)
+                }
+                else -> {
+                    drawLine(color, Offset(12 * u, 7 * u), Offset(12 * u, 13 * u), 2.5f * u, StrokeCap.Round)
+                    drawCircle(color, 1.5f * u, Offset(12 * u, 17 * u))
+                }
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Txt(title, TextStyle(color = Forge.Bone, fontSize = 15.sp, fontWeight = FontWeight.SemiBold))
+            Txt(detail, TextStyle(color = if (ok || !required) Forge.Ash else Forge.Danger, fontSize = 13.sp, lineHeight = 17.sp))
+        }
+    }
+}
+
+/** A tick box the person has to tick themselves, e.g. agreeing to leave the phone alone. */
+@Composable
+fun AckBox(text: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        Modifier.fillMaxWidth().clip(shape).background(Forge.Iron)
+            .then(if (checked) Modifier.border(2.dp, Forge.molten, shape) else Modifier.border(1.dp, Forge.Seam, shape))
+            .clickable(role = Role.Checkbox) { onChange(!checked) }.padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Canvas(Modifier.size(24.dp)) {
+            val u = size.width / 24f
+            val r = CornerRadius(5 * u)
+            if (checked) {
+                drawRoundRect(Forge.molten, cornerRadius = r)
+                drawPath(
+                    Path().apply { moveTo(6 * u, 12.5f * u); lineTo(10 * u, 16.5f * u); lineTo(18 * u, 8 * u) }, Forge.Ink,
+                    style = Stroke(2.8f * u, cap = StrokeCap.Round, join = StrokeJoin.Round),
+                )
+            } else {
+                drawRoundRect(Forge.Ash, cornerRadius = r, style = Stroke(2 * u))
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Txt(text, TextStyle(color = Forge.Bone, fontSize = 14.sp, lineHeight = 19.sp), Modifier.weight(1f))
+    }
+}
+
+/** A plain warning strip, e.g. "keep this screen open" while a job runs. */
+@Composable
+fun Banner(text: String, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(12.dp)
+    Box(
+        modifier.fillMaxWidth().clip(shape).background(Forge.Iron).border(1.dp, Forge.MoltenA.copy(alpha = 0.6f), shape)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Txt(text, TextStyle(color = Forge.Bone, fontSize = 14.sp, lineHeight = 19.sp))
+    }
+}

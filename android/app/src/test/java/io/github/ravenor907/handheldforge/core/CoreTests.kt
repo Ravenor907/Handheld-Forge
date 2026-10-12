@@ -45,7 +45,7 @@ class CatalogTest {
     @Test
     fun parsesSharedCatalog() {
         val cat = Catalog.parse(repoFile("handheld_forge/distros.json").readText())
-        assertEquals(listOf("bazzite-deck", "steamos"), cat.filter { it.enabled }.map { it.id })
+        assertEquals(listOf("bazzite-deck", "steamos", "cachyos-handheld"), cat.filter { it.enabled }.map { it.id })
         val b = cat.first()
         assertEquals("Bazzite", b.name)
         assertEquals("Handheld KDE", b.edition)
@@ -59,6 +59,14 @@ class CatalogTest {
         assertEquals("steamdeck-repair-latest.img.bz2", steam.images[0].filename)
         assertEquals(null, steam.images[0].checksumUrl)
         assertFalse(steam.images[0].requireSignature)
+
+        val cachy = cat.first { it.id == "cachyos-handheld" }
+        assertEquals("iso", cachy.format)
+        assertTrue(cachy.images.size >= 2) // newest build first, older one as a fallback
+        cachy.images.forEach {
+            assertTrue(it.filename.matches(Regex("cachyos-handheld-linux-\\d{6}\\.iso")))
+            assertEquals(it.isoUrl + ".sha256", it.checksumUrl)
+        }
     }
 
     @Test
@@ -414,5 +422,49 @@ class ImageWriterTest {
         val file = bz2(ByteArray(2 * ImageWriter.CHUNK))
         val e = assertThrows<WriteException> { writeBz2(file, FakeUsbDrive(blocks = 2048)) }
         assertTrue(e.message!!.contains("too small"))
+    }
+}
+
+class PreflightTest {
+    private val good = PhoneState(80, charging = false, online = true, unmetered = true, backgroundAllowed = true)
+
+    @Test
+    fun allGoodNeedsOnlyTheTick() {
+        val checks = Preflight.checks(good)
+        assertTrue(checks.all { it.ok })
+        assertFalse(Preflight.canStart(checks, acknowledged = false))
+        assertTrue(Preflight.canStart(checks, acknowledged = true))
+    }
+
+    @Test
+    fun lowBatteryBlocksUnlessCharging() {
+        assertFalse(Preflight.canStart(Preflight.checks(good.copy(batteryPercent = 12)), true))
+        assertTrue(Preflight.canStart(Preflight.checks(good.copy(batteryPercent = 12, charging = true)), true))
+        assertTrue(Preflight.canStart(Preflight.checks(good.copy(batteryPercent = Preflight.MIN_BATTERY)), true))
+        // A phone that doesn't report its battery isn't locked out.
+        assertTrue(Preflight.canStart(Preflight.checks(good.copy(batteryPercent = null)), true))
+    }
+
+    @Test
+    fun offlineBlocks() {
+        assertFalse(Preflight.canStart(Preflight.checks(good.copy(online = false)), true))
+    }
+
+    @Test
+    fun mobileDataAndBatteryOptimizationOnlyWarn() {
+        val checks = Preflight.checks(good.copy(unmetered = false, backgroundAllowed = false))
+        assertEquals(2, checks.count { !it.ok })
+        assertTrue(checks.filter { !it.ok }.none { it.required })
+        assertEquals(Fix.BACKGROUND, checks.single { it.fix != null }.fix)
+        assertTrue(Preflight.canStart(checks, true))
+    }
+
+    @Test
+    fun explainsBackgroundFailures() {
+        assertTrue(Preflight.explain("Software caused connection abort", true, true).contains("in the background"))
+        assertTrue(Preflight.explain("timeout", false, true).contains("connection dropped"))
+        val usb = Preflight.explain("The USB drive stopped responding", true, false)
+        assertTrue(usb.startsWith("The USB drive stopped responding") && usb.contains("background"))
+        assertEquals("Drive is write-protected", Preflight.explain("Drive is write-protected", false, false))
     }
 }
