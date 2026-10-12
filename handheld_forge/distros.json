@@ -57,13 +57,6 @@
           "checksum_url": "https://iso.cachyos.org/handheld/260628/cachyos-handheld-linux-260628.iso.sha256",
           "signature_url": null,
           "require_signature": false
-        },
-        {
-          "label": "Handheld ISO, March 2026 (fallback)",
-          "iso_url": "https://iso.cachyos.org/handheld/260308/cachyos-handheld-linux-260308.iso",
-          "checksum_url": "https://iso.cachyos.org/handheld/260308/cachyos-handheld-linux-260308.iso.sha256",
-          "signature_url": null,
-          "require_signature": false
         }
       ],
       "desktop": false

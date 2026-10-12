@@ -78,7 +78,7 @@ handheld-forge create --device /dev/sdb
 
 ## Adding another system
 
-Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used. `"format": "raw-bz2"` marks a bzip2-compressed raw disk image (like SteamOS); those are written by the Android app only, and `checksum_url` may be `null` for them. `"desktop": false` keeps an ISO off the desktop app (like CachyOS). CachyOS names each build by date, so its entry lists the newest build first with the previous one as a fallback; CI checks every download link on each push, so a dead link shows up as a failed `catalog-links` job.
+Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used. `"format": "raw-bz2"` marks a bzip2-compressed raw disk image (like SteamOS); those are written by the Android app only, and `checksum_url` may be `null` for them. `"desktop": false` keeps an ISO off the desktop app (like CachyOS). CachyOS names each build by date and removes old ones, so its entry points at the current build and needs a bump when a new one ships; CI checks every download link on each push, so a dead link shows up as a failed `catalog-links` job.
 
 ## Development
 

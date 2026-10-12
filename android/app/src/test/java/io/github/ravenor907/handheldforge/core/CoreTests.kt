@@ -62,7 +62,7 @@ class CatalogTest {
 
         val cachy = cat.first { it.id == "cachyos-handheld" }
         assertEquals("iso", cachy.format)
-        assertTrue(cachy.images.size >= 2) // newest build first, older one as a fallback
+        assertTrue(cachy.images.isNotEmpty())
         cachy.images.forEach {
             assertTrue(it.filename.matches(Regex("cachyos-handheld-linux-\\d{6}\\.iso")))
             assertEquals(it.isoUrl + ".sha256", it.checksumUrl)
