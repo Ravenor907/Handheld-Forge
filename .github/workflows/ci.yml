@@ -95,3 +95,29 @@ jobs:
           sudo diff -r -x lost+found /mnt/iso /mnt/data || { echo "::error title=Data partition::files differ from the ISO"; exit 1; }
           sudo diff -r /mnt/iso/EFI /mnt/esp/EFI || { echo "::error title=EFI partition::EFI files differ"; exit 1; }
           echo "Drive matches the ISO exactly"
+
+  screenshots-temp:
+    # TEMPORARY: lets the screens be reviewed from a sandbox that can't fetch artifacts.
+    if: github.ref == 'refs/heads/password-free'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libgl1 libfontconfig1 libdbus-1-3 fonts-noto-core
+          pip install -e '.[dev]'
+      - env:
+          QT_QPA_PLATFORM: offscreen
+          HF_SCREENSHOT_DIR: /tmp/shots
+        run: pytest -q tests/test_config_and_gui.py
+      - run: |
+          cd /tmp/shots
+          git init -q -b ci-screenshots
+          git -c user.name=ci -c user.email=ci@localhost add .
+          git -c user.name=ci -c user.email=ci@localhost commit -qm screenshots
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-screenshots
