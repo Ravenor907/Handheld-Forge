@@ -117,7 +117,7 @@ def prepare_iso(
     cancel = cancel or threading.Event()
     img = resolve_image(distro, log)
 
-    stage("check", 0, 0)
+    stage("lookup", 0, 0)
     expected = parse_checksum(fetch_text(img.checksum_url), img.filename)
     log(f"Latest {img.filename} sha256: {expected[:16]}...")
 

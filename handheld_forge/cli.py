@@ -9,7 +9,7 @@ import time
 from . import APP_NAME, __version__
 from .config import get_distro, load_catalog
 from .download import prepare_iso
-from .flasher import list_drives
+from .drives import list_drives
 
 DEFAULT_DISTRO = "bazzite-deck"
 
@@ -62,12 +62,15 @@ def cmd_download(a: argparse.Namespace) -> int:
 
 
 def cmd_create(a: argparse.Namespace) -> int:
-    from .flasher import flash
+    from .builder import build_drive
 
     distro = get_distro(a.distro)
     drive = next((d for d in list_drives() if d.path == a.device), None)
     if drive is None:
         print(f"{a.device} is not an eligible USB drive. See: handheld-forge drives --all", file=sys.stderr)
+        return 1
+    if drive.size < distro.min_drive_gb * 1000**3 * 0.93:
+        print(f"Use a drive of {distro.min_drive_gb} GB or larger.", file=sys.stderr)
         return 1
     if not a.yes:
         print(f"This will ERASE everything on {drive.label}")
@@ -76,7 +79,7 @@ def cmd_create(a: argparse.Namespace) -> int:
             return 1
     bar = _Bar()
     img = prepare_iso(distro, bar, _log)
-    flash(img.path, img.sha256, drive, distro.min_drive_gb, bar, _log)
+    build_drive(drive, img.path, bar, _log)
     print(f"\n{distro.name} boot drive is ready.")
     return 0
 

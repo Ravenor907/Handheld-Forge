@@ -30,7 +30,7 @@ class ImageSource:
 class Distro:
     id: str
     name: str
-    description: str
+    edition: str
     enabled: bool
     min_drive_gb: int
     public_key: Path | None
@@ -81,7 +81,7 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
             Distro(
                 id=raw["id"],
                 name=raw["name"],
-                description=raw.get("description", ""),
+                edition=raw.get("edition", ""),
                 enabled=bool(raw.get("enabled", False)),
                 min_drive_gb=int(raw.get("min_drive_gb", 16)),
                 public_key=key_path,

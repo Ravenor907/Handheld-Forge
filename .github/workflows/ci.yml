@@ -9,8 +9,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.13"]
     steps:
@@ -18,13 +19,79 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Qt runtime libraries
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon0 libgl1 libfontconfig1 libdbus-1-3
+      - name: System packages (Qt runtime, D-Bus, PyGObject for the fake udisks)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libgl1 libfontconfig1 libdbus-1-3 \
+            fonts-noto-core dbus python3-gi
       - name: Install
         run: pip install -e '.[dev]'
       - name: Lint
         run: ruff check .
-      - name: Test (GUI runs headless)
+      - name: Test (GUI headless, screenshots saved)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest -v
+          HF_SCREENSHOT_DIR: screenshots
+        run: pytest -v --junitxml=junit.xml || (python tests/junit_annotate.py junit.xml; exit 1)
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.python == '3.13'
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: ignore
+
+  real-udisks:
+    # Real udisks daemon + loop device + an ISO built with Bazzite's own xorriso flags,
+    # including a file over 4 GiB. The result is compared with the kernel's mount of the ISO.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y udisks2 xorriso dosfstools e2fsprogs mtools
+          sudo systemctl start udisks2
+      - name: Build a Bazzite-shaped ISO
+        run: |
+          set -e
+          mkdir -p iso-root/EFI/BOOT iso-root/boot/grub2 iso-root/images/pxeboot iso-root/LiveOS
+          head -c 300000 /dev/urandom > iso-root/EFI/BOOT/BOOTX64.EFI
+          head -c 200000 /dev/urandom > iso-root/EFI/BOOT/grubx64.efi
+          printf "search --no-floppy --set=root -l 'Bazzite-Live'\nlinux /images/pxeboot/vmlinuz root=live:CDLABEL=Bazzite-Live rd.live.image\n" \
+            | tee iso-root/EFI/BOOT/grub.cfg > iso-root/boot/grub2/grub.cfg
+          head -c 9000000 /dev/urandom > iso-root/images/pxeboot/vmlinuz
+          head -c 30000000 /dev/urandom > iso-root/images/pxeboot/initrd.img
+          # Over 4 GiB forces multi-extent storage, like the real squashfs.img.
+          head -c 50000000 /dev/urandom > iso-root/LiveOS/squashfs.img
+          truncate -s 4400M iso-root/LiveOS/squashfs.img
+          truncate -s 100M uefi.img && mkfs.fat -F32 uefi.img && mcopy -i uefi.img -s iso-root/EFI ::
+          xorriso -as mkisofs -R -V Bazzite-Live -partition_offset 16 -appended_part_as_gpt \
+            -append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B ./uefi.img \
+            -iso_mbr_part_type EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 \
+            -e --interval:appended_partition_2:all:: -no-emul-boot -iso-level 3 \
+            -o test.iso iso-root
+          rm -rf iso-root uefi.img
+          ls -l test.iso
+      - name: Build the boot drive through real udisks
+        run: |
+          set -e
+          truncate -s 7G stick.img
+          LOOP=$(sudo losetup --find --show --partscan stick.img)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo env PYTHONPATH="$PWD" python3 tests/integration_udisks.py test.iso "$LOOP"
+      - name: Compare the drive with the kernel's view of the ISO
+        run: |
+          set -e
+          sudo partprobe "$LOOP" || true
+          sleep 2
+          lsblk -o NAME,FSTYPE,LABEL,PARTTYPE,SIZE "$LOOP"
+          check() { echo "$1" | grep -q "$2" || { echo "::error title=Layout::$3"; exit 1; }; }
+          check "$(lsblk -no FSTYPE,PARTTYPE "${LOOP}p1")" "vfat.*c12a7328" "partition 1 is not a FAT EFI partition"
+          check "$(lsblk -no FSTYPE,LABEL "${LOOP}p2")" "ext4 *Bazzite-Live" "partition 2 is not ext4 labeled Bazzite-Live"
+          sudo mkdir -p /mnt/iso /mnt/esp /mnt/data
+          sudo mount -o loop,ro test.iso /mnt/iso
+          sudo mount -o ro "${LOOP}p1" /mnt/esp
+          sudo mount -o ro "${LOOP}p2" /mnt/data
+          sudo diff -r -x lost+found /mnt/iso /mnt/data || { echo "::error title=Data partition::files differ from the ISO"; exit 1; }
+          sudo diff -r /mnt/iso/EFI /mnt/esp/EFI || { echo "::error title=EFI partition::EFI files differ"; exit 1; }
+          echo "Drive matches the ISO exactly"

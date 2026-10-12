@@ -10,7 +10,7 @@ BIN="$HOME/.local/bin"
 DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/handheld-forge.desktop"
 
 command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
-command -v pkexec  >/dev/null || echo "Warning: pkexec not found. Writing drives needs polkit."
+command -v gdbus   >/dev/null || echo "Warning: gdbus not found (part of glib2). It is needed to prepare drives."
 
 echo "Creating environment in $VENV"
 python3 -m venv "$VENV"
