@@ -169,6 +169,62 @@ class Tile(QAbstractButton):
         p.drawRect(QRectF(plug.x() + 3, plug.y() + 7, 3, 2))
 
 
+class EmptySlot(QWidget):
+    """Dashed placeholder where a drive will appear once plugged in."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumHeight(84)
+        self.text = "Plug in a USB drive of 16 GB or more"
+
+    def paintEvent(self, _) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        p.setPen(QPen(SEAM, 1.5, Qt.DashLine))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r, 14, 14)
+        f = QFont(self.font())
+        f.setPixelSize(15)
+        p.setFont(f)
+        p.setPen(ASH)
+        p.drawText(r, Qt.AlignCenter, self.text)
+
+
+class StatusMark(QWidget):
+    """Large ring with a check (done), a bang (error) or a bar (stopped)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kind = "ok"
+        self.setFixedSize(64, 64)
+
+    def set_kind(self, kind: str) -> None:
+        self.kind = kind
+        self.update()
+
+    def paintEvent(self, _) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(4, 4, 56, 56)
+        brush = {"ok": molten(r), "error": DANGER, "cancelled": ASH}[self.kind]
+        p.setPen(QPen(brush, 4))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(r)
+        pen = QPen(brush, 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(pen)
+        if self.kind == "ok":
+            path = QPainterPath(QPointF(20, 33))
+            path.lineTo(28, 41)
+            path.lineTo(44, 24)
+            p.drawPath(path)
+        elif self.kind == "error":
+            p.drawLine(QPointF(32, 19), QPointF(32, 35))
+            p.drawPoint(QPointF(32, 44))
+        else:
+            p.drawLine(QPointF(22, 32), QPointF(42, 32))
+
+
 class MoltenButton(QAbstractButton):
     def __init__(self, text: str) -> None:
         super().__init__()
@@ -404,6 +460,8 @@ class MainWindow(QMainWindow):
         self.drive_list = QVBoxLayout(self.drive_box)
         self.drive_list.setContentsMargins(0, 0, 0, 0)
         self.drive_list.setSpacing(10)
+        self.empty_slot = EmptySlot()
+        self.drive_list.addWidget(self.empty_slot)
         self.drive_list.addStretch()
         self.drive_group = QButtonGroup(self)
         self.drive_group.setExclusive(True)
@@ -432,6 +490,12 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.confirm_title)
         lay.addSpacing(8)
         lay.addWidget(self.confirm_text)
+        lay.addSpacing(20)
+        self.confirm_tile = Tile("", "", icon="usb")
+        self.confirm_tile.setChecked(True)
+        self.confirm_tile.setFocusPolicy(Qt.NoFocus)
+        self.confirm_tile.setAttribute(Qt.WA_TransparentForMouseEvents)
+        lay.addWidget(self.confirm_tile)
         lay.addStretch(2)
         row = QHBoxLayout()
         back = quiet_button("Go back")
@@ -481,6 +545,9 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addStretch(1)
+        self.result_mark = StatusMark()
+        lay.addWidget(self.result_mark)
+        lay.addSpacing(16)
         self.result_title = label("", "title")
         self.result_text = label("", "hint")
         lay.addWidget(self.result_title)
@@ -524,24 +591,25 @@ class MainWindow(QMainWindow):
             drives = list_drives()
         except Exception as e:
             drives = []
-            self.empty_hint.setText(f"Couldn't read the drive list: {e}")
+            self.empty_slot.text = f"Couldn't read the drive list: {e}"
         if [d.path for d in drives] == [d.path for d in self.drives] and self.drive_group.buttons():
             return
         selected = self._drive().path if self._drive() else None
         self.drives = drives
         for b in self.drive_group.buttons():
             self.drive_group.removeButton(b)
+            self.drive_list.removeWidget(b)
+            b.hide()
             b.deleteLater()
         for d in drives:
             t = Tile(d.model, d.size_label, icon="usb")
             t.setProperty("path", d.path)
             self.drive_group.addButton(t)
-            self.drive_list.insertWidget(self.drive_list.count() - 1, t)
+            self.drive_list.insertWidget(self.drive_list.count() - 2, t)
             if d.path == selected or len(drives) == 1:
                 t.setChecked(True)
-        self.empty_hint.setText("" if drives else
-                                "Plug in a USB drive of 16 GB or more. It shows up here on its own.")
-        self.empty_hint.setVisible(not drives)
+        self.empty_slot.setVisible(not drives)
+        self.empty_hint.setVisible(False)
         self._update_ready()
 
     # ------------------------------------------------------------ flow
@@ -555,9 +623,10 @@ class MainWindow(QMainWindow):
                                     f"{distro.min_drive_gb} GB or more.")
             self.empty_hint.setVisible(True)
             return
-        self.confirm_title.setText(f"Erase {drive.model}?")
-        self.confirm_text.setText(f"Everything on this {drive.size_label} drive will be replaced "
-                                  f"with {distro.name}.")
+        self.confirm_title.setText("Erase this drive?")
+        self.confirm_text.setText(f"Everything on it will be replaced with {distro.name}.")
+        self.confirm_tile.title, self.confirm_tile.subtitle = drive.model, drive.size_label
+        self.confirm_tile.update()
         self.stack.setCurrentWidget(self.confirm_page)
         self.erase_btn.setFocus()
 
@@ -638,6 +707,7 @@ class MainWindow(QMainWindow):
         self.result_log.setPlainText(self.log_view.toPlainText())
         self.result_log.setVisible(False)
         self.result_btn.danger = False
+        self.result_mark.set_kind(status)
         if status == "ok":
             self.track.set_step(len(STEPS))
             self.result_title.setText("Ready to boot")

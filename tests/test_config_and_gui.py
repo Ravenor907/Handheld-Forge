@@ -77,6 +77,7 @@ class GuiSmokeTests(unittest.TestCase):
             w.show()
             self.assertEqual(w._distro().id, "bazzite-deck")
             self.assertFalse(w.create_btn.isEnabled())
+            self.assertTrue(w.empty_slot.isVisible())
             shot(w, "1-no-drive")
 
         with mock.patch.object(gui, "list_drives", return_value=[sandisk]):
@@ -88,11 +89,14 @@ class GuiSmokeTests(unittest.TestCase):
         with mock.patch.object(gui, "list_drives", return_value=[sandisk, kingston]):
             w.refresh_drives()
             self.assertEqual(w._drive(), sandisk)  # selection survives a refresh
+            tiles = [b for b in w.drive_group.buttons() if b.isVisible()]
+            self.assertEqual([t.title for t in tiles], ["SanDisk Ultra Fit", "Kingston DataTraveler"])
+            self.assertFalse(w.empty_slot.isVisible())
             shot(w, "3-two-drives")
 
             w._ask_confirm()
             self.assertIs(w.stack.currentWidget(), w.confirm_page)
-            self.assertIn("SanDisk", w.confirm_title.text())
+            self.assertEqual(w.confirm_tile.title, "SanDisk Ultra Fit")
             shot(w, "4-confirm")
 
             w.stack.setCurrentWidget(w.work_page)
