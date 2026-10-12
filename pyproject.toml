@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handheld-forge"
+dynamic = ["version"]
+description = "One-click boot drive creator for handheld gaming distros (Bazzite first)."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+authors = [{ name = "Ravenor907" }]
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+handheld-forge = "handheld_forge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Ravenor907/Handheld-Forge"
+
+[tool.setuptools]
+packages = ["handheld_forge"]
+
+[tool.setuptools.dynamic]
+version = { attr = "handheld_forge.__version__" }
+
+[tool.setuptools.package-data]
+handheld_forge = ["distros.json", "keys/*.pub"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

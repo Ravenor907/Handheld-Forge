@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "distros": [
+    {
+      "id": "bazzite-deck",
+      "name": "Bazzite (Handheld, KDE)",
+      "description": "Boots into Steam Gaming Mode with KDE Plasma as the desktop. For AMD handhelds like the ROG Ally and Legion Go.",
+      "enabled": true,
+      "min_drive_gb": 16,
+      "public_key": "keys/bazzite-cosign.pub",
+      "images": [
+        {
+          "label": "Live ISO (current installer)",
+          "iso_url": "https://download.bazzite.gg/bazzite-deck-stable-live-amd64.iso",
+          "checksum_url": "https://download.bazzite.gg/bazzite-deck-stable-live-amd64.iso-CHECKSUM",
+          "signature_url": "https://download.bazzite.gg/bazzite-deck-stable-live-amd64.iso.sig",
+          "require_signature": true
+        },
+        {
+          "label": "Legacy ISO (fallback)",
+          "iso_url": "https://download.bazzite.gg/bazzite-deck-stable-amd64.iso",
+          "checksum_url": "https://download.bazzite.gg/bazzite-deck-stable-amd64.iso-CHECKSUM",
+          "signature_url": null,
+          "require_signature": false
+        }
+      ]
+    },
+    {
+      "id": "steamos",
+      "name": "SteamOS (planned)",
+      "description": "Not wired up yet.",
+      "enabled": false,
+      "min_drive_gb": 16,
+      "public_key": null,
+      "images": []
+    },
+    {
+      "id": "cachyos-handheld",
+      "name": "CachyOS Handheld (planned)",
+      "description": "Not wired up yet.",
+      "enabled": false,
+      "min_drive_gb": 16,
+      "public_key": null,
+      "images": []
+    }
+  ]
+}

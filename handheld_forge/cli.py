@@ -1,0 +1,116 @@
+"""Command line interface. Running with no arguments opens the GUI."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+
+from . import APP_NAME, __version__
+from .config import get_distro, load_catalog
+from .download import prepare_iso
+from .flasher import list_drives
+
+DEFAULT_DISTRO = "bazzite-deck"
+
+
+class _Bar:
+    """Single-line progress readout for the terminal."""
+
+    def __init__(self) -> None:
+        self.last = 0.0
+
+    def __call__(self, stage: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if now - self.last < 0.25 and done != total:
+            return
+        self.last = now
+        if total:
+            pct = 100 * done / total
+            sys.stderr.write(f"\r{stage:>9}: {pct:5.1f}%  {done / 1e9:6.2f}/{total / 1e9:.2f} GB")
+        else:
+            sys.stderr.write(f"\r{stage:>9}: ...{' ' * 30}")
+        sys.stderr.flush()
+
+
+def _log(msg: str) -> None:
+    sys.stderr.write(f"\n{msg}\n")
+
+
+def cmd_distros(_: argparse.Namespace) -> int:
+    for d in load_catalog():
+        print(f"{d.id:<20} {'ready' if d.enabled else 'planned':<8} {d.name}")
+    return 0
+
+
+def cmd_drives(a: argparse.Namespace) -> int:
+    drives = list_drives(include_ineligible=a.all)
+    if not drives:
+        print("No USB drives found. Plug one in and try again.")
+        return 1
+    for d in drives:
+        flag = "" if d.eligible else f"  [blocked: {d.reason}]"
+        print(f"{d.label}{flag}")
+    return 0
+
+
+def cmd_download(a: argparse.Namespace) -> int:
+    img = prepare_iso(get_distro(a.distro), _Bar(), _log)
+    sig = "verified" if img.signature_verified else "not available"
+    print(f"\n{img.path}\nsha256 {img.sha256}  signature {sig}")
+    return 0
+
+
+def cmd_create(a: argparse.Namespace) -> int:
+    from .flasher import flash
+
+    distro = get_distro(a.distro)
+    drive = next((d for d in list_drives() if d.path == a.device), None)
+    if drive is None:
+        print(f"{a.device} is not an eligible USB drive. See: handheld-forge drives --all", file=sys.stderr)
+        return 1
+    if not a.yes:
+        print(f"This will ERASE everything on {drive.label}")
+        if input("Type ERASE to continue: ").strip() != "ERASE":
+            print("Cancelled.")
+            return 1
+    bar = _Bar()
+    img = prepare_iso(distro, bar, _log)
+    flash(img.path, img.sha256, drive, distro.min_drive_gb, bar, _log)
+    print(f"\n{distro.name} boot drive is ready.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        from .gui import run
+        return run()
+
+    p = argparse.ArgumentParser(prog="handheld-forge", description=f"{APP_NAME} {__version__}")
+    p.add_argument("--version", action="version", version=__version__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("gui", help="open the window (default)")
+    sub.add_parser("distros", help="list supported operating systems")
+    s = sub.add_parser("drives", help="list USB drives you can write to")
+    s.add_argument("--all", action="store_true", help="also show blocked disks and why")
+    s = sub.add_parser("download", help="download and verify the latest ISO only")
+    s.add_argument("--distro", default=DEFAULT_DISTRO)
+    s = sub.add_parser("create", help="download, verify and write a boot drive")
+    s.add_argument("--device", required=True, help="e.g. /dev/sdb")
+    s.add_argument("--distro", default=DEFAULT_DISTRO)
+    s.add_argument("--yes", action="store_true", help="skip the ERASE confirmation")
+    a = p.parse_args(argv)
+
+    if a.cmd == "gui":
+        from .gui import run
+        return run()
+    try:
+        return {"distros": cmd_distros, "drives": cmd_drives,
+                "download": cmd_download, "create": cmd_create}[a.cmd](a)
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        return 1
