@@ -98,20 +98,28 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    if: startsWith(github.ref, 'refs/tags/android-v')
+    # Publishes when main carries a versionName that has no release yet,
+    # so bumping versionName in android/app/build.gradle.kts is what ships a build.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/android-v')
     needs: [build, screens]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: apk
-      - name: Publish release
+      - name: Publish release if this version is new
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          apk=$(ls HandheldForge-*.apk)
-          gh release create "${GITHUB_REF_NAME}" "$apk" -R "${{ github.repository }}" \
-            --title "Handheld Forge for Android ${GITHUB_REF_NAME#android-v}" \
-            --notes "Install the APK on an Android phone with USB-C, plug in a USB drive with an adapter, and create a Bazzite boot drive. Test build: signed with the shared test key."
+          v=$(grep -oP 'versionName = "\K[^"]+' android/app/build.gradle.kts)
+          tag="android-v$v"
+          if gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists, nothing to publish"
+            exit 0
+          fi
+          gh release create "$tag" "HandheldForge-$v.apk" -R "${{ github.repository }}" --target "$GITHUB_SHA" \
+            --title "Handheld Forge for Android $v" \
+            --notes "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite boot drive. Signed with the shared test key."
