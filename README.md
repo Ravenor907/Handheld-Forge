@@ -46,6 +46,18 @@ cd Handheld-Forge
 
 Then open **Handheld Forge** from your app menu. Needs Python 3.10+.
 
+## Android
+
+There's also an Android app in [`android/`](android/). It makes the same boot drive from a phone: plug a USB stick into the phone with a USB-C adapter, pick Bazzite, tap **Create boot drive**.
+
+- **Download:** [the latest APK is on the Releases page](https://github.com/Ravenor907/Handheld-Forge/releases). Android will ask you to allow installs from your browser or file manager the first time.
+- **No root.** The app talks to the stick directly over USB, writes the verified image, then reads the whole drive back to confirm it.
+- **One Android prompt.** The first time you plug a stick in, Android asks whether Handheld Forge may access it. Tick "always" and it won't ask again for that stick. That's Android's own USB permission; every app gets it.
+- **Space:** about 10 GB free on the phone for the download.
+- It runs in the background with a notification, so you can switch apps or let the screen turn off.
+
+It reads the same `handheld_forge/distros.json` and Bazzite key as the desktop app, so adding a system adds it to both.
+
 ## Command line
 
 ```bash

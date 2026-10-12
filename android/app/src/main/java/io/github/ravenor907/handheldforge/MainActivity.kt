@@ -80,7 +80,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Always light system-bar icons: the app is dark regardless of the phone's theme.
+        val bars = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
         sticks = UsbSticks(this)
         receiver = sticks.registerPermissionReceiver { permissionTick.value++ }
         val catalog = ForgeService.catalog(this)
@@ -212,7 +214,7 @@ class MainActivity : ComponentActivity() {
             catalog.forEach { d ->
                 Tile(
                     d.name, d.edition, selected = d.id == distroId, enabled = d.enabled,
-                    tag = if (d.enabled) "" else "Soon", modifier = Modifier.weight(1f),
+                    tag = if (d.enabled) "" else "Soon", subtitleLines = 2, modifier = Modifier.weight(1f),
                 ) { onDistro(d.id) }
             }
         }

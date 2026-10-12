@@ -84,6 +84,7 @@ fun Tile(
     enabled: Boolean = true,
     tag: String = "",
     usb: Boolean = false,
+    subtitleLines: Int = 1,
     onClick: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(14.dp)
@@ -91,7 +92,8 @@ fun Tile(
     if (selected) m = m.border(2.5.dp, Forge.molten, shape)
     if (onClick != null && enabled) m = m.clickable(role = Role.RadioButton, onClick = onClick)
     Box(m.alpha(if (enabled) 1f else 0.45f)) {
-        Row(Modifier.padding(horizontal = 16.dp).align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
+        val pad = if (subtitleLines > 1) 12.dp else 16.dp
+        Row(Modifier.padding(horizontal = pad).align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
             if (usb) {
                 UsbGlyph(selected)
                 Spacer(Modifier.width(16.dp))
@@ -99,7 +101,7 @@ fun Tile(
             Column {
                 Txt(title, TextStyle(color = Forge.Bone, fontSize = 17.sp, fontWeight = FontWeight.SemiBold), maxLines = 1)
                 Spacer(Modifier.height(4.dp))
-                Txt(subtitle, TextStyle(color = Forge.Ash, fontSize = 14.sp), maxLines = 1)
+                Txt(subtitle, TextStyle(color = Forge.Ash, fontSize = if (subtitleLines > 1) 13.sp else 14.sp, lineHeight = 16.sp), maxLines = subtitleLines)
             }
         }
         if (tag.isNotEmpty()) {
