@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.HandheldForge" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/slate</item>
+        <item name="android:colorBackground">@color/slate</item>
+        <item name="android:navigationBarColor">@color/slate</item>
+        <item name="android:statusBarColor">@color/slate</item>
+    </style>
+</resources>

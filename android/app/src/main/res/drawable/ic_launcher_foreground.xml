@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A USB stick glowing like hot metal, on the 108dp adaptive icon canvas (safe zone 66dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M31,40 h32 a6,6 0 0 1 6,6 v16 a6,6 0 0 1 -6,6 h-32 a6,6 0 0 1 -6,-6 v-16 a6,6 0 0 1 6,-6 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="25" android:startY="54"
+                android:endX="69" android:endY="54">
+                <item android:offset="0" android:color="#F5B83D" />
+                <item android:offset="1" android:color="#E4572E" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:fillColor="#98A2AE" android:pathData="M69,45 h12 a2,2 0 0 1 2,2 v14 a2,2 0 0 1 -2,2 h-12 z" />
+    <path android:fillColor="#1B2026" android:pathData="M74,49 h4 v3 h-4 z M74,56 h4 v3 h-4 z" />
+</vector>
