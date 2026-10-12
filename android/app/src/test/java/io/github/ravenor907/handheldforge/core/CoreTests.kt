@@ -1,6 +1,5 @@
 package io.github.ravenor907.handheldforge.core
 
-import com.sun.net.httpserver.HttpServer
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,7 +7,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.File
-import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
@@ -115,30 +113,9 @@ class DownloaderTest {
     private val kp = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }
         .generateKeyPair()
     private val files = HashMap<String, ByteArray>()
-    private val hits = ArrayList<String>()
-    private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        createContext("/") { ex ->
-            val body = files[ex.requestURI.path]
-            if (ex.requestMethod == "GET") hits.add(ex.requestURI.path)
-            if (body == null) {
-                ex.sendResponseHeaders(404, -1)
-            } else {
-                val range = ex.requestHeaders.getFirst("Range")
-                val start = range?.removePrefix("bytes=")?.substringBefore('-')?.toInt() ?: 0
-                val chunk = body.copyOfRange(start, body.size)
-                if (ex.requestMethod == "HEAD") {
-                    ex.responseHeaders.add("Content-Length", body.size.toString())
-                    ex.sendResponseHeaders(200, -1)
-                } else {
-                    ex.sendResponseHeaders(if (range != null) 206 else 200, chunk.size.toLong())
-                    ex.responseBody.use { it.write(chunk) }
-                }
-            }
-            ex.close()
-        }
-        start()
-    }
-    private val base = "http://127.0.0.1:${server.address.port}"
+    private val hits: MutableList<String> = ArrayList()
+    private val server = MiniHttp(files, hits)
+    private val base = "http://127.0.0.1:${server.port}"
     private val cache = Files.createTempDirectory("hfcache").toFile()
     private val pem = "-----BEGIN PUBLIC KEY-----\n" +
         Base64.getEncoder().encodeToString(kp.public.encoded) + "\n-----END PUBLIC KEY-----\n"
