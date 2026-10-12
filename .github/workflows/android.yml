@@ -96,18 +96,6 @@ jobs:
           name: android-screens
           path: screens/
           if-no-files-found: ignore
-      - name: Share screenshots for review (feature branch only)
-        if: github.ref == 'refs/heads/android'
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd screens
-          git init -q -b android-screens
-          git -c user.name=ci -c user.email=ci@localhost add .
-          git -c user.name=ci -c user.email=ci@localhost commit -qm screens
-          git push -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" android-screens
-    permissions:
-      contents: write
 
   release:
     if: startsWith(github.ref, 'refs/tags/android-v')
