@@ -23,6 +23,10 @@ data class Distro(
     val images: List<ImageSource>,
     /** "iso" (written as-is) or "raw-bz2" (bzip2-compressed disk image, decompressed while writing). */
     val format: String = "iso",
+    /** What to do after booting the drive, shown on the "Ready to boot" screen. */
+    val installSteps: List<String> = emptyList(),
+    /** Shown before erasing, e.g. a known problem on some handhelds. */
+    val warning: String? = null,
 ) {
     val minDriveBytes: Long get() = (minDriveGb * 1_000_000_000L * 0.93).toLong()
 }
@@ -31,9 +35,19 @@ class CatalogException(msg: String) : Exception(msg)
 
 object Catalog {
     @Suppress("UNCHECKED_CAST")
-    fun parse(text: String): List<Distro> {
+    private fun root(text: String): Map<String, Any?> {
         val root = Json.parse(text) as? Map<String, Any?> ?: throw CatalogException("catalog is not an object")
         if ((root["schema"] as? Long) != 1L) throw CatalogException("unsupported catalog schema")
+        return root
+    }
+
+    /** How to open the boot menu on common handhelds; the same for every system. */
+    @Suppress("UNCHECKED_CAST")
+    fun bootMenu(text: String): List<String> = root(text)["boot_menu"] as? List<String> ?: emptyList()
+
+    @Suppress("UNCHECKED_CAST")
+    fun parse(text: String): List<Distro> {
+        val root = root(text)
         val seen = HashSet<String>()
         return (root["distros"] as List<Map<String, Any?>>).map { raw ->
             val id = raw["id"] as String
@@ -68,6 +82,8 @@ object Catalog {
                 publicKey = raw["public_key"] as String?,
                 images = images,
                 format = format,
+                installSteps = raw["install_steps"] as? List<String> ?: emptyList(),
+                warning = raw["warning"] as String?,
             )
         }
     }

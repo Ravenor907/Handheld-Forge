@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from handheld_forge.config import CatalogError, get_distro, load_catalog
+from handheld_forge.config import CatalogError, get_distro, install_guide, load_catalog
 
 
 class CatalogTests(unittest.TestCase):
@@ -27,6 +27,19 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(c.android_only)
         self.assertEqual(c.format, "iso")
         self.assertTrue(c.images[0].checksum_url.endswith(".iso.sha256"))
+        self.assertIn("touchscreen", c.warning)
+
+    def test_install_guide(self):
+        cat = load_catalog()
+        for d in cat:
+            if d.images:  # every system you can pick says how to install it
+                self.assertGreaterEqual(len(d.install_steps), 2, d.id)
+        guide = install_guide(get_distro("bazzite-deck", cat))
+        self.assertIn("Open the boot menu", guide)
+        self.assertIn("ROG Ally", guide)
+        self.assertIn("1. Choose the USB drive", guide)
+        self.assertIn("universalblue", guide)
+        self.assertEqual(install_guide(get_distro("bazzite-deck", cat), boot_menu=[]).split("\n")[0], "Then:")
 
     def _load(self, distros):
         with tempfile.TemporaryDirectory() as d:

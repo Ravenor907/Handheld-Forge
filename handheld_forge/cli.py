@@ -7,7 +7,7 @@ import sys
 import time
 
 from . import APP_NAME, __version__
-from .config import get_distro, load_catalog
+from .config import get_distro, install_guide, load_catalog
 from .download import prepare_iso
 from .drives import list_drives
 
@@ -81,7 +81,7 @@ def cmd_create(a: argparse.Namespace) -> int:
     bar = _Bar()
     img = prepare_iso(distro, bar, _log)
     build_drive(drive, img.path, bar, _log)
-    print(f"\n{distro.name} boot drive is ready.")
+    print(f"\n{distro.name} boot drive is ready.\n\n{install_guide(distro)}")
     return 0
 
 

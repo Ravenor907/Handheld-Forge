@@ -230,8 +230,11 @@ class ForgeService : Service() {
             ContextCompat.startForegroundService(context, i)
         }
 
-        fun catalog(context: Context): List<Distro> =
-            Catalog.parse(context.assets.open("distros.json").bufferedReader().use { it.readText() })
+        private fun catalogText(context: Context) = context.assets.open("distros.json").bufferedReader().use { it.readText() }
+
+        fun catalog(context: Context): List<Distro> = Catalog.parse(catalogText(context))
+
+        fun bootMenu(context: Context): List<String> = Catalog.bootMenu(catalogText(context))
 
         fun isoDir(context: Context): File = File(context.getExternalFilesDir(null) ?: context.filesDir, "iso")
     }

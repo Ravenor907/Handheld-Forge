@@ -1,5 +1,10 @@
 {
   "schema": 1,
+  "boot_menu": [
+    "ROG Ally, Ally X, ROG Xbox Ally and Xbox Ally X: with the handheld off and the drive plugged in, hold Volume Down and press Power. Choose the USB drive.",
+    "Steam Deck: with it off and the drive plugged in, hold Volume Down and press Power, let go at the chime, then choose the USB drive.",
+    "If the drive doesn't start, turn off Secure Boot in the BIOS. Bazzite starts either way."
+  ],
   "distros": [
     {
       "id": "bazzite-deck",
@@ -23,6 +28,12 @@
           "signature_url": null,
           "require_signature": false
         }
+      ],
+      "install_steps": [
+        "Choose the USB drive in the boot menu. Bazzite starts a live session, and the built-in controls work.",
+        "Start the installer from the live session, pick the handheld's internal drive and set up your user.",
+        "If Secure Boot is on, the first restart shows a blue screen: choose Enroll MOK and type the password universalblue.",
+        "When the installer says it's done, remove the USB drive and restart."
       ]
     },
     {
@@ -41,7 +52,12 @@
           "require_signature": false
         }
       ],
-      "format": "raw-bz2"
+      "format": "raw-bz2",
+      "install_steps": [
+        "Choose the USB drive in the boot menu. The SteamOS recovery desktop opens, and the built-in controls work.",
+        "Open Re-image Steam Deck to install SteamOS. This erases everything on the internal drive.",
+        "When it finishes, remove the USB drive and restart."
+      ]
     },
     {
       "id": "cachyos-handheld",
@@ -59,7 +75,15 @@
           "require_signature": false
         }
       ],
-      "desktop": false
+      "desktop": false,
+      "warning": "The built-in controls don't work in CachyOS's installer on ROG Ally handhelds. Use the touchscreen, or plug in a keyboard and mouse.",
+      "install_steps": [
+        "Choose the USB drive in the boot menu. Use the touchscreen from here on.",
+        "Make the screen readable: System Settings > Display & Monitor > Scale, choose 150%, then Apply.",
+        "Connect to Wi-Fi from the network icon at the bottom right. The installer needs it.",
+        "In the CachyOS Hello window, tap Launch installer. If you closed it, open CachyOS Hello from the app menu at the bottom left.",
+        "Follow the installer, then remove the USB drive and restart."
+      ]
     }
   ]
 }

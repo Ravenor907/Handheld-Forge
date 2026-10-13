@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from . import APP_NAME, __version__
 from .builder import BuildError, build_drive
 from .builder import Cancelled as BuildCancelled
-from .config import Distro, load_catalog
+from .config import Distro, install_guide, load_catalog
 from .download import Cancelled as DownloadCancelled
 from .download import prepare_iso
 from .drives import GB, Drive, list_drives
@@ -711,9 +711,10 @@ class MainWindow(QMainWindow):
         if status == "ok":
             self.track.set_step(len(STEPS))
             self.result_title.setText("Ready to boot")
+            guide = install_guide(distro)
             self.result_text.setText(
                 f"{drive.model} now holds {distro.name}. Plug it into your handheld, open the boot "
-                "menu and choose the USB drive.")
+                "menu and choose the USB drive." + (f"\n\n{guide}" if guide else ""))
             self.result_btn.setText("Make another")
         elif status == "cancelled":
             self.result_title.setText("Stopped")

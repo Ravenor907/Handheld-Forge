@@ -39,6 +39,9 @@ class Distro:
     # False for systems only the Android app writes (byte-for-byte images, or ISOs the
     # desktop builder hasn't been tested with).
     desktop: bool = True
+    # What to do after booting the drive, and anything to know before erasing it.
+    install_steps: list[str] = field(default_factory=list)
+    warning: str | None = None
 
     @property
     def android_only(self) -> bool:
@@ -95,12 +98,30 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
                 and bool(raw.get("desktop", True)),
                 format=raw.get("format", "iso"),
                 desktop=bool(raw.get("desktop", True)),
+                install_steps=list(raw.get("install_steps", [])),
+                warning=raw.get("warning"),
                 min_drive_gb=int(raw.get("min_drive_gb", 16)),
                 public_key=key_path,
                 images=images,
             )
         )
     return distros
+
+
+def load_boot_menu(path: Path = CATALOG_PATH) -> list[str]:
+    """How to open the boot menu on common handhelds; the same for every system."""
+    return list(json.loads(Path(path).read_text(encoding="utf-8")).get("boot_menu", []))
+
+
+def install_guide(distro: Distro, boot_menu: list[str] | None = None) -> str:
+    """Plain-text "what now" for a finished drive: opening the boot menu, then the installer."""
+    menu = load_boot_menu() if boot_menu is None else boot_menu
+    parts = []
+    if menu:
+        parts.append("Open the boot menu:\n" + "\n".join(f"- {line}" for line in menu))
+    if distro.install_steps:
+        parts.append("Then:\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(distro.install_steps, 1)))
+    return "\n\n".join(parts)
 
 
 def get_distro(distro_id: str, catalog: list[Distro] | None = None) -> Distro:

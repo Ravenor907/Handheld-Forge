@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -76,6 +77,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 
+private const val CACHY = "cachyos-handheld"
+
 val STEPS = listOf("Download", "Verify", "Write", "Check")
 private val STEP_WEIGHT = listOf(45, 8, 37, 10)
 
@@ -96,6 +99,7 @@ class MainActivity : ComponentActivity() {
     /** Bumped on every resume so the checklist re-reads the phone after a trip to Settings. */
     private val resumeTick = MutableStateFlow(0)
     private var demoPhone: PhoneState? = null
+    private var bootMenu: List<String> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,6 +109,7 @@ class MainActivity : ComponentActivity() {
         sticks = UsbSticks(this)
         receiver = sticks.registerPermissionReceiver { permissionTick.value++ }
         val catalog = ForgeService.catalog(this)
+        bootMenu = ForgeService.bootMenu(this)
         val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         val demo = if (debuggable) intent.getStringExtra("demo") else null
         if (demo != null) startDemo(demo, catalog)
@@ -186,6 +191,9 @@ class MainActivity : ComponentActivity() {
         when (demo) {
             "working" -> Jobs.demo(JobState.Running(name, "SanDisk Ultra Fit", Stage.WRITE, 4_100_000_000, 8_300_000_000), lines)
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
+            "done-cachyos" -> Jobs.demo(
+                JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
+            )
             "error" -> Jobs.demo(
                 JobState.Finished(Outcome.ERROR, "This drive is write-protected. Check for a lock switch, or use another drive.", name, "SanDisk Ultra Fit"),
                 lines,
@@ -197,7 +205,9 @@ class MainActivity : ComponentActivity() {
     private fun App(catalog: List<Distro>, demo: String?) {
         val job by Jobs.state.collectAsState()
         val tick by permissionTick.collectAsState()
-        var distroId by rememberSaveable { mutableStateOf(catalog.firstOrNull { it.enabled }?.id) }
+        // The confirm demo shows CachyOS so its handheld warning is in the screenshot.
+        val first = if (demo == "confirm") CACHY else catalog.firstOrNull { it.enabled }?.id
+        var distroId by rememberSaveable { mutableStateOf(first) }
         var stickKey by rememberSaveable { mutableStateOf(if (demo != null && demo != "empty") "demo1" else null) }
         var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ready") }
         var hint by remember { mutableStateOf("") }
@@ -230,7 +240,7 @@ class MainActivity : ComponentActivity() {
                 Gap(18)
                 when (val j = job) {
                     is JobState.Running -> Working(j)
-                    is JobState.Finished -> Result(j) {
+                    is JobState.Finished -> Result(j, catalog.firstOrNull { it.name == j.distro }) {
                         Jobs.reset()
                         confirming = false
                     }
@@ -334,6 +344,10 @@ class MainActivity : ComponentActivity() {
         Tile(stick.label, stick.sizeBytes?.let { gb(it) } ?: "", selected = true, usb = true, modifier = Modifier.fillMaxWidth())
         Gap(16)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            distro.warning?.let {
+                Banner(it)
+                Gap(14)
+            }
             Txt("Before you start", Forge.brand)
             Gap(4)
             checks.forEach { c ->
@@ -405,36 +419,44 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun ColumnScope.Result(j: JobState.Finished, onAgain: () -> Unit) {
+    private fun ColumnScope.Result(j: JobState.Finished, distro: Distro?, onAgain: () -> Unit) {
         var showLog by remember { mutableStateOf(false) }
         val log by Jobs.log.collectAsState()
-        Spacer(Modifier.weight(1f))
-        StatusMark(
-            when (j.outcome) {
-                Outcome.OK -> "ok"
-                Outcome.ERROR -> "error"
-                Outcome.CANCELLED -> "cancelled"
-            },
-        )
-        Gap(16)
-        Txt(
-            when (j.outcome) {
-                Outcome.OK -> "Ready to boot"
-                Outcome.CANCELLED -> "Stopped"
-                Outcome.ERROR -> "The drive wasn't finished"
-            },
-            Forge.title,
-        )
-        Gap(8)
-        Txt(
-            if (j.outcome == Outcome.OK) {
-                "${j.drive} now holds ${j.distro}. Plug it into your handheld, open the boot menu and choose the USB drive."
-            } else {
-                j.message
-            },
-            Forge.hint,
-        )
-        Spacer(Modifier.weight(2f))
+        val steps = if (j.outcome == Outcome.OK) distro?.installSteps.orEmpty() else emptyList()
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (steps.isEmpty()) Gap(60)
+            StatusMark(
+                when (j.outcome) {
+                    Outcome.OK -> "ok"
+                    Outcome.ERROR -> "error"
+                    Outcome.CANCELLED -> "cancelled"
+                },
+            )
+            Gap(16)
+            Txt(
+                when (j.outcome) {
+                    Outcome.OK -> "Ready to boot"
+                    Outcome.CANCELLED -> "Stopped"
+                    Outcome.ERROR -> "The drive wasn't finished"
+                },
+                Forge.title,
+            )
+            Gap(8)
+            Txt(
+                if (j.outcome == Outcome.OK) {
+                    "${j.drive} now holds ${j.distro}. " + if (steps.isEmpty()) {
+                        "Plug it into your handheld, open the boot menu and choose the USB drive."
+                    } else {
+                        "Plug it into your handheld and follow these steps."
+                    }
+                } else {
+                    j.message
+                },
+                Forge.hint,
+            )
+            if (steps.isNotEmpty()) InstallGuide(steps)
+        }
+        Gap(12)
         if (showLog) LogBox(log)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             QuietButton("Details") { showLog = !showLog }
@@ -447,6 +469,29 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.weight(1f),
                 onClick = onAgain,
             )
+        }
+    }
+
+    /** Opening the boot menu, then the system's own install steps. */
+    @Composable
+    private fun InstallGuide(steps: List<String>) {
+        val body = TextStyle(color = Forge.Bone, fontSize = 14.sp, lineHeight = 20.sp)
+        if (bootMenu.isNotEmpty()) {
+            Gap(22)
+            Txt("Open the boot menu", Forge.brand)
+            bootMenu.forEach {
+                Gap(8)
+                Txt(it, body)
+            }
+        }
+        Gap(22)
+        Txt("Then install", Forge.brand)
+        steps.forEachIndexed { i, s ->
+            Gap(8)
+            Row {
+                Txt("${i + 1}.", body.copy(color = Forge.MoltenA), Modifier.width(24.dp))
+                Txt(s, body, Modifier.weight(1f))
+            }
         }
     }
 

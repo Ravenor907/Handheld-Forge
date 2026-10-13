@@ -63,6 +63,10 @@ class CatalogTest {
         val cachy = cat.first { it.id == "cachyos-handheld" }
         assertEquals("iso", cachy.format)
         assertTrue(cachy.images.isNotEmpty())
+        // CachyOS's installer has no controller support on the Ally: warn, and say how to get through it.
+        assertTrue(cachy.warning!!.contains("touchscreen"))
+        assertTrue(cachy.installSteps.any { "150%" in it })
+        assertEquals(null, b.warning)
         cachy.images.forEach {
             assertTrue(it.filename.matches(Regex("cachyos-handheld-linux-\\d{6}\\.iso")))
             assertEquals(it.isoUrl + ".sha256", it.checksumUrl)
@@ -74,6 +78,14 @@ class CatalogTest {
         val bad = """{"schema":1,"distros":[{"id":"x","name":"X","enabled":true,"format":"raw-xz",
             "images":[{"label":"a","iso_url":"https://e/x.img.xz","checksum_url":null}]}]}"""
         assertThrows<CatalogException> { Catalog.parse(bad) }
+    }
+
+    @Test
+    fun everyEnabledSystemHasInstallSteps() {
+        val text = repoFile("handheld_forge/distros.json").readText()
+        Catalog.parse(text).filter { it.enabled }.forEach { assertTrue(it.id, it.installSteps.size >= 2) }
+        val menu = Catalog.bootMenu(text)
+        assertTrue(menu.any { "ROG Ally" in it } && menu.any { "Steam Deck" in it })
     }
 
     @Test
