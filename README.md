@@ -5,8 +5,8 @@ Pick a system, pick a USB drive, press **Create boot drive**. No terminal, no pa
 | System | Linux desktop | Android |
 | --- | --- | --- |
 | Bazzite (Handheld KDE) | Ready | Ready |
-| SteamOS (Steam Deck recovery image) | Use Android | Ready |
-| CachyOS Handheld | Use Android | Ready |
+| SteamOS (Steam Deck recovery image) | Ready (asks for your password once) | Ready |
+| CachyOS Handheld | Ready (asks for your password once) | Ready |
 
 Both apps work the same way: a short "Before you start" check (battery, internet, metered connection) and a tick box to leave it alone, a reminder while it works, Stop asks before stopping, downloads resume through dropped connections, and when the drive is ready they show how to open the boot menu and get through that system's installer.
 
@@ -17,7 +17,7 @@ Both apps work the same way: a short "Before you start" check (battery, internet
 3. **Builds the drive** (see below), then unmounts it, mounts it fresh and **reads every file back** to confirm it landed intact.
 4. **Ejects it**, ready to plug into your handheld.
 
-## Why it never asks for a password
+## Why Bazzite never asks for a password
 
 Raw-imaging a USB stick (what `dd` does) is something Linux only lets an admin do, which is why some tools pop up a password prompt.
 
@@ -30,7 +30,7 @@ Bazzite's live boot looks for its files by that label, so the stick boots exactl
 
 Every call tells the system *never* to prompt. If a system's rules would require a password anyway, Handheld Forge stops and says so instead of showing a dialog.
 
-That's also why SteamOS and CachyOS are Android only. SteamOS's recovery image is a whole disk image, and CachyOS expects its ISO written as is, so both need a byte-for-byte write, which Linux only allows with an admin password. The phone talks to the stick directly over USB, so it can write them without one.
+SteamOS and CachyOS are different: SteamOS's recovery image is a whole disk image, and CachyOS expects its ISO written as is, so both need a byte-for-byte write. Linux only allows that after an admin password, so for these two the desktop app asks udisks to open the drive and your desktop shows its own password window, once, when writing starts. Nothing else needs it, and the app never sees your password. The image is then written (SteamOS's is decompressed on the fly), the whole drive is read back bypassing the cache and compared, and the drive is ejected. On SteamOS desktop mode, set a password first with `passwd`. The Android app writes them with no password, since the phone talks to the stick directly over USB.
 
 ## Safety
 
@@ -87,8 +87,8 @@ There's also an Android app in [`android/`](android/). It makes the same boot dr
 
   While it works, the screen stays on and a reminder stays at the top. If you leave anyway, it keeps going with a notification and warns you on the way out; if Android does interrupt it, the error says so, and the download resumes where it left off next time.
 - **Install help.** When the drive is ready, the app shows how to open the boot menu on ROG Ally, Ally X, ROG Xbox Ally and Steam Deck handhelds, then the steps for the system you picked. The desktop app and `handheld-forge create` print the same steps.
-- **CachyOS Handheld** is Android only for now. The built-in controls don't work in CachyOS's installer on ROG Ally handhelds (they do in Bazzite's and SteamOS's), so the app warns before erasing and walks you through it on the touchscreen, starting with setting the display scale to 150%. The phone writes the ISO byte for byte, which is how CachyOS expects it; the desktop app's file-copy method hasn't been tested with CachyOS's boot setup yet. The checksum CachyOS publishes is checked; its GPG signature isn't yet.
-- **SteamOS** is Android only for now. It writes Valve's Steam Deck recovery image, a bzip2-compressed disk image that's decompressed on the fly while writing. Valve publishes no checksum for it, so a damaged download is caught by bzip2's own block checksums instead, and the drive is still read back in full. A new image is downloaded when the server's file size or version tag changes.
+- **CachyOS Handheld**: the built-in controls don't work in CachyOS's installer on ROG Ally handhelds (they do in Bazzite's and SteamOS's), so the app warns before erasing and walks you through it on the touchscreen, starting with setting the display scale to 150%. Both apps write the ISO byte for byte, which is how CachyOS expects it (the desktop app asks for your password for that). The checksum CachyOS publishes is checked; its GPG signature isn't yet.
+- **SteamOS**: both apps write Valve's Steam Deck recovery image, a bzip2-compressed disk image that's decompressed on the fly while writing. Valve publishes no checksum for it, so a damaged download is caught by bzip2's own block checksums instead, and the drive is still read back in full. A new image is downloaded when the server's file size or version tag changes.
 
 It reads the same `handheld_forge/distros.json` and Bazzite key as the desktop app, so adding an ISO-based system adds it to both.
 
@@ -104,7 +104,7 @@ handheld-forge create --device /dev/sdb
 
 ## Adding another system
 
-Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used. `"format": "raw-bz2"` marks a bzip2-compressed raw disk image (like SteamOS); those are written by the Android app only, and `checksum_url` may be `null` for them. `"desktop": false` keeps an ISO off the desktop app (like CachyOS). `install_steps` is what to do after booting the drive, `warning` is shown before erasing, and the top-level `boot_menu` lists how to open the boot menu on common handhelds. CachyOS names each build by date and removes old ones, so its entry points at the current build and needs a bump when a new one ships; CI checks every download link on each push, so a dead link shows up as a failed `catalog-links` job.
+Each system is an entry in [`handheld_forge/distros.json`](handheld_forge/distros.json): ISO URL, checksum URL, optional signature URL, and the publisher's public key in `handheld_forge/keys/`. List several images per system and the first one that exists upstream is used. `"format": "raw-bz2"` marks a bzip2-compressed raw disk image (like SteamOS), and `checksum_url` may be `null` for it. Those, and ISOs marked `"write": "raw"` (like CachyOS), are written byte for byte; the desktop app asks for the password for that. Other ISOs are copied file by file on the desktop, with no password. `install_steps` is what to do after booting the drive, `warning` is shown before erasing, and the top-level `boot_menu` lists how to open the boot menu on common handhelds. CachyOS names each build by date and removes old ones, so its entry points at the current build and needs a bump when a new one ships; CI checks every download link on each push, so a dead link shows up as a failed `catalog-links` job.
 
 ## Development
 

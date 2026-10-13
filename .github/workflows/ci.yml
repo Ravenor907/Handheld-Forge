@@ -106,4 +106,23 @@ jobs:
           sudo diff -r -x lost+found /mnt/iso /mnt/data || { echo "::error title=Data partition::files differ from the ISO"; exit 1; }
           sudo diff -r /mnt/iso/EFI /mnt/esp/EFI || { echo "::error title=EFI partition::EFI files differ"; exit 1; }
           echo "Drive matches the ISO exactly"
+      - name: Byte-for-byte write through real udisks (SteamOS / CachyOS path)
+        run: |
+          set -e
+          # As a normal user, like the app. A polkit rule stands in for typing the password.
+          printf '%s\n' 'polkit.addRule(function(action, subject) {' \
+            '  if (action.id.indexOf("org.freedesktop.udisks2.") == 0 && subject.user == "runner") return polkit.Result.YES;' \
+            '});' | sudo tee /etc/polkit-1/rules.d/49-handheld-forge-ci.rules
+          sudo systemctl restart polkit 2>/dev/null || true
+          python3 -m venv venv && venv/bin/pip install --quiet --no-cache-dir PySide6
+          # A disk-like image: random stretches and zeros, not a multiple of 4 KiB, bzip2'd in two streams.
+          python3 -c "import os,random; r=random.Random(1); open('raw.img','wb').write(b''.join(r.randbytes(200000) if i%2 else bytes(150000) for i in range(300))+b'end')"
+          head -c 26000003 raw.img | bzip2 > raw.img.bz2 && tail -c +26000004 raw.img | bzip2 >> raw.img.bz2
+          truncate -s 200M raw-stick.img
+          LOOP2=$(sudo losetup --find --show raw-stick.img)
+          PYTHONPATH="$PWD" venv/bin/python tests/integration_raw.py raw.img.bz2 "$LOOP2" --bz2
+          sudo cmp -n "$(stat -c%s raw.img)" raw.img "$LOOP2" || { echo "::error title=Raw write::drive differs from the image"; exit 1; }
+          PYTHONPATH="$PWD" venv/bin/python tests/integration_raw.py raw.img "$LOOP2"
+          sudo cmp -n "$(stat -c%s raw.img)" raw.img "$LOOP2" || { echo "::error title=Raw write::drive differs from the image"; exit 1; }
+          echo "Byte-for-byte writes match the image"
 

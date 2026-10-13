@@ -75,7 +75,7 @@
           "require_signature": false
         }
       ],
-      "desktop": false,
+      "write": "raw",
       "warning": "The built-in controls don't work in CachyOS's installer on ROG Ally handhelds. Use the touchscreen, or plug in a keyboard and mouse.",
       "install_steps": [
         "Choose the USB drive in the boot menu. Use the touchscreen from here on.",

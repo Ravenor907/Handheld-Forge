@@ -40,7 +40,7 @@ def _log(msg: str) -> None:
 
 def cmd_distros(_: argparse.Namespace) -> int:
     for d in load_catalog():
-        state = "ready" if d.enabled else ("android" if d.android_only else "planned")
+        state = ("ready, asks for password" if d.needs_password else "ready") if d.enabled else "planned"
         print(f"{d.id:<20} {state:<8} {d.name}")
     return 0
 
@@ -58,8 +58,7 @@ def cmd_drives(a: argparse.Namespace) -> int:
 
 def _usable(distro) -> bool:
     if not distro.enabled:
-        print(f"{distro.name} is made with the Android app (it needs a byte-for-byte write)."
-              if distro.android_only else f"{distro.name} isn't available yet.", file=sys.stderr)
+        print(f"{distro.name} isn't available yet.", file=sys.stderr)
     return distro.enabled
 
 
@@ -74,7 +73,7 @@ def cmd_download(a: argparse.Namespace) -> int:
 
 
 def cmd_create(a: argparse.Namespace) -> int:
-    from .builder import build_drive
+    from .maker import make_drive
 
     distro = get_distro(a.distro)
     if not _usable(distro):
@@ -94,6 +93,8 @@ def cmd_create(a: argparse.Namespace) -> int:
         return 1
     if not a.yes:
         print(f"This will ERASE everything on {drive.label}")
+        if distro.needs_password:
+            print(f"{distro.name} is written byte for byte, so Linux will ask for your password once.")
         print("Leave the drive plugged in until it's done. This can take 30 minutes or more.")
         if input("Type ERASE to continue: ").strip() != "ERASE":
             print("Cancelled.")
@@ -101,7 +102,7 @@ def cmd_create(a: argparse.Namespace) -> int:
     bar = _Bar()
     with SleepBlocker():
         img = prepare_iso(distro, bar, _log)
-        build_drive(drive, img.path, bar, _log)
+        make_drive(distro, drive, img.path, bar, _log)
     print(f"\n{distro.name} boot drive is ready.\n\n{install_guide(distro)}")
     return 0
 

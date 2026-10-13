@@ -6,6 +6,10 @@ mount (like a real remount can). Crucially it rejects, as NotAuthorized, any
 call whose options don't include auth.no_user_interaction=true: that is the
 call that would pop up a password prompt on a real system.
 
+OpenDevice is the one call allowed to prompt (it stands for the desktop's password
+window): it hands out a file descriptor for disk.img in the store directory, sized
+FAKE_SIZE. FAKE_DISMISS=1 makes it act as if the password window was closed.
+
 Env: FAKE_DENY=<Method>  always refuse that method as NotAuthorized
      FAKE_AUTOMOUNT=1    mount new partitions immediately, like a desktop would
      FAKE_SIZE=<bytes>   disk size (default 32 GB)
@@ -26,6 +30,9 @@ XML = """
 <node>
  <interface name="org.freedesktop.UDisks2.Block">
   <method name="Format"><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/></method>
+  <method name="OpenDevice">
+   <arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="h" direction="out"/>
+  </method>
   <property name="Size" type="t" access="read"/>
   <property name="HintSystem" type="b" access="read"/>
   <property name="Drive" type="o" access="read"/>
@@ -101,7 +108,26 @@ def unregister(path):
 def on_call(c, sender, path, iface, method, params, inv):
     args = params.unpack()
     name = path.rsplit("/", 1)[-1]
-    if method == "Format":
+    if method == "OpenDevice":
+        mode, opts = args
+        if os.environ.get("FAKE_DENY") == method:
+            deny(inv)
+            return
+        if os.environ.get("FAKE_DISMISS"):
+            inv.return_dbus_error("org.freedesktop.UDisks2.Error.NotAuthorizedDismissed",
+                                  "The authentication dialog was dismissed")
+            return
+        log(path, method, mode=mode, options=opts)
+        disk = os.path.join(base, "disk.img")
+        if not os.path.exists(disk):
+            with open(disk, "wb") as f:
+                f.truncate(state["size"])
+        fd = os.open(disk, os.O_RDWR)
+        fds = Gio.UnixFDList.new()
+        idx = fds.append(fd)
+        os.close(fd)
+        inv.return_value_with_unix_fd_list(GLib.Variant("(h)", (idx,)), fds)
+    elif method == "Format":
         if not allowed(inv, method, args[1]):
             return
         log(path, method, table=args[0], options=args[1])

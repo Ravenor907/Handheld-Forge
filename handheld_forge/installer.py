@@ -350,15 +350,18 @@ def uninstall(p: Paths | None = None, keep_downloads: bool = False, keep_source:
         else:
             item.path.unlink()
         removed.append(item.path)
-    for folder in (p.bin_link.parent, p.desktop.parent):
-        try:
-            folder.rmdir()  # only succeeds when empty
-        except OSError:
-            pass
     # A rule hiding the app would also hide a later reinstall, so it goes too.
     removed += clear_menu_overrides()
     if removed or app:
         refresh_menus(p.desktop.parent)
+    for folder in (p.bin_link.parent, p.desktop.parent):
+        try:
+            # Outside KDE, the menu refresh leaves a generated mimeinfo.cache; on its own it's empty.
+            if [f.name for f in folder.iterdir()] == ["mimeinfo.cache"]:
+                (folder / "mimeinfo.cache").unlink()
+            folder.rmdir()  # only succeeds when empty
+        except OSError:
+            pass
     close_running(running_copies(p))
     if before_last_step:
         before_last_step([*removed, *(i.path for i in app)])

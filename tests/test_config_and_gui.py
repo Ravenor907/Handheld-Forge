@@ -12,20 +12,19 @@ class CatalogTests(unittest.TestCase):
     def test_shipped_catalog(self):
         cat = load_catalog()
         enabled = [d.id for d in cat if d.enabled]
-        self.assertEqual(enabled, ["bazzite-deck"])
+        self.assertEqual(enabled, ["bazzite-deck", "steamos", "cachyos-handheld"])
         b = get_distro("bazzite-deck", cat)
         self.assertTrue(b.images[0].require_signature)
         self.assertEqual(b.images[0].filename, "bazzite-deck-stable-live-amd64.iso")
         self.assertEqual((b.name, b.edition), ("Bazzite", "Handheld KDE"))
-        # SteamOS is a raw bzip2 disk image: offered on Android, not written by the desktop app.
+        self.assertFalse(b.needs_password)  # Bazzite is copied file by file, no password
+        # SteamOS is a raw bzip2 disk image, written byte for byte (needs the password on desktop).
         s = get_distro("steamos", cat)
-        self.assertFalse(s.enabled)
-        self.assertTrue(s.android_only)
+        self.assertTrue(s.needs_password)
         self.assertIsNone(s.images[0].checksum_url)
-        # CachyOS's ISO is written byte for byte on Android; the desktop builder is untested with it.
+        # CachyOS's ISO is written as is too.
         c = get_distro("cachyos-handheld", cat)
-        self.assertFalse(c.enabled)
-        self.assertTrue(c.android_only)
+        self.assertTrue(c.needs_password)
         self.assertEqual(c.format, "iso")
         self.assertTrue(c.images[0].checksum_url.endswith(".iso.sha256"))
         self.assertIn("touchscreen", c.warning)
@@ -143,6 +142,18 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("Plug in the charger", w.check_labels[0].text())
             gui.read_state.return_value = MachineState(80, True, True, True)
             w._refresh_checks()
+
+            # SteamOS and CachyOS can be picked; the erase screen says the password comes once.
+            self.assertTrue(all(b.isEnabled() for b in w.os_group.buttons()))
+            steam = next(b for b in w.os_group.buttons() if b.property("distro") == "steamos")
+            steam.setChecked(True)
+            w._ask_confirm()
+            self.assertTrue(w.confirm_warning.isVisibleTo(w))
+            self.assertIn("password", w.confirm_warning.text())
+            shot(w, "4b-confirm-steamos")
+            w.stack.setCurrentWidget(w.choose_page)
+            next(b for b in w.os_group.buttons() if b.property("distro") == "bazzite-deck").setChecked(True)
+            w._ask_confirm()
 
             w.stack.setCurrentWidget(w.work_page)
             w.work_title.setText("Creating Bazzite on SanDisk Ultra Fit")

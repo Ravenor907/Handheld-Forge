@@ -62,16 +62,23 @@ def fetch_text(url: str, max_bytes: int = 64 * 1024) -> str:
         return r.read(max_bytes).decode("utf-8", "replace")
 
 
-def remote_size(url: str) -> int | None:
-    """Size from a HEAD request, or None if the file isn't there."""
+def remote_meta(url: str) -> tuple[int, str] | None:
+    """(size, version tag from ETag or Last-Modified) from a HEAD request, or None if it isn't there."""
     try:
         with urllib.request.urlopen(_request(url, "HEAD"), timeout=TIMEOUT) as r:
             length = r.headers.get("Content-Length")
-            return int(length) if length else 0
+            tag = (r.headers.get("ETag") or r.headers.get("Last-Modified") or "").strip('" ')
+            return (int(length) if length else 0), tag
     except urllib.error.HTTPError as e:
         if e.code in (403, 404, 410):
             return None
         raise
+
+
+def remote_size(url: str) -> int | None:
+    """Size from a HEAD request, or None if the file isn't there."""
+    meta = remote_meta(url)
+    return None if meta is None else meta[0]
 
 
 def resolve_image(distro: Distro, log: LogFn = print) -> ImageSource:
@@ -153,8 +160,16 @@ def prepare_iso(
     img = resolve_image(distro, log)
 
     stage("lookup", 0, 0)
-    expected = parse_checksum(fetch_text(img.checksum_url), img.filename)
-    log(f"Latest {img.filename} sha256: {expected[:16]}...")
+    checksummed = img.checksum_url is not None
+    if checksummed:
+        expected = parse_checksum(fetch_text(img.checksum_url), img.filename)
+        log(f"Latest {img.filename} sha256: {expected[:16]}...")
+    else:
+        # No published checksum (SteamOS): the cache is keyed on the server's size and
+        # version tag, and the image's own bzip2 checksums catch damage while writing.
+        meta = remote_meta(img.iso_url) or (0, "")
+        expected = f"unchecked:{meta[0]}:{meta[1]}"
+        log(f"{distro.name} publishes no checksum; the image's own checks and a read-back are used")
 
     signature = None
     if img.signature_url:
@@ -203,12 +218,15 @@ def prepare_iso(
     _download(img.iso_url, part, stage, cancel)
 
     stage("verify", 0, 0)
-    actual = sha256_file(part, lambda d, t: stage("verify", d, t))
+    if checksummed:
+        actual = sha256_file(part, lambda d, t: stage("verify", d, t))
+    else:
+        actual = expected if not size or part.stat().st_size == size else "size-mismatch"
     if actual != expected:
         part.unlink(missing_ok=True)
         part_stamp.unlink(missing_ok=True)
         raise VerificationError("Downloaded ISO checksum mismatch, deleted it. Try again.")
-    log("Checksum OK")
+    log("Checksum OK" if checksummed else "Download complete")
     signed = check_sig()
 
     stamp.unlink(missing_ok=True)

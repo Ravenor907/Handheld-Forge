@@ -36,16 +36,17 @@ class Distro:
     public_key: Path | None
     images: list[ImageSource] = field(default_factory=list)
     format: str = "iso"
-    # False for systems only the Android app writes (byte-for-byte images, or ISOs the
-    # desktop builder hasn't been tested with).
-    desktop: bool = True
+    # How the desktop app makes the drive: "copy" lays out partitions and copies the ISO's
+    # files (no password); "raw" writes the image byte for byte, which Linux only allows
+    # after the admin password (SteamOS's disk image, CachyOS's ISO).
+    write: str = "copy"
     # What to do after booting the drive, and anything to know before erasing it.
     install_steps: list[str] = field(default_factory=list)
     warning: str | None = None
 
     @property
-    def android_only(self) -> bool:
-        return self.format != "iso" or not self.desktop
+    def needs_password(self) -> bool:
+        return self.write == "raw"
 
 
 class CatalogError(ValueError):
@@ -93,11 +94,9 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
                 id=raw["id"],
                 name=raw["name"],
                 edition=raw.get("edition", ""),
-                # Raw disk images need a byte-for-byte write, which the desktop app doesn't do.
-                enabled=bool(raw.get("enabled", False)) and raw.get("format", "iso") == "iso"
-                and bool(raw.get("desktop", True)),
+                enabled=bool(raw.get("enabled", False)),
                 format=raw.get("format", "iso"),
-                desktop=bool(raw.get("desktop", True)),
+                write="raw" if raw.get("format", "iso") != "iso" or raw.get("write") == "raw" else "copy",
                 install_steps=list(raw.get("install_steps", [])),
                 warning=raw.get("warning"),
                 min_drive_gb=int(raw.get("min_drive_gb", 16)),

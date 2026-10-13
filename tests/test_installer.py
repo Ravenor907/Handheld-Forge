@@ -151,6 +151,7 @@ class InstallerTests(unittest.TestCase):
         for path in (self.p.desktop, self.p.bin_link, self.p.app_dir, self.p.cache, src):
             self.assertFalse(path.exists() or path.is_symlink(), path)
         self.assertFalse(self.p.bin_link.parent.exists())  # ~/.local/bin was left empty, so it goes too
+        self.assertFalse(self.p.desktop.parent.exists())
         self.assertEqual(installer.removal_plan(self.p), [])  # nothing left to remove
 
     def test_app_folder_goes_last_after_saying_done(self):
@@ -183,6 +184,15 @@ class InstallerTests(unittest.TestCase):
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+    def test_a_lone_generated_mime_cache_doesnt_keep_the_folder(self):
+        installer.write_menu_entry(self.p)
+        self.refresh_patch.stop()
+        with mock.patch.object(installer, "refresh_menus",
+                               side_effect=lambda d: (d / "mimeinfo.cache").write_text("[MIME Cache]\n")):
+            installer.uninstall(self.p)
+        self.refresh_patch.start()
+        self.assertFalse(self.p.desktop.parent.exists())
 
     def test_keeps_a_non_empty_local_bin(self):
         installer.write_menu_entry(self.p)

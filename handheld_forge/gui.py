@@ -23,8 +23,12 @@ from PySide6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
-from .builder import BuildError, build_drive
+from .builder import BuildError
 from .builder import Cancelled as BuildCancelled
+from .maker import make_drive
+from .rawwrite import Cancelled as RawCancelled
+from .rawwrite import RawWriteError
+from .udisks import UDisksError
 from .config import Distro, load_boot_menu, load_catalog
 from .download import Cancelled as DownloadCancelled
 from .download import prepare_iso
@@ -90,7 +94,9 @@ QWidget#ack QLabel, QWidget#ack QCheckBox {{ background: transparent; font-size:
 
 # Steps shown while working. The engine's stages map onto these.
 STEPS = ["Download", "Verify", "Prepare", "Copy", "Check"]
-STAGE_STEP = {"lookup": 0, "download": 0, "verify": 1, "prepare": 2, "copy": 3, "sync": 3,
+# Systems written byte for byte show "Write" where the copy builder shows "Copy".
+RAW_STEPS = ["Download", "Verify", "Prepare", "Write", "Check"]
+STAGE_STEP = {"lookup": 0, "download": 0, "verify": 1, "prepare": 2, "copy": 3, "write": 3, "sync": 3,
               "check": 4, "eject": 4}
 STEP_WEIGHT = [40, 8, 4, 36, 12]
 
@@ -359,6 +365,7 @@ class StepTrack(QWidget):
         super().__init__()
         self.current = 0
         self.failed = False
+        self.steps = STEPS
         self.setFixedHeight(46)
 
     def set_step(self, i: int, failed: bool = False) -> None:
@@ -368,7 +375,7 @@ class StepTrack(QWidget):
     def paintEvent(self, _) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        n = len(STEPS)
+        n = len(self.steps)
         w = self.width()
         xs = [w * (i + 0.5) / n for i in range(n)]
         y = 10.0
@@ -389,7 +396,7 @@ class StepTrack(QWidget):
             f.setWeight(QFont.DemiBold if i == self.current else QFont.Normal)
             p.setFont(f)
             p.setPen(BONE if i == self.current else ASH)
-            p.drawText(QRectF(x - 50, y + 12, 100, 20), Qt.AlignCenter, STEPS[i])
+            p.drawText(QRectF(x - 50, y + 12, 100, 20), Qt.AlignCenter, self.steps[i])
 
 
 # ---------------------------------------------------------------- worker
@@ -410,14 +417,14 @@ class Worker(QObject):
                 img = prepare_iso(self.distro, self.stage.emit, self.log.emit, self.cancel)
                 if self.cancel.is_set():
                     raise DownloadCancelled()
-                build_drive(self.drive, img.path, self.stage.emit, self.log.emit, self.cancel)
+                make_drive(self.distro, self.drive, img.path, self.stage.emit, self.log.emit, self.cancel)
             self.finished.emit("ok", "")
         except DownloadCancelled:
             self.finished.emit("cancelled", "Download paused. It picks up where it left off next time.")
-        except BuildCancelled:
+        except (BuildCancelled, RawCancelled):
             self.finished.emit("cancelled", "Stopped. The drive is unfinished, so create it again "
                                             "before booting from it.")
-        except BuildError as e:
+        except (BuildError, RawWriteError, UDisksError) as e:
             self.finished.emit("error", str(e))
         except urllib.error.HTTPError as e:
             self.finished.emit("error", f"The download server answered {e.code}. Try again later.")
@@ -434,7 +441,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(620, 560)
+        self.resize(620, 660)
         self.setMinimumSize(480, 480)
         self.catalog = load_catalog()
         self.thread: QThread | None = None
@@ -491,11 +498,11 @@ class MainWindow(QMainWindow):
         self.os_group = QButtonGroup(self)
         self.os_group.setExclusive(True)
         for d in self.catalog:
-            t = Tile(d.name, d.edition, tag="" if d.enabled else ("Android" if d.android_only else "Soon"))
+            t = Tile(d.name, d.edition, tag="" if d.enabled else "Soon")
             t.setEnabled(d.enabled)
-            if d.android_only:
-                t.setToolTip(f"{d.name} is written byte for byte, which Linux only allows with an admin "
-                             "password. Make this one with the Android app.")
+            if d.needs_password:
+                t.setToolTip(f"{d.name} is written to the drive byte for byte, which Linux only allows "
+                             "after your password. You'll be asked once, when writing starts.")
             t.setProperty("distro", d.id)
             self.os_group.addButton(t)
             row.addWidget(t)
@@ -534,7 +541,6 @@ class MainWindow(QMainWindow):
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addStretch(1)
         self.confirm_title = label("", "title")
         self.confirm_text = label("", "hint")
         lay.addWidget(self.confirm_title)
@@ -546,9 +552,14 @@ class MainWindow(QMainWindow):
         self.confirm_tile.setFocusPolicy(Qt.NoFocus)
         self.confirm_tile.setAttribute(Qt.WA_TransparentForMouseEvents)
         lay.addWidget(self.confirm_tile)
-        lay.addSpacing(16)
+        lay.addSpacing(14)
+        # Notes, checks and the tick box scroll when they don't fit (small screens, long notes).
+        body = QWidget()
+        outer, lay = lay, QVBoxLayout(body)
+        lay.setContentsMargins(0, 0, 8, 0)
         self.confirm_warning = label("", "banner")
         lay.addWidget(self.confirm_warning)
+        lay.addSpacing(6)
         lay.addWidget(label("Before you start", "brand"))
         self.check_labels = []
         for _ in range(3):
@@ -570,7 +581,13 @@ class MainWindow(QMainWindow):
         ack_lay.addWidget(ack_text, 1)
         self.ack.toggled.connect(lambda _: self._refresh_checks(reread=False))
         lay.addWidget(ack_row)
-        lay.addStretch(2)
+        lay.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(body)
+        lay = outer
+        lay.addWidget(scroll, 1)
+        lay.addSpacing(12)
         # Battery and network change while the person reads; keep the list current.
         self.check_timer = QTimer(self, interval=3000, timeout=self._refresh_checks)
         row = QHBoxLayout()
@@ -719,8 +736,14 @@ class MainWindow(QMainWindow):
         self.confirm_text.setText(f"Everything on it will be replaced with {distro.name}.")
         self.confirm_tile.title, self.confirm_tile.subtitle = drive.model, drive.size_label
         self.confirm_tile.update()
-        self.confirm_warning.setText(distro.warning or "")
-        self.confirm_warning.setVisible(bool(distro.warning))
+        notes = []
+        if distro.needs_password:
+            notes.append(f"{distro.name} is written byte for byte, so Linux will ask for your password "
+                         "once, when writing starts. Nothing else needs it.")
+        if distro.warning:
+            notes.append(distro.warning)
+        self.confirm_warning.setText("\n\n".join(notes))
+        self.confirm_warning.setVisible(bool(notes))
         self.ack.setChecked(False)
         self._refresh_checks()
         self.check_timer.start()
@@ -753,6 +776,7 @@ class MainWindow(QMainWindow):
         self.work_title.setText(f"Creating {distro.name} on {drive.model}")
         self.percent.setText("0%")
         self.work_status.setText("Checking for the latest release")
+        self.track.steps = RAW_STEPS if distro.needs_password else STEPS
         self.track.set_step(0)
         self._step = 0
         self.bar.set_value(0, busy=True)
@@ -811,13 +835,15 @@ class MainWindow(QMainWindow):
             "lookup": "Checking for the latest release",
             "download": f"Downloading {name}",
             "verify": "Making sure the download is genuine",
-            "prepare": "Formatting the drive",
+            "prepare": ("Waiting for your password (Linux asks to allow writing the drive)"
+                        if self.worker and self.worker.distro.needs_password else "Formatting the drive"),
             "copy": "Copying files to the drive",
+            "write": "Writing the image to the drive",
             "sync": "Finishing writes",
             "check": "Reading the drive back to confirm",
             "eject": "Ejecting",
         }.get(stage, stage)
-        if total and stage in ("download", "copy"):
+        if total and stage in ("download", "copy", "write"):
             text += f", {done / GB:.1f} of {total / GB:.1f} GB"
             t0, d0 = self._rate
             now = time.monotonic()
