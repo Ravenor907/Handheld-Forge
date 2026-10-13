@@ -256,5 +256,77 @@ class GuiSmokeTests(unittest.TestCase):
         app.processEvents()
 
 
+class UnlockTests(unittest.TestCase):
+    """Experimental options stay hidden until Bazzite is tapped ten times in a row."""
+
+    def setUp(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from unittest import mock
+
+        from PySide6.QtWidgets import QApplication
+
+        from handheld_forge import gui
+        from handheld_forge.preflight import MachineState
+
+        self.app = QApplication.instance() or QApplication([])
+        self.gui = gui
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patches = [mock.patch.dict(os.environ, {"XDG_DATA_HOME": self.tmp.name}),
+                        mock.patch.object(gui, "list_drives", return_value=[]),
+                        mock.patch.object(gui, "read_state", return_value=MachineState(80, True, True, True))]
+        for p in self.patches:
+            p.start()
+        self.clock = 100.0
+        self.patches.append(mock.patch.object(gui.time, "monotonic", side_effect=lambda: self.clock))
+        self.patches[-1].start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def tap(self, w, n, gap=0.3):
+        bazzite = next(b for b in w.os_group.buttons() if b.property("distro") == "bazzite-deck")
+        for _ in range(n):
+            self.clock += gap
+            bazzite.click()
+
+    def test_ten_taps_unlock_and_it_is_remembered(self):
+        (Path(self.tmp.name) / "handheld-forge").mkdir()  # installed
+        w = self.gui.MainWindow()
+        self.assertFalse(w.exp_box.isVisibleTo(w))
+        self.assertFalse(w.hide_exp_action.isVisible())
+        self.tap(w, 4)
+        self.assertFalse(w.empty_hint.isVisibleTo(w))  # no hint for the first few taps
+        self.tap(w, 3)
+        self.assertEqual(w.empty_hint.text(), "3 more taps to show experimental options")
+        self.tap(w, 3)
+        self.assertTrue(w.exp_box.isVisibleTo(w))
+        self.assertTrue(w.hide_exp_action.isVisible())
+        self.assertIn("Experimental options are on", w.empty_hint.text())
+        w.close()
+
+        again = self.gui.MainWindow()  # next launch
+        self.assertTrue(again.exp_box.isVisibleTo(again))
+        exp = next(b for b in again.os_group.buttons() if b.property("distro") == "bazzite-deck-deck")
+        exp.setChecked(True)
+        again.hide_exp_action.trigger()
+        self.assertFalse(again.exp_box.isVisibleTo(again))
+        self.assertFalse(again._distro().experimental)  # the hidden choice was unpicked
+        self.assertFalse((Path(self.tmp.name) / "handheld-forge" / "experimental").exists())
+        again.close()
+
+    def test_a_pause_starts_the_count_again(self):
+        w = self.gui.MainWindow()
+        self.tap(w, 9)
+        self.tap(w, 1, gap=5)
+        self.assertFalse(w.exp_box.isVisibleTo(w))
+        self.tap(w, 9)
+        self.assertTrue(w.exp_box.isVisibleTo(w))
+        # Not installed (running from the code): on for this session only, nothing written.
+        self.assertFalse((Path(self.tmp.name) / "handheld-forge").exists())
+        w.close()
+
+
 if __name__ == "__main__":
     unittest.main()

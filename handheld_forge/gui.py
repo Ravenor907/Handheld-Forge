@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.error
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
@@ -125,6 +126,35 @@ def quiet_button(text: str) -> QPushButton:
     b.setProperty("role", "quiet")
     b.setCursor(Qt.PointingHandCursor)
     return b
+
+
+UNLOCK_DISTRO = "bazzite-deck"
+UNLOCK_TAPS = 10
+TAP_GAP = 3.0  # seconds; a longer pause starts the count again
+
+
+def _unlock_marker() -> Path:
+    from .installer import Paths
+    return Paths.current().app_dir / "experimental"
+
+
+def experimental_unlocked() -> bool:
+    try:
+        return _unlock_marker().exists()
+    except OSError:
+        return False
+
+
+def remember_experimental(on: bool) -> None:
+    """Kept in the app's own folder, so uninstalling removes it with everything else."""
+    m = _unlock_marker()
+    try:
+        if not on:
+            m.unlink(missing_ok=True)
+        elif m.parent.is_dir():  # not installed (running from the source): just this session
+            m.write_text("on\n")
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- widgets
@@ -475,6 +505,9 @@ class MainWindow(QMainWindow):
         menu = QMenu(self.app_menu_btn)
         menu.addAction("Check for updates", lambda: self._run_installer("update"))
         menu.addAction(f"Uninstall {APP_NAME}", lambda: self._run_installer("uninstall"))
+        self.hide_exp_action = menu.addAction("Hide experimental options",
+                                              lambda: self._set_experimental(False))
+        self.hide_exp_action.setVisible(not self.exp_box.isHidden())
         self.app_menu_btn.setMenu(menu)
         head.addWidget(self.app_menu_btn)
         lay.addLayout(head)
@@ -511,19 +544,29 @@ class MainWindow(QMainWindow):
             self.os_group.addButton(t)
             row.addWidget(t)
         lay.addLayout(row)
-        if self.experimental:
-            # Untested ways to skip the password, kept apart so nobody picks one by accident.
-            lay.addWidget(label("Experimental, untested", "hint"))
-            row = QHBoxLayout()
-            row.setSpacing(12)
-            for d in self.experimental:
-                t = Tile(d.name, d.edition)
-                t.setToolTip(d.warning or "")
-                t.setProperty("distro", d.id)
-                self.os_group.addButton(t)
-                row.addWidget(t)
-            row.addStretch(1)
-            lay.addLayout(row)
+        # Untested options stay hidden until the Bazzite tile is tapped UNLOCK_TAPS times in a row,
+        # like Android's developer options, so nobody picks one by accident.
+        self.exp_box = QWidget()
+        box = QVBoxLayout(self.exp_box)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(12)
+        box.addWidget(label("Experimental, untested", "hint"))
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        for d in self.experimental:
+            t = Tile(d.name, d.edition)
+            t.setToolTip(d.warning or "")
+            t.setProperty("distro", d.id)
+            self.os_group.addButton(t)
+            row.addWidget(t)
+        row.addStretch(1)
+        box.addLayout(row)
+        lay.addWidget(self.exp_box)
+        self.exp_box.setVisible(bool(self.experimental) and experimental_unlocked())
+        self._taps, self._last_tap = 0, 0.0
+        bazzite = next((b for b in self.os_group.buttons() if b.property("distro") == UNLOCK_DISTRO), None)
+        if bazzite:
+            bazzite.clicked.connect(self._tap_unlock)
         first = next((b for b in self.os_group.buttons() if b.isEnabled()), None)
         if first:
             first.setChecked(True)
@@ -706,6 +749,33 @@ class MainWindow(QMainWindow):
         return page
 
     # ------------------------------------------------------------ state
+
+    def _tap_unlock(self) -> None:
+        if not self.exp_box.isHidden() or not self.experimental:
+            return
+        now = time.monotonic()
+        self._taps = self._taps + 1 if now - self._last_tap < TAP_GAP else 1
+        self._last_tap = now
+        left = UNLOCK_TAPS - self._taps
+        if left <= 0:
+            self._set_experimental(True)
+            self.empty_hint.setText("Experimental options are on. Turn them off from the version menu.")
+        elif left <= 5:
+            self.empty_hint.setText(f"{left} more tap{'s' if left > 1 else ''} to show experimental options")
+        else:
+            return
+        self.empty_hint.setVisible(True)
+
+    def _set_experimental(self, on: bool) -> None:
+        self.exp_box.setVisible(on)
+        self.hide_exp_action.setVisible(on)
+        self._taps = 0
+        remember_experimental(on)
+        if not on:
+            d = self._distro()
+            if d and d.experimental:  # a hidden choice can't stay picked
+                next(b for b in self.os_group.buttons() if b.isEnabled()).setChecked(True)
+            self.empty_hint.setVisible(False)
 
     def _distro(self) -> Distro | None:
         b = self.os_group.checkedButton()
