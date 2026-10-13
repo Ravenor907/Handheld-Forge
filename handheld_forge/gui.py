@@ -32,7 +32,7 @@ from .udisks import UDisksError
 from .config import Distro, load_boot_menu, load_catalog
 from .download import Cancelled as DownloadCancelled
 from .download import prepare_iso
-from .progress import Progress
+from .progress import Progress, describe
 from .preflight import SleepBlocker, can_start, checks, explain_network, read_state
 from .drives import GB, Drive, list_drives
 
@@ -310,14 +310,17 @@ class HeatBar(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.value = 0.0
+        self.value = 0.0  # what's drawn; glides toward target, left to right
+        self.target = 0.0
         self.busy = False
         self.phase = 0.0
         self.setFixedHeight(14)
         self.timer = QTimer(self, interval=40, timeout=self._tick)
 
     def set_value(self, v: float, busy: bool = False) -> None:
-        self.value, self.busy = max(0.0, min(1.0, v)), busy
+        self.target, self.busy = max(0.0, min(1.0, v)), busy
+        if self.target < self.value:  # a new job: start again from the left
+            self.value = self.target
         if not self.timer.isActive():
             self.timer.start()
         self.update()
@@ -328,6 +331,8 @@ class HeatBar(QWidget):
 
     def _tick(self) -> None:
         self.phase = (self.phase + 0.012) % 1.0
+        if self.value < self.target:
+            self.value = min(self.target, self.value + max(0.002, (self.target - self.value) * 0.15))
         self.update()
 
     def paintEvent(self, _) -> None:
@@ -338,9 +343,9 @@ class HeatBar(QWidget):
         p.setBrush(IRON)
         p.drawRoundedRect(r, 7, 7)
         w = r.width() * self.value
-        if w < 2 and not self.busy:
+        if w < 1:
             return
-        fill = QRectF(r.x(), r.y(), max(w, 14), r.height())
+        fill = QRectF(r.x(), r.y(), max(w, r.height()), r.height())
         clip = QPainterPath()
         clip.addRoundedRect(fill, 7, 7)
         p.setClipPath(clip)
@@ -613,8 +618,18 @@ class MainWindow(QMainWindow):
         self.bar = HeatBar()
         lay.addWidget(self.bar)
         lay.addSpacing(10)
-        self.work_status = label("", "hint")
+        self.work_status = label("")  # "Step 4 of 5: Copying files to the drive"
+        self.work_status.setStyleSheet("font-size: 16px; font-weight: 600;")
         lay.addWidget(self.work_status)
+        lay.addSpacing(4)
+        self.work_detail = label("", "hint")  # amounts and time left, or what's going on
+        lay.addWidget(self.work_detail)
+        lay.addSpacing(8)
+        self.work_last = label("")  # the latest thing that happened, from the log
+        self.work_last.setStyleSheet(f"color: {ASH.name()}; font-size: 12px;")
+        lay.addWidget(self.work_last)
+        # Redraws the status every second so timers keep moving between engine updates.
+        self.status_timer = QTimer(self, interval=1000, timeout=self._render_status)
         lay.addStretch(1)
         self.track = StepTrack()
         lay.addWidget(self.track)
@@ -773,12 +788,15 @@ class MainWindow(QMainWindow):
         self._append(f"Creating {distro.name} on {drive.path}")
         self.work_title.setText(f"Creating {distro.name} on {drive.model}")
         self.percent.setText("0%")
-        self.work_status.setText("Checking for the latest release")
+        self._last = ("lookup", 0, 0)
+        self.work_last.setText("")
+        self.status_timer.start()
         self.track.steps = RAW_STEPS if distro.needs_password else STEPS
         self.track.set_step(0)
         self._step = 0
         self.progress = Progress()
         self.bar.set_value(0, busy=True)
+        self._render_status()
         self.cancel_btn.setEnabled(True)
         self.cancel_btn.setText("Stop")
         self._stop_armed = False
@@ -817,6 +835,7 @@ class MainWindow(QMainWindow):
 
     def _append(self, msg: str) -> None:
         self.log_view.appendPlainText(f"{time.strftime('%H:%M:%S')}  {msg}")
+        self.work_last.setText(msg)
 
     def on_stage(self, stage: str, done: int, total: int) -> None:
         self.progress.update(stage, done, total)
@@ -824,26 +843,18 @@ class MainWindow(QMainWindow):
         self.track.set_step(self._step)
         self.percent.setText(f"{self.progress.percent}%")
         self.bar.set_value(self.progress.fraction, busy=not total)
+        self._last = (stage, done, total)
+        self._render_status()
 
-        name = self.worker.distro.name if self.worker else ""
-        text = {
-            "lookup": "Checking for the latest release",
-            "download": f"Downloading {name}",
-            "verify": "Making sure the download is genuine",
-            "prepare": ("Waiting for your password (Linux asks to allow writing the drive)"
-                        if self.worker and self.worker.distro.needs_password else "Formatting the drive"),
-            "copy": "Copying files to the drive",
-            "write": "Writing the image to the drive",
-            "sync": "Finishing writes",
-            "check": "Reading the drive back to confirm",
-            "eject": "Ejecting",
-        }.get(stage, stage)
-        if total > 0 and stage in ("download", "copy", "write"):
-            text += f", {min(done, total) / GB:.1f} of {total / GB:.1f} GB"
-            left = self.progress.time_left(done, total)
-            if left:
-                text += f", {left}"
-        self.work_status.setText(text)
+    def _render_status(self) -> None:
+        stage, done, total = getattr(self, "_last", ("lookup", 0, 0))
+        distro = self.worker.distro if self.worker else None
+        headline, detail = describe(
+            stage, done, total, self.progress.elapsed,
+            needs_password=bool(distro and distro.needs_password), name=distro.name if distro else "",
+            time_left=self.progress.time_left(done, total))
+        self.work_status.setText(headline)
+        self.work_detail.setText(detail)
 
     def on_finished(self, status: str, message: str) -> None:
         self.thread.quit()
@@ -851,6 +862,7 @@ class MainWindow(QMainWindow):
         distro, drive = self.worker.distro, self.worker.drive
         self.thread = self.worker = None
         self.bar.stop()
+        self.status_timer.stop()
         self.result_log.setPlainText(self.log_view.toPlainText())
         self.result_log.setVisible(False)
         self.result_btn.danger = False

@@ -1,6 +1,6 @@
 import unittest
 
-from handheld_forge.progress import Progress
+from handheld_forge.progress import Progress, describe
 
 GB = 1_000_000_000
 
@@ -75,6 +75,27 @@ class ProgressTests(unittest.TestCase):
                                 ("check", GB, GB), ("eject", 0, 0)])
         self.assertEqual(seen, sorted(seen))
         self.assertEqual(seen[-1], 100)
+
+
+class DescribeTests(unittest.TestCase):
+    def test_measured_steps_show_amount_and_time(self):
+        got = describe("download", 2 * GB, 8 * GB, 30, name="Bazzite", time_left="about 6 min left")
+        self.assertEqual(got, ("Step 1 of 5: Downloading Bazzite", "2.0 of 8.0 GB, about 6 min left"))
+        self.assertEqual(describe("write", 9 * GB, 8 * GB, 10)[1], "8.0 of 8.0 GB")  # never more than total
+
+    def test_waiting_steps_explain_and_show_a_running_timer(self):
+        head, detail = describe("sync", 0, 0, 3)
+        self.assertEqual(head, "Step 4 of 5: Finishing writes")
+        self.assertNotIn("(", detail)  # no timer for the first few seconds
+        self.assertTrue(describe("sync", 0, 0, 83)[1].endswith("(1:23)"))
+        self.assertEqual(describe("eject", 0, 0, 1)[0], "Step 5 of 5: Ejecting the drive")
+
+    def test_password_wait_says_what_to_do(self):
+        head, detail = describe("prepare", 0, 0, 12, needs_password=True)
+        self.assertEqual(head, "Step 3 of 5: Waiting for your password")
+        self.assertIn("Type your password", detail)
+        self.assertTrue(detail.endswith("(0:12)"))
+        self.assertEqual(describe("prepare", 0, 0, 1)[0], "Step 3 of 5: Preparing the drive")
 
 
 if __name__ == "__main__":

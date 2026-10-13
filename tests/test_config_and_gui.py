@@ -159,6 +159,12 @@ class GuiSmokeTests(unittest.TestCase):
             w.work_title.setText("Creating Bazzite on SanDisk Ultra Fit")
             w.bar.set_value(0)
             w.on_stage("copy", 4_100_000_000, 8_300_000_000)
+            self.assertEqual(w.work_status.text(), "Step 4 of 5: Copying files to the drive")
+            self.assertAlmostEqual(w.bar.target, w.progress.fraction)  # the bar glides there, left to right
+            w.bar.value = w.bar.target
+            self.assertTrue(w.work_detail.text().startswith("4.1 of 8.3 GB"))
+            w._append("Signature verified against pinned Bazzite key")
+            self.assertEqual(w.work_last.text(), "Signature verified against pinned Bazzite key")
             self.assertEqual(w.track.current, 3)
             self.assertTrue(w.percent.text().endswith("%"))
             shot(w, "5-working")
