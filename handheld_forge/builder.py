@@ -78,6 +78,42 @@ def rewrite_archiso_label(text: str, label: str, uuid: str) -> str:
                   f"archisodevice=/dev/disk/by-uuid/{uuid}", text)
 
 
+KICKSTART_NAME = "forge-user.ks"
+
+
+def user_kickstart(name: str, full_name: str, password: str) -> str:
+    """Installer settings that keep everything the image's own defaults set up (where to
+    install from, its post-install steps) and add a ready-made admin account. The disk is
+    deliberately left for the person to choose, so the stick never erases a machine by itself."""
+    def q(v: str) -> str:
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return (
+        "# Added by Handheld Forge: the image's own installer defaults, plus an account.\n"
+        "%include /usr/share/anaconda/interactive-defaults.ks\n"
+        f"user --name={name} --gecos={q(full_name)} --password={q(password)} --plaintext --groups=wheel\n"
+    )
+
+
+def _read_text(iso: IsoReader, e: IsoEntry) -> str:
+    return b"".join(iso.read_chunks(e, CHUNK)).decode(errors="replace")
+
+
+def _installer_line(line_or_text: str) -> bool:
+    return "inst.stage2=" in line_or_text
+
+
+def add_kickstart(text: str, source: str) -> str:
+    """Add inst.ks=<source> to every installer boot entry (not rescue mode) that lacks one."""
+    out = []
+    for line in text.split("\n"):
+        words = line.split()
+        if (words and words[0] in ("linux", "linuxefi", "append") and _installer_line(line)
+                and "inst.rescue" not in line and "inst.ks=" not in line):
+            line = f"{line.rstrip()} inst.ks={source}"
+        out.append(line)
+    return "\n".join(out)
+
+
 def _is_boot_config(path: str) -> bool:
     return path.rsplit("/", 1)[-1].lower().endswith((".cfg", ".conf"))
 
@@ -102,6 +138,7 @@ def build_drive(
     udisks: UDisks | None = None,
     recheck: bool = True,
     layout: str = "split",
+    kickstart: str | None = None,
 ) -> None:
     cancel = cancel or threading.Event()
     ud = udisks or UDisks()
@@ -127,6 +164,9 @@ def build_drive(
             if not any(e.path.upper() == "EFI/BOOT/BOOTX64.EFI" for e in files):
                 raise BuildError("This ISO has no UEFI boot loader, so it cannot boot from USB this way.")
             label = iso.volume_id
+            if kickstart is not None and not any(
+                    _is_boot_config(e.path) and _installer_line(_read_text(iso, e)) for e in files):
+                raise BuildError("This image's installer can't take a preset account, so nothing was erased.")
             fat = layout == "fat"
             if fat:
                 big = next((e for e in files if e.size > FAT_FILE_LIMIT), None)
@@ -187,6 +227,24 @@ def build_drive(
                         path = _safe_join(mounts[role], rel)
                         old = path.read_text(errors="replace")
                         new = rewrite_archiso_label(rewrite_boot_label(old, label, uuid), label, uuid)
+                        if new != old:
+                            path.write_bytes(new.encode())
+                            by_role[role] = (hashlib.sha256(new.encode()).hexdigest(), len(new.encode()))
+
+            if kickstart is not None:
+                # The installer reads this file because every install entry now points at it.
+                ks = kickstart.encode()
+                (mounts["data"] / KICKSTART_NAME).write_bytes(ks)
+                record[KICKSTART_NAME] = {"data": (hashlib.sha256(ks).hexdigest(), len(ks))}
+                where = f"hd:LABEL={use_label}" if use_label == label else f"hd:UUID={ud.uuid(parts['data'])}"
+                log("Filling in the installer's account")
+                for rel, by_role in record.items():
+                    if not _is_boot_config(rel):
+                        continue
+                    for role in by_role:
+                        path = _safe_join(mounts[role], rel)
+                        old = path.read_text(errors="replace")
+                        new = add_kickstart(old, f"{where}:/{KICKSTART_NAME}")
                         if new != old:
                             path.write_bytes(new.encode())
                             by_role[role] = (hashlib.sha256(new.encode()).hexdigest(), len(new.encode()))

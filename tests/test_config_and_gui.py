@@ -32,7 +32,7 @@ class CatalogTests(unittest.TestCase):
     def test_experimental_no_password_cachyos(self):
         cat = load_catalog()
         variants = experimental_variants(cat)
-        self.assertEqual([d.id for d in variants], ["cachyos-handheld-copy"])
+        self.assertEqual([d.id for d in variants], ["bazzite-deck-deck", "cachyos-handheld-copy"])
         v = get_distro("cachyos-handheld-copy", cat)
         self.assertTrue(v.experimental)
         self.assertFalse(v.needs_password)
@@ -41,7 +41,30 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("Experimental", v.warning)
         self.assertIn("touchscreen", v.warning)  # the controls warning still applies
         self.assertIn("regular CachyOS option", v.install_steps[-1])
+        self.assertIsNone(v.preset_user)
         self.assertNotIn("—", v.warning + "".join(v.install_steps))
+
+    def test_experimental_bazzite_preset_login(self):
+        cat = load_catalog()
+        v = get_distro("bazzite-deck-deck", cat)
+        self.assertTrue(v.experimental)
+        self.assertFalse(v.needs_password)  # still copied, no admin password on the desktop
+        self.assertEqual((v.preset_user.name, v.preset_user.full_name, v.preset_user.password),
+                         ("deck", "Deck", "deck123"))
+        self.assertEqual([i.label for i in v.images], ["Legacy ISO (fallback)"])
+        self.assertEqual(v.edition, "Login: deck")
+        self.assertIn("deck123", v.warning)
+        self.assertTrue(any("Installation Destination" in s for s in v.install_steps))
+        self.assertIn("regular Bazzite option", v.install_steps[-1])
+
+    def test_experimental_entries_are_checked(self):
+        base = {"id": "x", "name": "X", "enabled": True,
+                "images": [{"label": "A", "iso_url": "https://e/a.iso", "checksum_url": "https://e/a.sha"}]}
+        for bad in ({"id": "u", "edition": "e", "user": {"name": "Deck", "password": "p"}},
+                    {"id": "u", "edition": "e", "user": {"name": "deck", "password": ""}},
+                    {"id": "u", "edition": "e", "image": "missing"}):
+            with self.assertRaises(CatalogError):
+                experimental_variants(self._load([{**base, "experimental": [bad]}]))
 
     def test_install_guide(self):
         cat = load_catalog()

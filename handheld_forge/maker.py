@@ -13,7 +13,9 @@ from .drives import Drive
 def make_drive(distro: Distro, drive: Drive, image: Path, stage=lambda *_: None, log=print,
                cancel: threading.Event | None = None) -> None:
     if not distro.needs_password:
-        builder.build_drive(drive, image, stage, log, cancel, layout=distro.layout)
+        u = distro.preset_user
+        ks = builder.user_kickstart(u.name, u.full_name, u.password) if u else None
+        builder.build_drive(drive, image, stage, log, cancel, layout=distro.layout, kickstart=ks)
         return
     try:
         rawwrite.write_drive(drive, image, distro.format == "raw-bz2", stage, log, cancel)

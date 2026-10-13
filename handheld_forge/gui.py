@@ -518,8 +518,7 @@ class MainWindow(QMainWindow):
             row.setSpacing(12)
             for d in self.experimental:
                 t = Tile(d.name, d.edition)
-                t.setToolTip(f"Copies {d.name}'s files instead of writing it byte for byte, so it needs "
-                             "no password. It may not start on your handheld.")
+                t.setToolTip(d.warning or "")
                 t.setProperty("distro", d.id)
                 self.os_group.addButton(t)
                 row.addWidget(t)

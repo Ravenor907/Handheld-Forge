@@ -6,6 +6,7 @@ Adding a new OS later means adding an entry to distros.json, not new code.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -24,6 +25,17 @@ class ImageSource:
     @property
     def filename(self) -> str:
         return self.iso_url.rstrip("/").rsplit("/", 1)[-1]
+
+
+@dataclass(frozen=True)
+class PresetUser:
+    """An account the installer fills in, so nobody has to type one on the handheld."""
+    name: str  # the login, lower case
+    full_name: str
+    password: str
+
+
+USER_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 
 
 @dataclass(frozen=True)
@@ -46,9 +58,11 @@ class Distro:
     # "split": an EFI partition plus an ext4 copy of the ISO (Bazzite). "fat": everything on
     # one FAT32 partition, which Arch-based ISOs like CachyOS can find by their marker file.
     layout: str = "split"
-    # A password-free way to make this system's drive that hasn't been proven to boot yet.
-    experimental_copy: str | None = None
+    # Untested ways to make this system's drive, listed apart under Experimental (raw entries
+    # from the catalog; experimental_variants turns them into choices).
+    variants: tuple = ()
     experimental: bool = False
+    preset_user: PresetUser | None = None
 
     @property
     def needs_password(self) -> bool:
@@ -105,7 +119,7 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
                 write="raw" if raw.get("format", "iso") != "iso" or raw.get("write") == "raw" else "copy",
                 install_steps=list(raw.get("install_steps", [])),
                 warning=raw.get("warning"),
-                experimental_copy=raw.get("experimental_copy"),
+                variants=tuple(raw.get("experimental", [])),
                 min_drive_gb=int(raw.get("min_drive_gb", 16)),
                 public_key=key_path,
                 images=images,
@@ -115,21 +129,35 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
 
 
 def experimental_variants(catalog: list[Distro]) -> list[Distro]:
-    """Password-free versions of byte-for-byte systems, built by copying files instead.
-
-    They aren't proven to boot, so they're listed apart from the regular choices.
-    """
+    """Untested versions of catalog systems, such as CachyOS copied without a password or
+    Bazzite with the account filled in. They're listed apart from the regular choices."""
     out = []
     for d in catalog:
-        if not (d.enabled and d.needs_password and d.experimental_copy and d.format == "iso"):
+        if not d.enabled:
             continue
-        steps = [*d.install_steps, f"If the drive doesn't start, make it again with the regular "
-                                   f"{d.name} option. That one asks for your password but is known to work."]
-        out.append(replace(
-            d, id=f"{d.id}-copy", edition="No password", write="copy", layout="fat",
-            experimental=True, install_steps=steps,
-            warning="\n\n".join(filter(None, [d.experimental_copy, d.warning])),
-        ))
+        for v in d.variants:
+            images = [i for i in d.images if i.label == v["image"]] if "image" in v else d.images
+            if not images:
+                raise CatalogError(f"{d.id}: experimental image {v['image']!r} isn't listed")
+            user = None
+            if "user" in v:
+                u = v["user"]
+                user = PresetUser(u["name"], u.get("full_name", u["name"]), u["password"])
+                if not USER_NAME.fullmatch(user.name):
+                    raise CatalogError(f"{d.id}: {user.name!r} can't be a login "
+                                       "(lower case letters and digits)")
+                if not user.password or any(c in user.password for c in "\n\r"):
+                    raise CatalogError(f"{d.id}: the preset password must be one line")
+            write = v.get("write", d.write)
+            steps = list(v.get("install_steps", d.install_steps)) + [
+                f"If this doesn't work, make the drive again with the regular {d.name} option, "
+                "which is known to work."]
+            out.append(replace(
+                d, id=f"{d.id}-{v['id']}", edition=v["edition"], images=images, write=write,
+                format=d.format if write == "raw" else "iso", layout=v.get("layout", d.layout),
+                experimental=True, preset_user=user, install_steps=steps, variants=(),
+                warning="\n\n".join(filter(None, [v.get("note"), v.get("warning", d.warning)])),
+            ))
     return out
 
 

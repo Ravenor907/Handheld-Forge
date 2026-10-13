@@ -50,9 +50,9 @@ def cmd_distros(_: argparse.Namespace) -> int:
         print(f"{d.id:<20} {state:<8} {d.name}")
     extra = experimental_variants(catalog)
     if extra:
-        print("\nExperimental (no password, not tested on a handheld yet):")
+        print("\nExperimental (not tested on a handheld yet):")
         for d in extra:
-            print(f"{d.id:<20} {d.name}, copied file by file")
+            print(f"{d.id:<22} {d.name}, {d.edition}")
     return 0
 
 
