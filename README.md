@@ -60,7 +60,14 @@ Running `./install.sh` again in your copy also updates: it pulls the latest code
 
 Click the version number at the top right and choose **Uninstall Handheld Forge**, or right-click it in your app menu and choose **Uninstall**. From a terminal: `handheld-forge uninstall`, or `./install.sh --uninstall` in your copy (which works even if the install is broken).
 
-This removes the app, its menu entry and downloaded system images. Add `--keep-downloads` to keep the images. Your USB drives aren't touched.
+It lists everything it will delete, with sizes, and asks once. Then it removes it all, leaving nothing behind:
+
+- the app and its Python libraries (`~/.local/share/handheld-forge`)
+- the app menu entry and the `handheld-forge` command
+- downloaded system images (`~/.cache/handheld-forge`)
+- the copy of this code you installed from (the folder you cloned)
+
+Installing never leaves files in pip's download cache, so there's nothing to clean up there. Add `--keep-downloads` or `--keep-source` to keep those. Your USB drives aren't touched.
 
 ## Android
 

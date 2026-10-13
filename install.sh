@@ -4,24 +4,34 @@
 # touches /usr.
 #
 #   ./install.sh               install, or update to the latest code
-#   ./install.sh --uninstall   remove it again (add --keep-downloads to keep images)
+#   ./install.sh --uninstall   remove it completely, including this folder
+#                              (add --keep-downloads or --keep-source to keep those)
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/handheld-forge"
 VENV="$APP_DIR/venv"
+PIP=(--quiet --disable-pip-version-check)
+export PIP_NO_CACHE_DIR=1  # leave nothing in ~/.cache/pip (the env var reaches pip's build helpers too)
 
 if [ "${1:-}" = "--uninstall" ]; then
     shift
     if [ -x "$VENV/bin/handheld-forge" ]; then
-        exec "$VENV/bin/handheld-forge" uninstall --yes "$@"
+        # Lists everything it will delete and asks first.
+        exec "$VENV/bin/handheld-forge" uninstall "$@"
     fi
-    # No working install left: remove whatever pieces remain.
+    # No working install left: remove whatever pieces remain, this folder included.
+    read -r -p "Remove Handheld Forge completely, including $SRC? [y/N] " answer
+    case "$answer" in y|Y|yes) ;; *) echo "Nothing was removed."; exit 0 ;; esac
     rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/handheld-forge.desktop"
     [ -L "$HOME/.local/bin/handheld-forge" ] && rm -f "$HOME/.local/bin/handheld-forge"
+    rmdir "$HOME/.local/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/dev/null || true
     rm -rf "$APP_DIR"
-    [ "${1:-}" = "--keep-downloads" ] || rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/handheld-forge"
-    echo "Handheld Forge is uninstalled."
+    [[ " $* " == *" --keep-downloads "* ]] || rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/handheld-forge"
+    if [[ " $* " != *" --keep-source "* ]] && [ -f "$SRC/handheld_forge/__init__.py" ] && [ "$SRC" != "$HOME" ]; then
+        rm -rf "$SRC"
+    fi
+    echo "Handheld Forge is completely removed. If this terminal was in that folder, run: cd ~"
     exit 0
 fi
 
@@ -36,11 +46,13 @@ fi
 
 echo "Installing into $VENV"
 [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
-"$VENV/bin/pip" install --quiet --disable-pip-version-check --upgrade pip
-"$VENV/bin/pip" install --quiet --disable-pip-version-check "$SRC"
+"$VENV/bin/pip" install "${PIP[@]}" --upgrade pip
+"$VENV/bin/pip" install "${PIP[@]}" "$SRC"
 # Reinstall the app itself even if its version number didn't change.
-"$VENV/bin/pip" install --quiet --disable-pip-version-check --force-reinstall --no-deps "$SRC"
+"$VENV/bin/pip" install "${PIP[@]}" --force-reinstall --no-deps "$SRC"
 "$VENV/bin/handheld-forge" setup-menu >/dev/null
+# Remember this copy so uninstalling can remove it too.
+echo "$SRC" > "$APP_DIR/source"
 
 VERSION="$("$VENV/bin/python" -c 'import handheld_forge; print(handheld_forge.__version__)')"
 echo "Installed Handheld Forge $VERSION. Open it from your app menu, or run: handheld-forge"

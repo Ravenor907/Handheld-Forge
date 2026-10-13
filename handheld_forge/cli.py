@@ -128,8 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("update", help="update Handheld Forge to the latest version")
     s.add_argument("--force", action="store_true", help="reinstall even if already up to date")
     s.add_argument("--ask", action="store_true", help=argparse.SUPPRESS)
-    s = sub.add_parser("uninstall", help="remove Handheld Forge and its downloads")
+    s = sub.add_parser("uninstall", help="remove Handheld Forge completely")
     s.add_argument("--keep-downloads", action="store_true", help="keep downloaded system images")
+    s.add_argument("--keep-source", action="store_true", help="keep the downloaded copy of the code")
     s.add_argument("--yes", action="store_true", help="don't ask first")
     s.add_argument("--ask", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("setup-menu", help=argparse.SUPPRESS)  # used by install.sh
@@ -143,7 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         if a.cmd == "update":
             return installer.run_update(ask=a.ask, force=a.force)
         if a.cmd == "uninstall":
-            return installer.run_uninstall(ask=a.ask or not a.yes, keep_downloads=a.keep_downloads)
+            return installer.run_uninstall(ask=a.ask or not a.yes, keep_downloads=a.keep_downloads,
+                                           keep_source=a.keep_source)
         print(f"Menu entry: {installer.write_menu_entry()}")
         return 0
     try:

@@ -60,11 +60,45 @@ class InstallerTests(unittest.TestCase):
         self.refresh_patch.start()
         self.assertEqual(calls, [["kbuildsycoca6"]])
 
+    def make_source(self, where="Handheld-Forge"):
+        src = self.home / where
+        (src / "handheld_forge").mkdir(parents=True)
+        (src / "install.sh").write_text("#!/bin/sh\n")
+        (src / "handheld_forge/__init__.py").write_text('__version__ = "0.4.2"\n')
+        self.p.source_note.write_text(f"{src}\n")
+        return src
+
     def test_uninstall_removes_everything(self):
         installer.write_menu_entry(self.p)
+        src = self.make_source()
+        plan = installer.removal_plan(self.p)
+        self.assertEqual([i.path for i in plan],
+                         [self.p.desktop, self.p.bin_link, self.p.app_dir, self.p.cache, src.resolve()])
         installer.uninstall(self.p)
-        for path in (self.p.desktop, self.p.bin_link, self.p.app_dir, self.p.cache):
+        for path in (self.p.desktop, self.p.bin_link, self.p.app_dir, self.p.cache, src):
             self.assertFalse(path.exists() or path.is_symlink(), path)
+        self.assertFalse(self.p.bin_link.parent.exists())  # ~/.local/bin was left empty, so it goes too
+        self.assertEqual(installer.removal_plan(self.p), [])  # nothing left to remove
+
+    def test_keeps_a_non_empty_local_bin(self):
+        installer.write_menu_entry(self.p)
+        (self.p.bin_link.parent / "other-tool").write_text("")
+        installer.uninstall(self.p)
+        self.assertTrue((self.p.bin_link.parent / "other-tool").exists())
+
+    def test_can_keep_source(self):
+        src = self.make_source()
+        installer.uninstall(self.p, keep_source=True)
+        self.assertTrue(src.exists())
+
+    def test_never_deletes_a_source_that_isnt_ours(self):
+        self.p.source_note.write_text(f"{self.home}\n")  # the home folder itself
+        self.assertNotIn(self.home.resolve(), [i.path for i in installer.removal_plan(self.p)])
+        other = self.home / "Projects"
+        other.mkdir()
+        self.p.source_note.write_text(f"{other}\n")  # not a Handheld Forge copy
+        installer.uninstall(self.p)
+        self.assertTrue(other.exists())
 
     def test_uninstall_can_keep_downloads(self):
         installer.write_menu_entry(self.p)

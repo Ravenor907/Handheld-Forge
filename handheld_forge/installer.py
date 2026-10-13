@@ -31,6 +31,11 @@ class Paths:
     desktop: Path
     cache: Path  # downloaded images
 
+    @property
+    def source_note(self) -> Path:
+        """install.sh records here which copy of the code it was run from."""
+        return self.app_dir / "source"
+
     @staticmethod
     def current() -> Paths:
         home = Path.home()
@@ -131,7 +136,7 @@ def update(p: Paths | None = None, source: str = LATEST_SOURCE_URL, run=subproce
     # Dependencies first, then the app itself even if the version number didn't change.
     for args in ([source], ["--force-reinstall", "--no-deps", source]):
         r = run([str(pip), "install", "--quiet", "--disable-pip-version-check", *args],
-                capture_output=True, text=True)
+                capture_output=True, text=True, env={**os.environ, "PIP_NO_CACHE_DIR": "1"})
         if r.returncode != 0:
             raise RuntimeError(f"The update failed:\n{(r.stderr or r.stdout).strip()[-800:]}")
     r = run([str(p.venv / "bin/python"), "-c", "import handheld_forge; print(handheld_forge.__version__)"],
@@ -140,33 +145,86 @@ def update(p: Paths | None = None, source: str = LATEST_SOURCE_URL, run=subproce
     return r.stdout.strip() or "?"
 
 
-def cache_size(p: Paths | None = None) -> int:
-    p = p or Paths.current()
-    if not p.cache.is_dir():
+def _size(path: Path) -> int:
+    if path.is_symlink() or path.is_file():
+        return path.lstat().st_size
+    if not path.is_dir():
         return 0
-    return sum(f.stat().st_size for f in p.cache.rglob("*") if f.is_file())
+    return sum(f.lstat().st_size for f in path.rglob("*") if f.is_file() and not f.is_symlink())
 
 
-def uninstall(p: Paths | None = None, keep_downloads: bool = False) -> list[Path]:
-    """Remove the menu entry, the command link, the venv and (unless kept) downloads."""
+def cache_size(p: Paths | None = None) -> int:
+    return _size((p or Paths.current()).cache)
+
+
+def _ours(d: Path) -> bool:
+    """A folder we may delete: named handheld-forge, inside the user's home, not the home itself."""
+    home = Path.home().resolve()
+    d = d.resolve()
+    return d.is_dir() and d.name == "handheld-forge" and home in d.parents
+
+
+def source_copy(p: Paths) -> Path | None:
+    """The downloaded copy of the code install.sh was run from, if it's still there and really ours."""
+    try:
+        src = Path(p.source_note.read_text().strip()).resolve()
+    except OSError:
+        return None
+    home = Path.home().resolve()
+    looks_right = (src / "install.sh").is_file() and (src / "handheld_forge/__init__.py").is_file()
+    if not looks_right or src == home or home not in src.parents:
+        return None
+    return src
+
+
+@dataclass(frozen=True)
+class Item:
+    path: Path
+    what: str
+    size: int
+
+
+def removal_plan(p: Paths | None = None, keep_downloads: bool = False,
+                 keep_source: bool = False) -> list[Item]:
+    """Everything an uninstall would delete, so it can be shown before anything happens."""
+    p = p or Paths.current()
+    items = []
+    if p.desktop.exists():
+        items.append(Item(p.desktop, "App menu entry", _size(p.desktop)))
+    if p.bin_link.is_symlink() and str(os.readlink(p.bin_link)).startswith(str(p.app_dir)):
+        items.append(Item(p.bin_link, "handheld-forge command", 0))
+    src = None if keep_source else source_copy(p)
+    if p.app_dir.is_dir() and _ours(p.app_dir):
+        items.append(Item(p.app_dir, "The app and its Python libraries", _size(p.app_dir)))
+    if not keep_downloads and p.cache.is_dir() and _ours(p.cache):
+        items.append(Item(p.cache, "Downloaded system images", _size(p.cache)))
+    if src:
+        items.append(Item(src, "The downloaded copy of Handheld Forge's code", _size(src)))
+    return items
+
+
+def uninstall(p: Paths | None = None, keep_downloads: bool = False, keep_source: bool = False) -> list[Path]:
+    """Remove everything in the plan, then tidy up an empty ~/.local/bin and refresh menus."""
     p = p or Paths.current()
     removed = []
-    for path in (p.desktop,):
-        if path.exists():
-            path.unlink()
-            removed.append(path)
-    # Only remove the command if it's our link, never someone else's file.
-    if p.bin_link.is_symlink() and str(os.readlink(p.bin_link)).startswith(str(p.app_dir)):
-        p.bin_link.unlink()
-        removed.append(p.bin_link)
+    for item in removal_plan(p, keep_downloads, keep_source):
+        if item.path.is_dir() and not item.path.is_symlink():
+            shutil.rmtree(item.path)
+        else:
+            item.path.unlink()
+        removed.append(item.path)
+    for folder in (p.bin_link.parent, p.desktop.parent):
+        try:
+            folder.rmdir()  # only succeeds when empty
+        except OSError:
+            pass
     if removed:
         refresh_menus(p.desktop.parent)
-    targets = [p.app_dir] + ([] if keep_downloads else [p.cache])
-    for d in targets:
-        if d.is_dir() and d.name == "handheld-forge" and Path.home() in d.parents:
-            shutil.rmtree(d)
-            removed.append(d)
     return removed
+
+
+def human(size: int) -> str:
+    return f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB" if size >= 1e6 else ""
 
 
 # ---------------------------------------------------------------- menu actions
@@ -233,19 +291,29 @@ def run_update(ask: bool, force: bool = False) -> int:
     return 0
 
 
-def run_uninstall(ask: bool, keep_downloads: bool) -> int:
+def run_uninstall(ask: bool, keep_downloads: bool, keep_source: bool = False) -> int:
     win = _windows(ask)
     if win:
         _qt()
     p = Paths.current()
-    size = 0 if keep_downloads else cache_size(p)
-    detail = "Your USB drives aren't touched."
-    if size:
-        amount = f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB"
-        detail = f"This also deletes downloaded system images ({amount}). {detail}"
-    if ask and not _ask(f"Uninstall {APP_NAME}?", detail, win):
+    plan = removal_plan(p, keep_downloads, keep_source)
+    if not plan:
+        _tell(f"{APP_NAME} isn't installed for this user, so there's nothing to remove.", win)
+        return 0
+    lines = [f"- {i.what}" + (f" ({human(i.size)})" if human(i.size) else "") + f"\n  {i.path}" for i in plan]
+    total = human(sum(i.size for i in plan))
+    detail = ("This deletes:\n" + "\n".join(lines) + (f"\n\nIn total {total}." if total else "")
+              + "\n\nYour USB drives aren't touched.")
+    if ask and not _ask(f"Remove {APP_NAME} completely?", detail, win):
         print("Nothing was removed.")
         return 0
-    removed = uninstall(p, keep_downloads)
-    _tell(f"{APP_NAME} is uninstalled." if removed else f"{APP_NAME} wasn't installed for this user.", win)
+    try:
+        here = Path.cwd().resolve()
+    except OSError:
+        here = None
+    removed = uninstall(p, keep_downloads, keep_source)
+    msg = f"{APP_NAME} is completely removed."
+    if here and any(r == here or r in here.parents for r in removed):
+        msg += " The folder this terminal is in was deleted, so run: cd ~"
+    _tell(msg, win)
     return 0
