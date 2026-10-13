@@ -52,7 +52,7 @@ echo "Installing into $VENV"
 "$VENV/bin/pip" install "${PIP[@]}" "$SRC"
 # Reinstall the app itself even if its version number didn't change.
 "$VENV/bin/pip" install "${PIP[@]}" --force-reinstall --no-deps "$SRC"
-"$VENV/bin/handheld-forge" setup-menu >/dev/null
+"$VENV/bin/handheld-forge" fix-menu || true
 # Remember this copy so uninstalling can remove it too.
 echo "$SRC" > "$APP_DIR/source"
 

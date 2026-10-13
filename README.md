@@ -50,6 +50,8 @@ cd Handheld-Forge
 
 Run these in a terminal (Konsole in desktop mode); double-clicking `install.sh` in a file manager won't run it. Then open **Handheld Forge** from your app menu. Needs Python 3.10+.
 
+If Handheld Forge doesn't show up in the app launcher (under Utilities), run `handheld-forge fix-menu`. It rewrites the menu entry, rebuilds KDE's launcher cache and says what it found, for example that the install ran inside a distrobox or toolbox container, whose apps don't reach your desktop's menu.
+
 ### Update
 
 In the app, click the version number at the top right and choose **Check for updates**. You can also right-click Handheld Forge in your app menu and choose **Update Handheld Forge**, or run `handheld-forge update`. It tells you which version you have and which is newest, and reinstalls even when the version number is the same.

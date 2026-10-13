@@ -55,10 +55,37 @@ class InstallerTests(unittest.TestCase):
     def test_refresh_uses_kde_cache_builder(self):
         self.refresh_patch.stop()
         calls = []
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0)
+
         with mock.patch.object(installer.shutil, "which", side_effect=lambda c: f"/usr/bin/{c}"):
-            installer.refresh_menus(self.home, run=lambda cmd, **kw: calls.append(cmd))
+            ran = installer.refresh_menus(self.home, run=run)
         self.refresh_patch.start()
-        self.assertEqual(calls, [["kbuildsycoca6"]])
+        # A full rebuild, so an entry in a folder KDE wasn't watching still shows up.
+        self.assertEqual(calls, [["kbuildsycoca6", "--noincremental"]])
+        self.assertEqual(ran, ["kbuildsycoca6 (ok)"])
+
+    def test_install_and_update_always_refresh_the_launcher(self):
+        installer.write_menu_entry(self.p)
+        installer.write_menu_entry(self.p, force_refresh=True)  # unchanged, but the cache may be stale
+        self.assertEqual(len(self.refreshes), 2)
+
+    def test_fix_menu_reports(self):
+        (self.p.venv / "bin/handheld-forge").chmod(0o755)
+        with mock.patch.object(installer, "in_container", return_value=None):
+            report = installer.fix_menu(self.p, refresh=lambda _: ["kbuildsycoca6 (ok)"])
+        self.assertTrue(self.p.desktop.exists())
+        self.assertIn("Launcher refreshed with kbuildsycoca6 (ok)", report)
+        self.assertFalse(any(r.startswith("Problem") for r in report))
+        self.assertIn("Categories=Utility;", self.p.desktop.read_text())
+
+    def test_fix_menu_spots_a_container_and_a_missing_app(self):
+        (self.p.venv / "bin/handheld-forge").unlink()
+        with mock.patch.object(installer, "in_container", return_value="bazzite-arch"):
+            report = installer.fix_menu(self.p, refresh=lambda _: [])
+        self.assertIn("inside bazzite-arch", report[0])
+        self.assertIn("isn't installed", report[1])
 
     def make_source(self, where="Handheld-Forge"):
         src = self.home / where

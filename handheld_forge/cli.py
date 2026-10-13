@@ -133,21 +133,23 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--keep-source", action="store_true", help="keep the downloaded copy of the code")
     s.add_argument("--yes", action="store_true", help="don't ask first")
     s.add_argument("--ask", action="store_true", help=argparse.SUPPRESS)
-    sub.add_parser("setup-menu", help=argparse.SUPPRESS)  # used by install.sh
+    sub.add_parser("fix-menu", help="put Handheld Forge back in the app launcher and say what was wrong")
+    sub.add_parser("setup-menu", help=argparse.SUPPRESS)  # older name, same as fix-menu
     a = p.parse_args(argv)
 
     if a.cmd == "gui":
         from .gui import run
         return run()
-    if a.cmd in ("update", "uninstall", "setup-menu"):
+    if a.cmd in ("update", "uninstall", "fix-menu", "setup-menu"):
         from . import installer
         if a.cmd == "update":
             return installer.run_update(ask=a.ask, force=a.force)
         if a.cmd == "uninstall":
             return installer.run_uninstall(ask=a.ask or not a.yes, keep_downloads=a.keep_downloads,
                                            keep_source=a.keep_source)
-        print(f"Menu entry: {installer.write_menu_entry()}")
-        return 0
+        report = installer.fix_menu()
+        print("\n".join(report))
+        return 1 if any(line.startswith("Problem") for line in report) else 0
     try:
         return {"distros": cmd_distros, "drives": cmd_drives,
                 "download": cmd_download, "create": cmd_create}[a.cmd](a)

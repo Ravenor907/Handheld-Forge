@@ -61,7 +61,7 @@ Comment=Create a handheld OS boot drive in one click
 Exec={exe}
 Icon=drive-removable-media-usb
 Terminal=false
-Categories=System;Utility;
+Categories=Utility;
 StartupNotify=true
 StartupWMClass=handheld-forge
 Actions=update;uninstall;
@@ -76,35 +76,86 @@ Exec={exe} uninstall --ask
 """
 
 
-def refresh_menus(apps: Path | None = None, run=subprocess.run) -> None:
-    """Ask the desktop to reread app entries now instead of whenever it next notices."""
+def refresh_menus(apps: Path | None = None, run=subprocess.run) -> list[str]:
+    """Make the desktop reread app entries now. Returns what ran, for fix-menu to report.
+
+    KDE's launcher reads a cache (ksycoca); a full rebuild (--noincremental) also picks
+    up entries in a folder it wasn't watching yet.
+    """
     apps = apps or Paths.current().desktop.parent
-    for cmd in (["kbuildsycoca6"], ["kbuildsycoca5"], ["update-desktop-database", str(apps)]):
-        if shutil.which(cmd[0]):
-            try:
-                run(cmd, capture_output=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            if cmd[0].startswith("kbuildsycoca"):
-                break  # one KDE cache rebuild is enough
+    done = []
+    for cmd in (["kbuildsycoca6", "--noincremental"], ["kbuildsycoca5", "--noincremental"],
+                ["update-desktop-database", str(apps)]):
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            r = run(cmd, capture_output=True, timeout=120)
+            done.append(f"{cmd[0]} ({'ok' if r.returncode == 0 else f'exit {r.returncode}'})")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            done.append(f"{cmd[0]} (failed: {e})")
+        if cmd[0].startswith("kbuildsycoca"):
+            break  # one KDE cache rebuild is enough
+    return done
 
 
-def write_menu_entry(p: Paths | None = None, refresh=None) -> Path:
+def write_menu_entry(p: Paths | None = None, refresh=None, force_refresh: bool = False) -> Path:
+    """Write the app menu entry and the command link. The menu is refreshed when the entry
+    changed, or always with force_refresh (installs and updates, in case the cache is stale)."""
     p = p or Paths.current()
     p.desktop.parent.mkdir(parents=True, exist_ok=True)
     text = menu_entry(p)
+    changed = not p.desktop.exists() or p.desktop.read_text() != text
     # Replace the file in one step and only when it changed: a moment without a valid
     # entry is enough for KDE to drop a launcher pinned to the taskbar.
-    if not p.desktop.exists() or p.desktop.read_text() != text:
+    if changed:
         tmp = p.desktop.with_name(f".{p.desktop.name}.tmp")
         tmp.write_text(text)
         os.replace(tmp, p.desktop)
+    if changed or force_refresh:
         (refresh or refresh_menus)(p.desktop.parent)
     p.bin_link.parent.mkdir(parents=True, exist_ok=True)
     if p.bin_link.is_symlink() or not p.bin_link.exists():
         p.bin_link.unlink(missing_ok=True)
         p.bin_link.symlink_to(p.venv / "bin/handheld-forge")
     return p.desktop
+
+
+def in_container() -> str | None:
+    """Name of the container this runs in (distrobox, toolbox), where installs don't reach the host menu."""
+    if os.environ.get("CONTAINER_ID"):
+        return os.environ["CONTAINER_ID"]
+    for marker in ("/run/.containerenv", "/.dockerenv"):
+        if Path(marker).exists():
+            return "a container"
+    return None
+
+
+def fix_menu(p: Paths | None = None, refresh=None) -> list[str]:
+    """Rewrite the menu entry, rebuild the launcher cache, and report what was found."""
+    p = p or Paths.current()
+    report = []
+    box = in_container()
+    if box:
+        report.append(f"Problem: this is running inside {box} (distrobox or toolbox). The app menu belongs "
+                      "to your normal desktop, so open a plain Konsole tab (not a container) and run "
+                      "./install.sh there.")
+    exe = p.venv / "bin/handheld-forge"
+    if not os.access(exe, os.X_OK):
+        report.append(f"Problem: the app isn't installed at {exe}. "
+                      "Run ./install.sh from your copy of the code.")
+        return report
+    write_menu_entry(p, refresh=lambda _: None)
+    report.append(f"Menu entry: {p.desktop}")
+    ran = (refresh or refresh_menus)(p.desktop.parent)
+    report.append("Launcher refreshed with " + ", ".join(ran) if ran else
+                  "Couldn't find kbuildsycoca6/5 to refresh the launcher; log out and back in to see it.")
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if data_home and Path(data_home) != p.desktop.parent.parent:
+        report.append(f"Note: XDG_DATA_HOME is {data_home}; the launcher looks there.")
+    report.append(f"Desktop: {desktop or 'unknown'}. "
+                  "Look for Handheld Forge under Utilities, or search for it.")
+    return report
 
 
 def _version_tuple(v: str) -> tuple[int, ...]:
@@ -141,7 +192,7 @@ def update(p: Paths | None = None, source: str = LATEST_SOURCE_URL, run=subproce
             raise RuntimeError(f"The update failed:\n{(r.stderr or r.stdout).strip()[-800:]}")
     r = run([str(p.venv / "bin/python"), "-c", "import handheld_forge; print(handheld_forge.__version__)"],
             capture_output=True, text=True)
-    write_menu_entry(p)
+    write_menu_entry(p, force_refresh=True)
     return r.stdout.strip() or "?"
 
 
