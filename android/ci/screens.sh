@@ -6,7 +6,7 @@ PKG=io.github.ravenor907.handheldforge
 mkdir -p screens
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb logcat -c
-for demo in empty choose confirm confirm-ready working done done-cachyos error; do
+for demo in empty choose confirm confirm-ready working stop done done-cachyos error; do
   adb shell am force-stop $PKG
   adb shell am start -W -n $PKG/.MainActivity --es demo $demo >/dev/null
   sleep 4

@@ -645,6 +645,7 @@ class MainWindow(QMainWindow):
         self.bar.set_value(0, busy=True)
         self.cancel_btn.setEnabled(True)
         self.cancel_btn.setText("Stop")
+        self._stop_armed = False
         self.stack.setCurrentWidget(self.work_page)
 
         self.thread = QThread(self)
@@ -657,6 +658,22 @@ class MainWindow(QMainWindow):
         self.thread.start()
 
     def cancel(self) -> None:
+        """The Stop button: the first click only asks, so a stray tap can't ruin a half-written drive."""
+        if not self.worker:
+            return
+        if not getattr(self, "_stop_armed", False):
+            self._stop_armed = True
+            self.cancel_btn.setText("Click again to stop")
+            QTimer.singleShot(4000, self._disarm_stop)
+            return
+        self.stop_now()
+
+    def _disarm_stop(self) -> None:
+        if self.worker and self._stop_armed and not self.worker.cancel.is_set():
+            self._stop_armed = False
+            self.cancel_btn.setText("Stop")
+
+    def stop_now(self) -> None:
         if self.worker:
             self.worker.cancel.set()
             self.cancel_btn.setEnabled(False)
@@ -739,7 +756,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.thread is not None:
-            self.cancel()
+            self.stop_now()
             self.work_status.setText("Stopping safely before closing")
             event.ignore()
             QTimer.singleShot(400, self._close_when_idle)

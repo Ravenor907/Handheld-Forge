@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -136,6 +137,19 @@ class GuiSmokeTests(unittest.TestCase):
             class FakeWorker:
                 distro = w._distro()
                 drive = sandisk
+                cancel = threading.Event()
+
+            # Stop asks first: one click arms it, the second actually stops.
+            w.worker = FakeWorker()
+            w._stop_armed = False
+            w.cancel()
+            self.assertFalse(FakeWorker.cancel.is_set())
+            self.assertEqual(w.cancel_btn.text(), "Click again to stop")
+            shot(w, "5b-stop-confirm")
+            w.cancel()
+            self.assertTrue(FakeWorker.cancel.is_set())
+            self.assertEqual(w.cancel_btn.text(), "Stopping")
+            FakeWorker.cancel = threading.Event()
 
             class FakeThread:
                 def quit(self):
@@ -147,6 +161,7 @@ class GuiSmokeTests(unittest.TestCase):
             w.worker, w.thread = FakeWorker(), FakeThread()
             w.on_finished("ok", "")
             self.assertEqual(w.result_title.text(), "Ready to boot")
+            self.assertIn("Open the boot menu", w.result_text.text())
             shot(w, "6-done")
 
             w.worker, w.thread = FakeWorker(), FakeThread()

@@ -189,7 +189,7 @@ class MainActivity : ComponentActivity() {
             else -> PhoneState(76, charging = true, online = true, unmetered = true, backgroundAllowed = true)
         }
         when (demo) {
-            "working" -> Jobs.demo(JobState.Running(name, "SanDisk Ultra Fit", Stage.WRITE, 4_100_000_000, 8_300_000_000), lines)
+            "working", "stop" -> Jobs.demo(JobState.Running(name, "SanDisk Ultra Fit", Stage.WRITE, 4_100_000_000, 8_300_000_000), lines)
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
             "done-cachyos" -> Jobs.demo(
                 JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
@@ -239,7 +239,7 @@ class MainActivity : ComponentActivity() {
                 }
                 Gap(18)
                 when (val j = job) {
-                    is JobState.Running -> Working(j)
+                    is JobState.Running -> Working(j, askStopFirst = demo == "stop")
                     is JobState.Finished -> Result(j, catalog.firstOrNull { it.name == j.distro }) {
                         Jobs.reset()
                         confirming = false
@@ -370,15 +370,18 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun ColumnScope.Working(j: JobState.Running) {
+    private fun ColumnScope.Working(j: JobState.Running, askStopFirst: Boolean = false) {
         val step = stepOf(j.stage)
         val frac = if (j.total > 0) j.done.toFloat() / j.total else 0f
         val overall = (STEP_WEIGHT.take(step).sum() + STEP_WEIGHT[step] * frac) / STEP_WEIGHT.sum()
         var showLog by remember { mutableStateOf(false) }
         var backWarned by remember { mutableStateOf(false) }
+        var askStop by remember { mutableStateOf(askStopFirst) }
         val log by Jobs.log.collectAsState()
         // Back would close the screen mid-job; warn first, let a second press through.
         BackHandler(enabled = !backWarned) { backWarned = true }
+        // While the stop question is showing, back just dismisses it.
+        BackHandler(enabled = askStop) { askStop = false }
 
         Txt("Creating ${j.distro} on ${j.drive}", Forge.title)
         Gap(12)
@@ -410,10 +413,29 @@ class MainActivity : ComponentActivity() {
         Spacer(Modifier.weight(1f))
         StepTrack(STEPS, step, failed = false)
         Gap(18)
-        Row {
-            QuietButton(if (showLog) "Hide details" else "Details") { showLog = !showLog }
-            Spacer(Modifier.weight(1f))
-            QuietButton(if (j.stopping) "Stopping" else "Stop", enabled = !j.stopping) { Jobs.cancel() }
+        if (askStop && !j.stopping) {
+            // Stopping mid-write leaves the drive unbootable, so make it a deliberate second tap.
+            Banner(
+                if (j.stage >= Stage.WRITE) {
+                    "Stop now? The drive is only partly written and won't boot until you create it again."
+                } else {
+                    "Stop now? The download pauses and picks up where it left off next time."
+                },
+            )
+            Gap(12)
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                QuietButton("Keep going") { askStop = false }
+                MoltenButton("Stop", danger = true, modifier = Modifier.weight(1f)) {
+                    askStop = false
+                    Jobs.cancel()
+                }
+            }
+        } else {
+            Row {
+                QuietButton(if (showLog) "Hide details" else "Details") { showLog = !showLog }
+                Spacer(Modifier.weight(1f))
+                QuietButton(if (j.stopping) "Stopping" else "Stop", enabled = !j.stopping) { askStop = true }
+            }
         }
         if (showLog) LogBox(log)
     }
