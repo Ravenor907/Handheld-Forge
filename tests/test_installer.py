@@ -1,5 +1,8 @@
 import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -149,6 +152,37 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(path.exists() or path.is_symlink(), path)
         self.assertFalse(self.p.bin_link.parent.exists())  # ~/.local/bin was left empty, so it goes too
         self.assertEqual(installer.removal_plan(self.p), [])  # nothing left to remove
+
+    def test_app_folder_goes_last_after_saying_done(self):
+        installer.write_menu_entry(self.p)
+        seen = {}
+
+        def done(paths):
+            seen["menu entry gone"] = not self.p.desktop.exists()
+            seen["app still there"] = self.p.app_dir.exists()  # so the "done" window can still open
+            seen["refreshed"] = len(self.refreshes) >= 2
+
+        removed = installer.uninstall(self.p, before_last_step=done)
+        self.assertEqual(seen, {"menu entry gone": True, "app still there": True, "refreshed": True})
+        self.assertEqual(removed[-1], self.p.app_dir)
+        self.assertFalse(self.p.app_dir.exists())
+
+    def test_closes_a_running_copy(self):
+        # Like the real app: an interpreter running the script, so the script's path is on the command line.
+        script = self.p.venv / "bin/handheld-forge"
+        script.write_text("import time\ntime.sleep(30)\n")
+        proc = subprocess.Popen([sys.executable, str(script)])
+        try:
+            deadline = time.monotonic() + 5
+            while proc.pid not in installer.running_copies(self.p) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn(proc.pid, installer.running_copies(self.p))
+            self.assertNotIn(os.getpid(), installer.running_copies(self.p))
+            installer.close_running([proc.pid], wait=2)
+            self.assertIsNotNone(proc.wait(timeout=3))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
 
     def test_keeps_a_non_empty_local_bin(self):
         installer.write_menu_entry(self.p)

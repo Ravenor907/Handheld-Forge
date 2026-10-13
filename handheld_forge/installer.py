@@ -293,11 +293,58 @@ def removal_plan(p: Paths | None = None, keep_downloads: bool = False,
     return items
 
 
-def uninstall(p: Paths | None = None, keep_downloads: bool = False, keep_source: bool = False) -> list[Path]:
-    """Remove everything in the plan, then tidy up an empty ~/.local/bin and refresh menus."""
+def running_copies(p: Paths | None = None) -> list[int]:
+    """Process IDs of other running Handheld Forge programs from this install (the window, helpers)."""
+    p = p or Paths.current()
+    prefixes = (str(p.app_dir), str(p.app_dir.resolve()))
+    pids = []
+    for proc in Path("/proc").glob("[0-9]*"):
+        pid = int(proc.name)
+        if pid == os.getpid():
+            continue
+        try:
+            args = (proc / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        # Only the program itself (interpreter or script), not files it happens to open.
+        if any(a.decode(errors="replace").startswith(prefixes) for a in args[:2] if a):
+            pids.append(pid)
+    return pids
+
+
+def close_running(pids: list[int], wait: float = 3.0) -> None:
+    """Ask the programs to quit, and make sure they have after a few seconds."""
+    import signal
+    import time
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + wait
+    while pids and time.monotonic() < deadline:
+        pids = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
+        time.sleep(0.1)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def uninstall(p: Paths | None = None, keep_downloads: bool = False, keep_source: bool = False,
+              before_last_step=None) -> list[Path]:
+    """Remove everything in the plan.
+
+    The app's own folder goes last: first the menu entry and the rest, then the launcher
+    is refreshed and any open Handheld Forge window is closed, then before_last_step()
+    runs (to say it's done while the window library still exists), then the app itself.
+    """
     p = p or Paths.current()
     removed = []
-    for item in removal_plan(p, keep_downloads, keep_source):
+    plan = removal_plan(p, keep_downloads, keep_source)
+    app = [i for i in plan if i.path == p.app_dir]
+    for item in [i for i in plan if i.path != p.app_dir]:
         if item.path.is_dir() and not item.path.is_symlink():
             shutil.rmtree(item.path)
         else:
@@ -310,8 +357,14 @@ def uninstall(p: Paths | None = None, keep_downloads: bool = False, keep_source:
             pass
     # A rule hiding the app would also hide a later reinstall, so it goes too.
     removed += clear_menu_overrides()
-    if removed:
+    if removed or app:
         refresh_menus(p.desktop.parent)
+    close_running(running_copies(p))
+    if before_last_step:
+        before_last_step([*removed, *(i.path for i in app)])
+    for item in app:
+        shutil.rmtree(item.path)
+        removed.append(item.path)
     return removed
 
 
@@ -394,8 +447,11 @@ def run_uninstall(ask: bool, keep_downloads: bool, keep_source: bool = False) ->
         return 0
     lines = [f"- {i.what}" + (f" ({human(i.size)})" if human(i.size) else "") + f"\n  {i.path}" for i in plan]
     total = human(sum(i.size for i in plan))
-    detail = ("This deletes:\n" + "\n".join(lines) + (f"\n\nIn total {total}." if total else "")
-              + "\n\nYour USB drives aren't touched.")
+    detail = "This deletes:\n" + "\n".join(lines) + (f"\n\nIn total {total}." if total else "")
+    if running_copies(p):
+        detail += (f"\n\n{APP_NAME} is open and will be closed. If it's making a drive right now, "
+                   "that drive won't be finished.")
+    detail += "\n\nYour USB drives aren't touched otherwise."
     if ask and not _ask(f"Remove {APP_NAME} completely?", detail, win):
         print("Nothing was removed.")
         return 0
@@ -403,9 +459,12 @@ def run_uninstall(ask: bool, keep_downloads: bool, keep_source: bool = False) ->
         here = Path.cwd().resolve()
     except OSError:
         here = None
-    removed = uninstall(p, keep_downloads, keep_source)
-    msg = f"{APP_NAME} is completely removed."
-    if here and any(r == here or r in here.parents for r in removed):
-        msg += " The folder this terminal is in was deleted, so run: cd ~"
-    _tell(msg, win)
+
+    def done(paths: list[Path]) -> None:
+        msg = f"{APP_NAME} is completely removed."
+        if here and any(r == here or r in here.parents for r in paths):
+            msg += " The folder this terminal is in was deleted, so run: cd ~"
+        _tell(msg, win)
+
+    uninstall(p, keep_downloads, keep_source, before_last_step=done)
     return 0
