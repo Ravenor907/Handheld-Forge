@@ -80,6 +80,49 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(any(r.startswith("Problem") for r in report))
         self.assertIn("Categories=Utility;", self.p.desktop.read_text())
 
+    KMENUEDIT = """<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD XML Menu 1.0//EN"
+ "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+<Menu>
+ <Menu>
+  <Name>Utilities</Name>
+  <Exclude>
+   <Filename>handheld-forge.desktop</Filename>
+  </Exclude>
+  <Exclude>
+   <Filename>org.kde.kcalc.desktop</Filename>
+  </Exclude>
+ </Menu>
+</Menu>
+"""
+
+    def test_clears_a_saved_menu_edit_that_hides_the_app(self):
+        menus = self.home / ".config/menus"
+        menus.mkdir(parents=True)
+        edit = menus / "applications-kmenuedit.menu"
+        edit.write_text(self.KMENUEDIT)
+        (self.p.venv / "bin/handheld-forge").chmod(0o755)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.home / ".config")}), \
+                mock.patch.object(installer, "in_container", return_value=None):
+            report = installer.fix_menu(self.p, refresh=lambda _: ["kbuildsycoca6 (ok)"])
+        text = edit.read_text()
+        self.assertNotIn("handheld-forge", text)
+        self.assertIn("org.kde.kcalc.desktop", text)  # the person's other edits stay
+        self.assertEqual(text.count("<Exclude>"), 1)
+        self.assertTrue(text.startswith("<!DOCTYPE Menu"))
+        self.assertTrue(any(r.startswith("Fixed:") for r in report))
+        self.assertEqual((self.p.cache / "menu-backups" / edit.name).read_text(), self.KMENUEDIT)
+        # Nothing to do the second time.
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.home / ".config")}):
+            self.assertEqual(installer.clear_menu_overrides(), [])
+
+    def test_uninstall_clears_a_hiding_rule_too(self):
+        menus = self.home / ".config/menus"
+        menus.mkdir(parents=True)
+        (menus / "applications-kmenuedit.menu").write_text(self.KMENUEDIT)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.home / ".config")}):
+            installer.uninstall(self.p)
+        self.assertNotIn("handheld-forge", (menus / "applications-kmenuedit.menu").read_text())
+
     def test_fix_menu_spots_a_container_and_a_missing_app(self):
         (self.p.venv / "bin/handheld-forge").unlink()
         with mock.patch.object(installer, "in_container", return_value="bazzite-arch"):

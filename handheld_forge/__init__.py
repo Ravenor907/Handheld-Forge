@@ -1,4 +1,4 @@
 """Handheld Forge: one-click boot drives for handheld gaming distros."""
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 APP_NAME = "Handheld Forge"

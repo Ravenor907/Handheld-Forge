@@ -130,6 +130,42 @@ def in_container() -> str | None:
     return None
 
 
+def menu_override_files() -> list[Path]:
+    """The user's own launcher edits (KDE's Edit Applications and Hide Application write these)."""
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    menus = config / "menus"
+    return sorted(menus.rglob("*.menu")) if menus.is_dir() else []
+
+
+_OUR_FILENAME = re.compile(r"[ \t]*<Filename>\s*handheld-forge\.desktop\s*</Filename>[ \t]*\n?")
+_EMPTY_RULE = re.compile(r"[ \t]*<(Exclude|Include)>\s*</\1>[ \t]*\n?")
+
+
+def clear_menu_overrides(backup_dir: Path | None = None) -> list[Path]:
+    """Remove rules that hide or move Handheld Forge in the launcher, touching nothing else.
+
+    A KDE menu edit can exclude an app by its file name; that survives uninstalls and
+    keeps a fresh install out of the launcher even though KDE knows the app.
+    Returns the files changed. Originals are copied to backup_dir first.
+    """
+    changed = []
+    for f in menu_override_files():
+        text = f.read_text(errors="replace")
+        if "handheld-forge.desktop" not in text:
+            continue
+        new = _EMPTY_RULE.sub("", _OUR_FILENAME.sub("", text))
+        if new == text:
+            continue
+        if backup_dir:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            (backup_dir / f.name).write_text(text)
+        tmp = f.with_name(f".{f.name}.tmp")
+        tmp.write_text(new)
+        os.replace(tmp, f)
+        changed.append(f)
+    return changed
+
+
 def fix_menu(p: Paths | None = None, refresh=None) -> list[str]:
     """Rewrite the menu entry, rebuild the launcher cache, and report what was found."""
     p = p or Paths.current()
@@ -146,6 +182,9 @@ def fix_menu(p: Paths | None = None, refresh=None) -> list[str]:
         return report
     write_menu_entry(p, refresh=lambda _: None)
     report.append(f"Menu entry: {p.desktop}")
+    for f in clear_menu_overrides(backup_dir=p.cache / "menu-backups"):
+        report.append(f"Fixed: {f} was hiding Handheld Forge in the launcher (a saved menu edit). "
+                      f"Removed just that rule; a copy of the original is in {p.cache / 'menu-backups'}.")
     ran = (refresh or refresh_menus)(p.desktop.parent)
     report.append("Launcher refreshed with " + ", ".join(ran) if ran else
                   "Couldn't find kbuildsycoca6/5 to refresh the launcher; log out and back in to see it.")
@@ -269,6 +308,8 @@ def uninstall(p: Paths | None = None, keep_downloads: bool = False, keep_source:
             folder.rmdir()  # only succeeds when empty
         except OSError:
             pass
+    # A rule hiding the app would also hide a later reinstall, so it goes too.
+    removed += clear_menu_overrides()
     if removed:
         refresh_menus(p.desktop.parent)
     return removed
