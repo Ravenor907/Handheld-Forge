@@ -32,6 +32,7 @@ from .udisks import UDisksError
 from .config import Distro, load_boot_menu, load_catalog
 from .download import Cancelled as DownloadCancelled
 from .download import prepare_iso
+from .progress import Progress
 from .preflight import SleepBlocker, can_start, checks, explain_network, read_state
 from .drives import GB, Drive, list_drives
 
@@ -96,9 +97,6 @@ QWidget#ack QLabel, QWidget#ack QCheckBox {{ background: transparent; font-size:
 STEPS = ["Download", "Verify", "Prepare", "Copy", "Check"]
 # Systems written byte for byte show "Write" where the copy builder shows "Copy".
 RAW_STEPS = ["Download", "Verify", "Prepare", "Write", "Check"]
-STAGE_STEP = {"lookup": 0, "download": 0, "verify": 1, "prepare": 2, "copy": 3, "write": 3, "sync": 3,
-              "check": 4, "eject": 4}
-STEP_WEIGHT = [40, 8, 4, 36, 12]
 
 
 def label(text: str = "", role: str | None = None) -> QLabel:
@@ -447,7 +445,7 @@ class MainWindow(QMainWindow):
         self.thread: QThread | None = None
         self.worker: Worker | None = None
         self.drives: list[Drive] = []
-        self._rate: tuple[float, int] = (0.0, 0)
+        self.progress = Progress()
         self._step = 0
 
         self.stack = QStackedWidget()
@@ -779,6 +777,7 @@ class MainWindow(QMainWindow):
         self.track.steps = RAW_STEPS if distro.needs_password else STEPS
         self.track.set_step(0)
         self._step = 0
+        self.progress = Progress()
         self.bar.set_value(0, busy=True)
         self.cancel_btn.setEnabled(True)
         self.cancel_btn.setText("Stop")
@@ -820,15 +819,11 @@ class MainWindow(QMainWindow):
         self.log_view.appendPlainText(f"{time.strftime('%H:%M:%S')}  {msg}")
 
     def on_stage(self, stage: str, done: int, total: int) -> None:
-        step = STAGE_STEP.get(stage, self._step)
-        if step != self._step:
-            self._rate = (0.0, 0)
-        self._step = step
-        self.track.set_step(step)
-        frac = done / total if total else 0.0
-        overall = (sum(STEP_WEIGHT[:step]) + STEP_WEIGHT[step] * frac) / sum(STEP_WEIGHT)
-        self.percent.setText(f"{overall * 100:.0f}%")
-        self.bar.set_value(overall, busy=not total)
+        self.progress.update(stage, done, total)
+        self._step = self.progress.step
+        self.track.set_step(self._step)
+        self.percent.setText(f"{self.progress.percent}%")
+        self.bar.set_value(self.progress.fraction, busy=not total)
 
         name = self.worker.distro.name if self.worker else ""
         text = {
@@ -843,15 +838,11 @@ class MainWindow(QMainWindow):
             "check": "Reading the drive back to confirm",
             "eject": "Ejecting",
         }.get(stage, stage)
-        if total and stage in ("download", "copy", "write"):
-            text += f", {done / GB:.1f} of {total / GB:.1f} GB"
-            t0, d0 = self._rate
-            now = time.monotonic()
-            if t0 == 0 or d0 > done:
-                self._rate = (now, done)
-            elif now - t0 > 2 and done > d0:
-                left = (total - done) / ((done - d0) / (now - t0))
-                text += f", about {max(1, round(left / 60))} min left"
+        if total > 0 and stage in ("download", "copy", "write"):
+            text += f", {min(done, total) / GB:.1f} of {total / GB:.1f} GB"
+            left = self.progress.time_left(done, total)
+            if left:
+                text += f", {left}"
         self.work_status.setText(text)
 
     def on_finished(self, status: str, message: str) -> None:

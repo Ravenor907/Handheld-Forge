@@ -8,6 +8,7 @@ import time
 
 from . import APP_NAME, __version__
 from .config import get_distro, install_guide, load_catalog
+from .progress import Progress
 from .preflight import SleepBlocker, can_start, checks, read_state
 from .download import prepare_iso
 from .drives import list_drives
@@ -20,17 +21,21 @@ class _Bar:
 
     def __init__(self) -> None:
         self.last = 0.0
+        self.progress = Progress()
 
     def __call__(self, stage: str, done: int, total: int) -> None:
+        self.progress.update(stage, done, total)
         now = time.monotonic()
         if now - self.last < 0.25 and done != total:
             return
         self.last = now
-        if total:
-            pct = 100 * done / total
-            sys.stderr.write(f"\r{stage:>9}: {pct:5.1f}%  {done / 1e9:6.2f}/{total / 1e9:.2f} GB")
-        else:
-            sys.stderr.write(f"\r{stage:>9}: ...{' ' * 30}")
+        line = f"\r{self.progress.percent:3d}%  {stage:>8}"
+        if total > 0:
+            line += f"  {min(done, total) / 1e9:6.2f}/{total / 1e9:.2f} GB"
+            left = self.progress.time_left(done, total)
+            if left:
+                line += f", {left}"
+        sys.stderr.write(f"{line:<70}")
         sys.stderr.flush()
 
 
