@@ -125,11 +125,27 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--device", required=True, help="e.g. /dev/sdb")
     s.add_argument("--distro", default=DEFAULT_DISTRO)
     s.add_argument("--yes", action="store_true", help="skip the ERASE confirmation")
+    s = sub.add_parser("update", help="update Handheld Forge to the latest version")
+    s.add_argument("--force", action="store_true", help="reinstall even if already up to date")
+    s.add_argument("--ask", action="store_true", help=argparse.SUPPRESS)
+    s = sub.add_parser("uninstall", help="remove Handheld Forge and its downloads")
+    s.add_argument("--keep-downloads", action="store_true", help="keep downloaded system images")
+    s.add_argument("--yes", action="store_true", help="don't ask first")
+    s.add_argument("--ask", action="store_true", help=argparse.SUPPRESS)
+    sub.add_parser("setup-menu", help=argparse.SUPPRESS)  # used by install.sh
     a = p.parse_args(argv)
 
     if a.cmd == "gui":
         from .gui import run
         return run()
+    if a.cmd in ("update", "uninstall", "setup-menu"):
+        from . import installer
+        if a.cmd == "update":
+            return installer.run_update(ask=a.ask, force=a.force)
+        if a.cmd == "uninstall":
+            return installer.run_uninstall(ask=a.ask or not a.yes, keep_downloads=a.keep_downloads)
+        print(f"Menu entry: {installer.write_menu_entry()}")
+        return 0
     try:
         return {"distros": cmd_distros, "drives": cmd_drives,
                 "download": cmd_download, "create": cmd_create}[a.cmd](a)

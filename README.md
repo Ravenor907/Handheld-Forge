@@ -48,7 +48,19 @@ cd Handheld-Forge
 ./install.sh
 ```
 
-Then open **Handheld Forge** from your app menu. Needs Python 3.10+.
+Run these in a terminal (Konsole in desktop mode); double-clicking `install.sh` in a file manager won't run it. Then open **Handheld Forge** from your app menu. Needs Python 3.10+.
+
+### Update
+
+In the app, click the version number at the top right and choose **Check for updates**. You can also right-click Handheld Forge in your app menu and choose **Update Handheld Forge**, or run `handheld-forge update`. It tells you which version you have and which is newest, and reinstalls even when the version number is the same.
+
+Running `./install.sh` again in your copy also updates: it pulls the latest code first.
+
+### Uninstall
+
+Click the version number at the top right and choose **Uninstall Handheld Forge**, or right-click it in your app menu and choose **Uninstall**. From a terminal: `handheld-forge uninstall`, or `./install.sh --uninstall` in your copy (which works even if the install is broken).
+
+This removes the app, its menu entry and downloaded system images. Add `--keep-downloads` to keep the images. Your USB drives aren't touched.
 
 ## Android
 

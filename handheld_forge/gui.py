@@ -6,6 +6,7 @@ for a 7 inch handheld screen, usable by touch, mouse, keyboard or D-pad.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import threading
 import time
@@ -16,8 +17,9 @@ from PySide6.QtGui import (
     QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QButtonGroup, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit,
-    QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractButton, QApplication, QButtonGroup, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMenu,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from . import APP_NAME, __version__
@@ -68,6 +70,12 @@ QPlainTextEdit {{
     color: {ASH.name()}; font-family: monospace; font-size: 12px;
 }}
 QScrollArea {{ border: none; }}
+QToolButton {{ color: {ASH.name()}; border: none; font-size: 13px; font-weight: 600; padding: 2px 4px; }}
+QToolButton:hover, QToolButton:focus {{ color: {BONE.name()}; }}
+QToolButton::menu-indicator {{ image: none; }}
+QMenu {{ background: {IRON.name()}; border: 1px solid {SEAM.name()}; padding: 6px; }}
+QMenu::item {{ padding: 8px 18px; border-radius: 6px; }}
+QMenu::item:selected {{ background: {SEAM.name()}; }}
 QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: {SEAM.name()}; border-radius: 4px; min-height: 30px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
@@ -449,7 +457,15 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         head.addWidget(label(APP_NAME, "brand"))
         head.addStretch()
-        head.addWidget(label(f"v{__version__}", "brand"))
+        # The version doubles as the app menu: updating and uninstalling live here.
+        self.app_menu_btn = QToolButton(text=f"v{__version__}  \u25BE")
+        self.app_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        self.app_menu_btn.setCursor(Qt.PointingHandCursor)
+        menu = QMenu(self.app_menu_btn)
+        menu.addAction("Check for updates", lambda: self._run_installer("update"))
+        menu.addAction(f"Uninstall {APP_NAME}", lambda: self._run_installer("uninstall"))
+        self.app_menu_btn.setMenu(menu)
+        head.addWidget(self.app_menu_btn)
         lay.addLayout(head)
         lay.addSpacing(14)
         lay.addWidget(self.stack, 1)
@@ -845,6 +861,14 @@ class MainWindow(QMainWindow):
             self.result_btn.setText("Try again")
         self.stack.setCurrentWidget(self.result_page)
         self.result_btn.setFocus()
+
+    def _run_installer(self, cmd: str) -> None:
+        """Runs `handheld-forge update/uninstall --ask` on its own, so its windows ask and report."""
+        if self.thread is not None:
+            self.work_status.setText("Finish or stop the current drive first")
+            return
+        subprocess.Popen([sys.executable, "-m", "handheld_forge", cmd, "--ask"],
+                         stdin=subprocess.DEVNULL, start_new_session=True)
 
     def _back_to_start(self) -> None:
         self.drives = []
