@@ -13,7 +13,7 @@ from .drives import Drive
 def make_drive(distro: Distro, drive: Drive, image: Path, stage=lambda *_: None, log=print,
                cancel: threading.Event | None = None) -> None:
     if not distro.needs_password:
-        builder.build_drive(drive, image, stage, log, cancel)
+        builder.build_drive(drive, image, stage, log, cancel, layout=distro.layout)
         return
     try:
         rawwrite.write_drive(drive, image, distro.format == "raw-bz2", stage, log, cancel)

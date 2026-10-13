@@ -67,6 +67,12 @@ class LabelRewriteTests(unittest.TestCase):
         out = builder.rewrite_boot_label("archisolabel=X archisosearchuuid=1 LABEL=X", "X", "u")
         self.assertIn("UUID=u", out)
 
+    def test_fat_label_and_archisolabel(self):
+        self.assertEqual(builder.fat_label("CachyOS-Handheld"), "CACHYOS-HAN")
+        self.assertEqual(builder.fat_label("a b"), "A_B")
+        out = builder.rewrite_archiso_label("options archisolabel=LONG_LABEL1 quiet", "LONG_LABEL1", "AB-12")
+        self.assertEqual(out, "options archisodevice=/dev/disk/by-uuid/AB-12 quiet")
+
     def test_label_rules(self):
         self.assertTrue(builder.ext4_label_ok("Bazzite-Live"))
         self.assertFalse(builder.ext4_label_ok("Bazzite-Deck-Stable-Live"))
@@ -114,14 +120,14 @@ class BuilderTests(unittest.TestCase):
                                      stdout=subprocess.PIPE, text=True, env={**os.environ, **env})
         self.assertEqual(self.fake.stdout.readline().strip(), "READY")
 
-    def run_build(self, files, label="Bazzite-Live", **env):
+    def run_build(self, files, label="Bazzite-Live", layout="split", **env):
         self.start_fake(**env)
         iso = self.base / "test.iso"
         iso.write_bytes(build_iso(files, label=label, max_extent=100_000))
         drive = Drive("/dev/sdz", "sdz", 32_000_000_000, "Fake Stick", ("sdz1",), True, "ok")
         stages = []
         builder.build_drive(drive, iso, lambda s, d, t: stages.append(s), log=lambda m: None,
-                            recheck=False)
+                            recheck=False, layout=layout)
         return stages
 
     def calls(self):
@@ -180,6 +186,39 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaises(builder.BuildError) as cm:
             self.run_build(layout(), FAKE_SIZE=str(600 * 1024 * 1024))
         self.assertIn("too small", str(cm.exception))
+
+    def test_experimental_fat_layout_for_archiso(self):
+        label = "CACHYOS_202606"  # longer than a FAT label allows
+        entry = (f"linux /arch/boot/x86_64/vmlinuz\n"
+                 f"options archisobasedir=arch archisolabel={label} archisosearchuuid=2026-06-28\n")
+        files = {
+            "EFI/BOOT/BOOTX64.EFI": b"sdboot" * 1000,
+            "loader/entries/01.conf": entry.encode(),
+            "arch/boot/x86_64/vmlinuz": b"K" * 70_000,
+            "arch/x86_64/airootfs.sfs": os.urandom(300_000),
+            "boot/2026-06-28.uuid": b"",
+        }
+        stages = self.run_build(files, label=label, layout="fat")
+        parts = self.parts()
+        self.assertEqual(list(parts), ["sdz1"])  # one FAT32 partition holds everything
+        p = parts["sdz1"]
+        self.assertEqual((p["fstype"], p["type"]), ("vfat", builder.ESP_TYPE))
+        self.assertEqual(p["fsopts"]["label"], "CACHYOS_202")
+        tree = self.tree(p["store"])
+        self.assertEqual(set(tree), set(files))
+        self.assertEqual(tree["arch/x86_64/airootfs.sfs"], files["arch/x86_64/airootfs.sfs"])
+        self.assertIn(f"archisodevice=/dev/disk/by-uuid/{p['uuid']}", tree["loader/entries/01.conf"].decode())
+        self.assertIn("archisosearchuuid=2026-06-28", tree["loader/entries/01.conf"].decode())
+        for s in ("prepare", "copy", "check", "eject"):
+            self.assertIn(s, stages)
+
+    def test_fat_layout_refuses_files_over_4gb(self):
+        with mock.patch.object(builder, "FAT_FILE_LIMIT", 100_000), \
+                self.assertRaises(builder.BuildError) as cm:
+            self.run_build(layout(), layout="fat")
+        self.assertIn("over 4 GB", str(cm.exception))
+        log = self.base / "calls.jsonl"
+        self.assertNotIn("Format", [c["method"] for c in self.calls()] if log.exists() else [])
 
     def test_iso_without_uefi_loader(self):
         with self.assertRaises(builder.BuildError):

@@ -32,6 +32,12 @@ Every call tells the system *never* to prompt. If a system's rules would require
 
 SteamOS and CachyOS are different: SteamOS's recovery image is a whole disk image, and CachyOS expects its ISO written as is, so both need a byte-for-byte write. Linux only allows that after an admin password, so for these two the desktop app asks udisks to open the drive and your desktop shows its own password window, once, when writing starts. Nothing else needs it, and the app never sees your password. The image is then written (SteamOS's is decompressed on the fly), the whole drive is read back bypassing the cache and compared, and the drive is ejected. On SteamOS desktop mode, set a password first with `passwd`. The Android app writes them with no password, since the phone talks to the stick directly over USB.
 
+### Experimental: CachyOS with no password
+
+The desktop app also lists CachyOS under **Experimental, untested**. It skips the password by copying CachyOS's files instead of writing the ISO byte for byte: the drive gets one FAT32 partition holding every file from the ISO. CachyOS is built with Arch's archiso, whose boot loader and startup look for a marker file (`/boot/<ISO UUID>.uuid`) on any drive rather than a drive label, which is what makes a copied stick findable. If the ISO's label is too long for FAT, the boot entries that use it are pointed at the partition's UUID. Files over 4 GB can't go on FAT32, so the app refuses before erasing if a future ISO has one. Secure Boot must be off, as for the regular CachyOS option.
+
+It hasn't been tried on a handheld yet. If the drive doesn't start, make it again with the regular CachyOS option. From the command line it's `--distro cachyos-handheld-copy`.
+
 ## Safety
 
 - Only **USB** drives are listed. Internal NVMe/SATA disks and SD cards never appear.

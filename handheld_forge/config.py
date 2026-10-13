@@ -6,7 +6,7 @@ Adding a new OS later means adding an entry to distros.json, not new code.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -43,6 +43,12 @@ class Distro:
     # What to do after booting the drive, and anything to know before erasing it.
     install_steps: list[str] = field(default_factory=list)
     warning: str | None = None
+    # "split": an EFI partition plus an ext4 copy of the ISO (Bazzite). "fat": everything on
+    # one FAT32 partition, which Arch-based ISOs like CachyOS can find by their marker file.
+    layout: str = "split"
+    # A password-free way to make this system's drive that hasn't been proven to boot yet.
+    experimental_copy: str | None = None
+    experimental: bool = False
 
     @property
     def needs_password(self) -> bool:
@@ -99,12 +105,32 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
                 write="raw" if raw.get("format", "iso") != "iso" or raw.get("write") == "raw" else "copy",
                 install_steps=list(raw.get("install_steps", [])),
                 warning=raw.get("warning"),
+                experimental_copy=raw.get("experimental_copy"),
                 min_drive_gb=int(raw.get("min_drive_gb", 16)),
                 public_key=key_path,
                 images=images,
             )
         )
     return distros
+
+
+def experimental_variants(catalog: list[Distro]) -> list[Distro]:
+    """Password-free versions of byte-for-byte systems, built by copying files instead.
+
+    They aren't proven to boot, so they're listed apart from the regular choices.
+    """
+    out = []
+    for d in catalog:
+        if not (d.enabled and d.needs_password and d.experimental_copy and d.format == "iso"):
+            continue
+        steps = [*d.install_steps, f"If the drive doesn't start, make it again with the regular "
+                                   f"{d.name} option. That one asks for your password but is known to work."]
+        out.append(replace(
+            d, id=f"{d.id}-copy", edition="No password", write="copy", layout="fat",
+            experimental=True, install_steps=steps,
+            warning="\n\n".join(filter(None, [d.experimental_copy, d.warning])),
+        ))
+    return out
 
 
 def load_boot_menu(path: Path = CATALOG_PATH) -> list[str]:
@@ -124,7 +150,8 @@ def install_guide(distro: Distro, boot_menu: list[str] | None = None) -> str:
 
 
 def get_distro(distro_id: str, catalog: list[Distro] | None = None) -> Distro:
-    for d in catalog if catalog is not None else load_catalog():
+    catalog = catalog if catalog is not None else load_catalog()
+    for d in catalog + experimental_variants(catalog):
         if d.id == distro_id:
             return d
     raise KeyError(distro_id)

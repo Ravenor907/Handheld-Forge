@@ -7,7 +7,7 @@ import sys
 import time
 
 from . import APP_NAME, __version__
-from .config import get_distro, install_guide, load_catalog
+from .config import experimental_variants, get_distro, install_guide, load_catalog
 from .progress import Progress
 from .preflight import SleepBlocker, can_start, checks, read_state
 from .download import prepare_iso
@@ -44,9 +44,15 @@ def _log(msg: str) -> None:
 
 
 def cmd_distros(_: argparse.Namespace) -> int:
-    for d in load_catalog():
+    catalog = load_catalog()
+    for d in catalog:
         state = ("ready, asks for password" if d.needs_password else "ready") if d.enabled else "planned"
         print(f"{d.id:<20} {state:<8} {d.name}")
+    extra = experimental_variants(catalog)
+    if extra:
+        print("\nExperimental (no password, not tested on a handheld yet):")
+        for d in extra:
+            print(f"{d.id:<20} {d.name}, copied file by file")
     return 0
 
 
@@ -100,6 +106,8 @@ def cmd_create(a: argparse.Namespace) -> int:
         print(f"This will ERASE everything on {drive.label}")
         if distro.needs_password:
             print(f"{distro.name} is written byte for byte, so Linux will ask for your password once.")
+        if distro.warning:
+            print(distro.warning)
         print("Leave the drive plugged in until it's done. This can take 30 minutes or more.")
         if input("Type ERASE to continue: ").strip() != "ERASE":
             print("Cancelled.")

@@ -12,6 +12,11 @@ the same makes the stick boot exactly like a flashed one, Secure Boot included.
 If a label is too long for ext4 (16 bytes), the boot config is pointed at the
 partition's UUID instead.
 
+The experimental "fat" layout, for Arch-based ISOs like CachyOS, puts every file on
+one FAT32 partition instead. Their boot loader and initramfs find their files by a
+marker file (/boot/<ISO UUID>.uuid) on any drive, which is how archiso supports
+copying an ISO onto a stick. It hasn't been tested on a handheld yet.
+
 All disk work goes through udisks, the same service the file manager uses.
 """
 
@@ -34,6 +39,7 @@ ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 LINUX_DATA_TYPE = "0fc63daf-8483-4772-8e79-3d69d8477de4"
 ESP_LABEL = "FORGE-EFI"
 FALLBACK_LABEL = "FORGE-LIVE"
+FAT_FILE_LIMIT = 4 * 1024**3 - 1
 SYNC_EVERY = 32 * MiB
 CHUNK = 4 * MiB
 
@@ -61,6 +67,21 @@ def rewrite_boot_label(text: str, label: str, uuid: str) -> str:
     return text
 
 
+def fat_label(label: str) -> str:
+    """A FAT volume label (at most 11 characters, upper case) as close to the ISO's as allowed."""
+    return re.sub(r"[^A-Z0-9_-]", "_", label.upper())[:11] or "FORGE"
+
+
+def rewrite_archiso_label(text: str, label: str, uuid: str) -> str:
+    """Point an archiso boot entry that finds its files by label at a filesystem UUID."""
+    return re.sub(rf"\barchisolabel={re.escape(label)}(?=[\s'\"]|$)",
+                  f"archisodevice=/dev/disk/by-uuid/{uuid}", text)
+
+
+def _is_boot_config(path: str) -> bool:
+    return path.rsplit("/", 1)[-1].lower().endswith((".cfg", ".conf"))
+
+
 def _is_efi(path: str) -> bool:
     return path.split("/", 1)[0].upper() == "EFI"
 
@@ -80,6 +101,7 @@ def build_drive(
     cancel: threading.Event | None = None,
     udisks: UDisks | None = None,
     recheck: bool = True,
+    layout: str = "split",
 ) -> None:
     cancel = cancel or threading.Event()
     ud = udisks or UDisks()
@@ -105,7 +127,15 @@ def build_drive(
             if not any(e.path.upper() == "EFI/BOOT/BOOTX64.EFI" for e in files):
                 raise BuildError("This ISO has no UEFI boot loader, so it cannot boot from USB this way.")
             label = iso.volume_id
-            total = sum(e.size for e in files) + sum(e.size for e in files if _is_efi(e.path))
+            fat = layout == "fat"
+            if fat:
+                big = next((e for e in files if e.size > FAT_FILE_LIMIT), None)
+                if big:
+                    raise BuildError(f"{big.path} is over 4 GB, too big for this method. "
+                                     "Use the regular option, which asks for your password.")
+                total = sum(e.size for e in files)
+            else:
+                total = sum(e.size for e in files) + sum(e.size for e in files if _is_efi(e.path))
             log(f"ISO label {label!r}, {len(files)} files, {total / GB:.1f} GB to copy")
 
             # ---- partition and format
@@ -114,46 +144,63 @@ def build_drive(
                 ud.unmount(object_path_for(part))
             log("Creating a fresh partition table")
             ud.format_disk(block)
-            esp = ud.create_partition(block, MiB, ESP_SIZE, ESP_TYPE, "EFI System",
-                                      "vfat", {"label": ESP_LABEL})
-            start = ud.partition_end(esp)
-            size = (ud.size(block) - start - 2 * MiB) // MiB * MiB
-            if size < total * 1.08 + 256 * MiB:
-                raise BuildError("This drive is too small for the image.")
-            use_label = label if ext4_label_ok(label) else FALLBACK_LABEL
-            log(f"Formatting data partition as ext4 labeled {use_label!r}")
-            data = ud.create_partition(block, start, size, LINUX_DATA_TYPE, use_label, "ext4",
-                                       {"label": use_label, "take-ownership": True, "no-discard": True})
+            if fat:
+                size = (ud.size(block) - MiB - 2 * MiB) // MiB * MiB
+                if size < total * 1.03 + 64 * MiB:
+                    raise BuildError("This drive is too small for the image.")
+                use_label = fat_label(label)
+                log(f"Formatting the drive as one FAT32 partition labeled {use_label!r}")
+                parts = {"data": ud.create_partition(block, MiB, size, ESP_TYPE, use_label, "vfat",
+                                                     {"label": use_label})}
+            else:
+                esp = ud.create_partition(block, MiB, ESP_SIZE, ESP_TYPE, "EFI System",
+                                          "vfat", {"label": ESP_LABEL})
+                start = ud.partition_end(esp)
+                size = (ud.size(block) - start - 2 * MiB) // MiB * MiB
+                if size < total * 1.08 + 256 * MiB:
+                    raise BuildError("This drive is too small for the image.")
+                use_label = label if ext4_label_ok(label) else FALLBACK_LABEL
+                log(f"Formatting data partition as ext4 labeled {use_label!r}")
+                parts = {"esp": esp,
+                         "data": ud.create_partition(block, start, size, LINUX_DATA_TYPE, use_label, "ext4",
+                                                     {"label": use_label, "take-ownership": True,
+                                                      "no-discard": True})}
             if cancel.is_set():
                 raise Cancelled()
 
             # ---- copy
-            esp_mnt, data_mnt = Path(ud.mount(esp)), Path(ud.mount(data))
-            record = _copy_tree(iso, entries, esp_mnt, data_mnt, total, stage, cancel)
+            mounts = {role: Path(ud.mount(part)) for role, part in parts.items()}
+            if fat:
+                skipped = [e.path for e in entries if e.symlink is not None]
+                if skipped:
+                    log(f"FAT32 can't hold links, skipped {len(skipped)}: {', '.join(skipped[:3])}")
+            record = _copy_tree(iso, entries, mounts.get("esp"), mounts["data"], total, stage, cancel,
+                                links=not fat)
 
             if use_label != label:
-                uuid = ud.uuid(data)
-                log(f"Label too long for ext4, pointing boot config at UUID {uuid}")
-                mounts = {"data": data_mnt, "esp": esp_mnt}
+                uuid = ud.uuid(parts["data"])
+                log(f"The drive can't use the label {label!r}, pointing boot config at UUID {uuid}")
                 for rel, by_role in record.items():
-                    if rel.rsplit("/", 1)[-1].lower() != "grub.cfg":
+                    if not _is_boot_config(rel):
                         continue
                     for role in by_role:
-                        p = _safe_join(mounts[role], rel)
-                        new = rewrite_boot_label(p.read_text(errors="replace"), label, uuid).encode()
-                        p.write_bytes(new)
-                        by_role[role] = (hashlib.sha256(new).hexdigest(), len(new))
+                        path = _safe_join(mounts[role], rel)
+                        old = path.read_text(errors="replace")
+                        new = rewrite_archiso_label(rewrite_boot_label(old, label, uuid), label, uuid)
+                        if new != old:
+                            path.write_bytes(new.encode())
+                            by_role[role] = (hashlib.sha256(new.encode()).hexdigest(), len(new.encode()))
 
             stage("sync", 0, 0)
             os.sync()
-            ud.unmount(esp)
-            ud.unmount(data)
+            for part in parts.values():
+                ud.unmount(part)
 
             # ---- read back from a fresh mount (no page cache)
-            esp_mnt, data_mnt = Path(ud.mount(esp)), Path(ud.mount(data))
-            _verify(record, {"data": data_mnt, "esp": esp_mnt}, stage, cancel)
-            ud.unmount(esp)
-            ud.unmount(data)
+            mounts = {role: Path(ud.mount(part)) for role, part in parts.items()}
+            _verify(record, mounts, stage, cancel)
+            for part in parts.values():
+                ud.unmount(part)
             log("Every file on the drive matches the ISO")
 
         stage("eject", 0, 0)
@@ -177,18 +224,20 @@ def build_drive(
 Record = dict[str, dict[str, tuple[str, int]]]  # relpath -> {role: (sha256, size)}
 
 
-def _copy_tree(iso: IsoReader, entries: list[IsoEntry], esp: Path, data: Path, total: int,
-               stage: StageFn, cancel: threading.Event) -> Record:
-    """Copy every entry to the data partition (and EFI/ also to the ESP)."""
+def _copy_tree(iso: IsoReader, entries: list[IsoEntry], esp: Path | None, data: Path, total: int,
+               stage: StageFn, cancel: threading.Event, links: bool = True) -> Record:
+    """Copy every entry to the data partition (and EFI/ also to the ESP, if there is one)."""
     done = 0
     record: Record = {}
     for e in entries:
-        targets = {"data": data, **({"esp": esp} if _is_efi(e.path) else {})}
+        targets = {"data": data, **({"esp": esp} if esp and _is_efi(e.path) else {})}
         if e.is_dir:
             for root in targets.values():
                 _safe_join(root, e.path).mkdir(parents=True, exist_ok=True)
             continue
         if e.symlink is not None:
+            if not links:
+                continue
             dest = _safe_join(data, e.path)
             dest.parent.mkdir(parents=True, exist_ok=True)
             if not dest.is_symlink():

@@ -29,7 +29,7 @@ from .maker import make_drive
 from .rawwrite import Cancelled as RawCancelled
 from .rawwrite import RawWriteError
 from .udisks import UDisksError
-from .config import Distro, load_boot_menu, load_catalog
+from .config import Distro, experimental_variants, load_boot_menu, load_catalog
 from .download import Cancelled as DownloadCancelled
 from .download import prepare_iso
 from .progress import Progress, describe
@@ -447,6 +447,7 @@ class MainWindow(QMainWindow):
         self.resize(620, 660)
         self.setMinimumSize(480, 480)
         self.catalog = load_catalog()
+        self.experimental = experimental_variants(self.catalog)
         self.thread: QThread | None = None
         self.worker: Worker | None = None
         self.drives: list[Drive] = []
@@ -509,11 +510,25 @@ class MainWindow(QMainWindow):
             t.setProperty("distro", d.id)
             self.os_group.addButton(t)
             row.addWidget(t)
+        lay.addLayout(row)
+        if self.experimental:
+            # Untested ways to skip the password, kept apart so nobody picks one by accident.
+            lay.addWidget(label("Experimental, untested", "hint"))
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            for d in self.experimental:
+                t = Tile(d.name, d.edition)
+                t.setToolTip(f"Copies {d.name}'s files instead of writing it byte for byte, so it needs "
+                             "no password. It may not start on your handheld.")
+                t.setProperty("distro", d.id)
+                self.os_group.addButton(t)
+                row.addWidget(t)
+            row.addStretch(1)
+            lay.addLayout(row)
         first = next((b for b in self.os_group.buttons() if b.isEnabled()), None)
         if first:
             first.setChecked(True)
         self.os_group.buttonToggled.connect(lambda *_: self._update_ready())
-        lay.addLayout(row)
         lay.addSpacing(10)
 
         self.drive_box = QWidget()
@@ -695,7 +710,7 @@ class MainWindow(QMainWindow):
 
     def _distro(self) -> Distro | None:
         b = self.os_group.checkedButton()
-        return next((d for d in self.catalog if b and d.id == b.property("distro")), None)
+        return next((d for d in self.catalog + self.experimental if b and d.id == b.property("distro")), None)
 
     def _drive(self) -> Drive | None:
         b = self.drive_group.checkedButton()

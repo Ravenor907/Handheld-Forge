@@ -76,6 +76,7 @@
         }
       ],
       "write": "raw",
+      "experimental_copy": "Experimental: this copies CachyOS's files to the drive instead of writing it byte for byte, so it needs no password. It hasn't been tested on a handheld yet and may not start. Secure Boot must be off.",
       "warning": "The built-in controls don't work in CachyOS's installer on ROG Ally handhelds. Use the touchscreen, or plug in a keyboard and mouse.",
       "install_steps": [
         "Choose the USB drive in the boot menu. Use the touchscreen from here on.",

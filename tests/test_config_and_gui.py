@@ -5,7 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from handheld_forge.config import CatalogError, get_distro, install_guide, load_catalog
+from handheld_forge.config import CatalogError, experimental_variants, get_distro, install_guide, load_catalog
 
 
 class CatalogTests(unittest.TestCase):
@@ -28,6 +28,20 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(c.format, "iso")
         self.assertTrue(c.images[0].checksum_url.endswith(".iso.sha256"))
         self.assertIn("touchscreen", c.warning)
+
+    def test_experimental_no_password_cachyos(self):
+        cat = load_catalog()
+        variants = experimental_variants(cat)
+        self.assertEqual([d.id for d in variants], ["cachyos-handheld-copy"])
+        v = get_distro("cachyos-handheld-copy", cat)
+        self.assertTrue(v.experimental)
+        self.assertFalse(v.needs_password)
+        self.assertEqual((v.write, v.layout), ("copy", "fat"))
+        self.assertEqual(v.images, get_distro("cachyos-handheld", cat).images)  # same download
+        self.assertIn("Experimental", v.warning)
+        self.assertIn("touchscreen", v.warning)  # the controls warning still applies
+        self.assertIn("regular CachyOS option", v.install_steps[-1])
+        self.assertNotIn("—", v.warning + "".join(v.install_steps))
 
     def test_install_guide(self):
         cat = load_catalog()
@@ -151,6 +165,17 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(w.confirm_warning.isVisibleTo(w))
             self.assertIn("password", w.confirm_warning.text())
             shot(w, "4b-confirm-steamos")
+            w.stack.setCurrentWidget(w.choose_page)
+
+            # The no-password CachyOS sits in its own Experimental section and warns before erasing.
+            exp = next(b for b in w.os_group.buttons() if b.property("distro") == "cachyos-handheld-copy")
+            self.assertEqual(exp.subtitle, "No password")
+            exp.setChecked(True)
+            self.assertFalse(w._distro().needs_password)
+            w._ask_confirm()
+            self.assertIn("Experimental", w.confirm_warning.text())
+            self.assertNotIn("Linux will ask for your password", w.confirm_warning.text())
+            shot(w, "4c-confirm-experimental")
             w.stack.setCurrentWidget(w.choose_page)
             next(b for b in w.os_group.buttons() if b.property("distro") == "bazzite-deck").setChecked(True)
             w._ask_confirm()
