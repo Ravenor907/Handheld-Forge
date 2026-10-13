@@ -23,9 +23,13 @@ class InstallerTests(unittest.TestCase):
         (self.p.cache / "bazzite.iso").write_bytes(b"x" * 1000)
         self.home_patch = mock.patch.object(Path, "home", return_value=self.home)
         self.home_patch.start()
+        self.refreshes = []
+        self.refresh_patch = mock.patch.object(installer, "refresh_menus", side_effect=self.refreshes.append)
+        self.refresh_patch.start()
 
     def tearDown(self):
         self.home_patch.stop()
+        self.refresh_patch.stop()
         self.tmp.cleanup()
 
     def test_menu_entry_has_update_and_uninstall(self):
@@ -34,6 +38,27 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("Actions=update;uninstall;", text)
         self.assertIn(f"Exec={self.p.venv}/bin/handheld-forge uninstall --ask", text)
         self.assertEqual(os.readlink(self.p.bin_link), str(self.p.venv / "bin/handheld-forge"))
+
+    def test_menu_entry_rewritten_only_when_changed(self):
+        installer.write_menu_entry(self.p)
+        self.assertEqual(len(self.refreshes), 1)
+        inode = self.p.desktop.stat().st_ino
+        installer.write_menu_entry(self.p)  # same content: the file isn't touched
+        self.assertEqual(self.p.desktop.stat().st_ino, inode)
+        self.assertEqual(len(self.refreshes), 1)
+        self.p.desktop.write_text("[Desktop Entry]\nName=old\n")
+        installer.write_menu_entry(self.p)  # changed: replaced in one step, menus refreshed
+        self.assertIn("StartupWMClass=handheld-forge", self.p.desktop.read_text())
+        self.assertEqual(len(self.refreshes), 2)
+        self.assertEqual([f.name for f in self.p.desktop.parent.iterdir()], ["handheld-forge.desktop"])
+
+    def test_refresh_uses_kde_cache_builder(self):
+        self.refresh_patch.stop()
+        calls = []
+        with mock.patch.object(installer.shutil, "which", side_effect=lambda c: f"/usr/bin/{c}"):
+            installer.refresh_menus(self.home, run=lambda cmd, **kw: calls.append(cmd))
+        self.refresh_patch.start()
+        self.assertEqual(calls, [["kbuildsycoca6"]])
 
     def test_uninstall_removes_everything(self):
         installer.write_menu_entry(self.p)

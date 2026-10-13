@@ -57,6 +57,8 @@ Exec={exe}
 Icon=drive-removable-media-usb
 Terminal=false
 Categories=System;Utility;
+StartupNotify=true
+StartupWMClass=handheld-forge
 Actions=update;uninstall;
 
 [Desktop Action update]
@@ -69,10 +71,30 @@ Exec={exe} uninstall --ask
 """
 
 
-def write_menu_entry(p: Paths | None = None) -> Path:
+def refresh_menus(apps: Path | None = None, run=subprocess.run) -> None:
+    """Ask the desktop to reread app entries now instead of whenever it next notices."""
+    apps = apps or Paths.current().desktop.parent
+    for cmd in (["kbuildsycoca6"], ["kbuildsycoca5"], ["update-desktop-database", str(apps)]):
+        if shutil.which(cmd[0]):
+            try:
+                run(cmd, capture_output=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if cmd[0].startswith("kbuildsycoca"):
+                break  # one KDE cache rebuild is enough
+
+
+def write_menu_entry(p: Paths | None = None, refresh=None) -> Path:
     p = p or Paths.current()
     p.desktop.parent.mkdir(parents=True, exist_ok=True)
-    p.desktop.write_text(menu_entry(p))
+    text = menu_entry(p)
+    # Replace the file in one step and only when it changed: a moment without a valid
+    # entry is enough for KDE to drop a launcher pinned to the taskbar.
+    if not p.desktop.exists() or p.desktop.read_text() != text:
+        tmp = p.desktop.with_name(f".{p.desktop.name}.tmp")
+        tmp.write_text(text)
+        os.replace(tmp, p.desktop)
+        (refresh or refresh_menus)(p.desktop.parent)
     p.bin_link.parent.mkdir(parents=True, exist_ok=True)
     if p.bin_link.is_symlink() or not p.bin_link.exists():
         p.bin_link.unlink(missing_ok=True)
@@ -137,6 +159,8 @@ def uninstall(p: Paths | None = None, keep_downloads: bool = False) -> list[Path
     if p.bin_link.is_symlink() and str(os.readlink(p.bin_link)).startswith(str(p.app_dir)):
         p.bin_link.unlink()
         removed.append(p.bin_link)
+    if removed:
+        refresh_menus(p.desktop.parent)
     targets = [p.app_dir] + ([] if keep_downloads else [p.cache])
     for d in targets:
         if d.is_dir() and d.name == "handheld-forge" and Path.home() in d.parents:
