@@ -9,22 +9,24 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import urllib.error
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QButtonGroup, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit,
+    QAbstractButton, QApplication, QButtonGroup, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, __version__
 from .builder import BuildError, build_drive
 from .builder import Cancelled as BuildCancelled
-from .config import Distro, install_guide, load_catalog
+from .config import Distro, load_boot_menu, load_catalog
 from .download import Cancelled as DownloadCancelled
 from .download import prepare_iso
+from .preflight import SleepBlocker, can_start, checks, explain_network, read_state
 from .drives import GB, Drive, list_drives
 
 # ---------------------------------------------------------------- palette
@@ -66,6 +68,16 @@ QPlainTextEdit {{
     color: {ASH.name()}; font-family: monospace; font-size: 12px;
 }}
 QScrollArea {{ border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: {SEAM.name()}; border-radius: 4px; min-height: 30px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+QLabel[role="banner"] {{
+    background: {IRON.name()}; border: 1px solid {MOLTEN_A.name()}; border-radius: 10px;
+    padding: 10px 14px; font-size: 14px;
+}}
+QWidget#ack {{ background: {IRON.name()}; border: 1px solid {SEAM.name()}; border-radius: 10px; }}
+QWidget#ack QLabel, QWidget#ack QCheckBox {{ background: transparent; font-size: 14px; }}
 """
 
 # Steps shown while working. The engine's stages map onto these.
@@ -81,6 +93,19 @@ def label(text: str = "", role: str | None = None) -> QLabel:
         lab.setProperty("role", role)
     lab.setWordWrap(True)
     return lab
+
+
+def guide_html(distro: Distro) -> str:
+    """The install guide as rich text: boot menu tips, then numbered steps."""
+    def esc(t: str) -> str:
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    head = f'<p style="color:{ASH.name()}; font-size:13px; font-weight:600">'
+    menu = "".join(f"<p>{esc(line)}</p>" for line in load_boot_menu())
+    num = f'<span style="color:{MOLTEN_A.name()}">'
+    steps = "".join(f"<p>{num}{i}.</span>&nbsp; {esc(s)}</p>"
+                    for i, s in enumerate(distro.install_steps, 1))
+    body = f"{head}Open the boot menu</p>{menu}{head}Then install</p>{steps}"
+    return f'<div style="font-size:14px">{body}</div>'
 
 
 def quiet_button(text: str) -> QPushButton:
@@ -373,10 +398,11 @@ class Worker(QObject):
 
     def run(self) -> None:
         try:
-            img = prepare_iso(self.distro, self.stage.emit, self.log.emit, self.cancel)
-            if self.cancel.is_set():
-                raise DownloadCancelled()
-            build_drive(self.drive, img.path, self.stage.emit, self.log.emit, self.cancel)
+            with SleepBlocker():
+                img = prepare_iso(self.distro, self.stage.emit, self.log.emit, self.cancel)
+                if self.cancel.is_set():
+                    raise DownloadCancelled()
+                build_drive(self.drive, img.path, self.stage.emit, self.log.emit, self.cancel)
             self.finished.emit("ok", "")
         except DownloadCancelled:
             self.finished.emit("cancelled", "Download paused. It picks up where it left off next time.")
@@ -385,6 +411,11 @@ class Worker(QObject):
                                             "before booting from it.")
         except BuildError as e:
             self.finished.emit("error", str(e))
+        except urllib.error.HTTPError as e:
+            self.finished.emit("error", f"The download server answered {e.code}. Try again later.")
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            self.log.emit(f"{type(e).__name__}: {e}")
+            self.finished.emit("error", explain_network(str(e)))
         except Exception as e:  # anything unexpected still lands in the window
             self.finished.emit("error", f"{type(e).__name__}: {e}")
 
@@ -446,6 +477,9 @@ class MainWindow(QMainWindow):
         for d in self.catalog:
             t = Tile(d.name, d.edition, tag="" if d.enabled else ("Android" if d.android_only else "Soon"))
             t.setEnabled(d.enabled)
+            if d.android_only:
+                t.setToolTip(f"{d.name} is written byte for byte, which Linux only allows with an admin "
+                             "password. Make this one with the Android app.")
             t.setProperty("distro", d.id)
             self.os_group.addButton(t)
             row.addWidget(t)
@@ -496,10 +530,36 @@ class MainWindow(QMainWindow):
         self.confirm_tile.setFocusPolicy(Qt.NoFocus)
         self.confirm_tile.setAttribute(Qt.WA_TransparentForMouseEvents)
         lay.addWidget(self.confirm_tile)
+        lay.addSpacing(16)
+        self.confirm_warning = label("", "banner")
+        lay.addWidget(self.confirm_warning)
+        lay.addWidget(label("Before you start", "brand"))
+        self.check_labels = []
+        for _ in range(3):
+            lab = label("")
+            lab.setTextFormat(Qt.RichText)
+            self.check_labels.append(lab)
+            lay.addWidget(lab)
+        lay.addSpacing(8)
+        # QCheckBox can't wrap its text, so the box and a wrapping label share a framed row.
+        ack_row = QWidget()
+        ack_row.setObjectName("ack")
+        ack_lay = QHBoxLayout(ack_row)
+        ack_lay.setContentsMargins(12, 10, 12, 10)
+        self.ack = QCheckBox()
+        ack_text = label("I'll leave the drive plugged in and this window open until it's done. "
+                         "This can take 30 minutes or more.")
+        ack_text.mousePressEvent = lambda _: self.ack.toggle()
+        ack_lay.addWidget(self.ack, 0, Qt.AlignTop)
+        ack_lay.addWidget(ack_text, 1)
+        self.ack.toggled.connect(lambda _: self._refresh_checks(reread=False))
+        lay.addWidget(ack_row)
         lay.addStretch(2)
+        # Battery and network change while the person reads; keep the list current.
+        self.check_timer = QTimer(self, interval=3000, timeout=self._refresh_checks)
         row = QHBoxLayout()
         back = quiet_button("Go back")
-        back.clicked.connect(lambda: self.stack.setCurrentWidget(self.choose_page))
+        back.clicked.connect(self._leave_confirm)
         self.erase_btn = MoltenButton("Erase and create")
         self.erase_btn.clicked.connect(self.start)
         row.addWidget(back)
@@ -513,6 +573,9 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         self.work_title = label("", "title")
         lay.addWidget(self.work_title)
+        lay.addSpacing(12)
+        lay.addWidget(label("Leave the drive plugged in and this window open until it finishes. "
+                            "The computer won't go to sleep meanwhile.", "banner"))
         lay.addStretch(1)
         self.percent = label("0%", "big")
         lay.addWidget(self.percent)
@@ -544,16 +607,29 @@ class MainWindow(QMainWindow):
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addStretch(1)
+        # The install guide can be longer than the window, so the top part scrolls.
+        body = QWidget()
+        inner = QVBoxLayout(body)
+        inner.setContentsMargins(0, 0, 8, 0)
+        inner.addStretch(1)
         self.result_mark = StatusMark()
-        lay.addWidget(self.result_mark)
-        lay.addSpacing(16)
+        inner.addWidget(self.result_mark)
+        inner.addSpacing(16)
         self.result_title = label("", "title")
         self.result_text = label("", "hint")
-        lay.addWidget(self.result_title)
-        lay.addSpacing(8)
-        lay.addWidget(self.result_text)
-        lay.addStretch(2)
+        self.result_guide = label("")
+        self.result_guide.setTextFormat(Qt.RichText)
+        inner.addWidget(self.result_title)
+        inner.addSpacing(8)
+        inner.addWidget(self.result_text)
+        inner.addSpacing(14)
+        inner.addWidget(self.result_guide)
+        inner.addStretch(2)
+        self.result_scroll = QScrollArea()
+        self.result_scroll.setWidgetResizable(True)
+        self.result_scroll.setWidget(body)
+        lay.addWidget(self.result_scroll, 1)
+        lay.addSpacing(12)
         self.result_log = QPlainTextEdit(readOnly=True)
         self.result_log.setVisible(False)
         self.result_log.setMaximumHeight(160)
@@ -627,13 +703,34 @@ class MainWindow(QMainWindow):
         self.confirm_text.setText(f"Everything on it will be replaced with {distro.name}.")
         self.confirm_tile.title, self.confirm_tile.subtitle = drive.model, drive.size_label
         self.confirm_tile.update()
+        self.confirm_warning.setText(distro.warning or "")
+        self.confirm_warning.setVisible(bool(distro.warning))
+        self.ack.setChecked(False)
+        self._refresh_checks()
+        self.check_timer.start()
         self.stack.setCurrentWidget(self.confirm_page)
-        self.erase_btn.setFocus()
+        self.ack.setFocus()
+
+    def _refresh_checks(self, reread: bool = True) -> None:
+        if reread or not hasattr(self, "_checks"):
+            self._checks = checks(read_state())
+        for lab, c in zip(self.check_labels, self._checks, strict=True):
+            mark, color = ("✓", MOLTEN_A) if c.ok else (("✕", DANGER) if c.required else ("!", ASH))
+            detail_color = ASH if c.ok or not c.required else DANGER
+            lab.setText(f'<span style="color:{color.name()}; font-weight:700">{mark}</span>&nbsp; '
+                        f"<b>{c.title}</b><br>"
+                        f'<span style="color:{detail_color.name()}">{c.detail}</span>')
+        self.erase_btn.setEnabled(can_start(self._checks, self.ack.isChecked()))
+
+    def _leave_confirm(self) -> None:
+        self.check_timer.stop()
+        self.stack.setCurrentWidget(self.choose_page)
 
     def start(self) -> None:
         distro, drive = self._distro(), self._drive()
-        if not distro or not drive:
+        if not distro or not drive or not self.erase_btn.isEnabled():
             return
+        self.check_timer.stop()
         self.log_view.clear()
         self.log_view.setVisible(False)
         self._append(f"Creating {distro.name} on {drive.path}")
@@ -725,13 +822,17 @@ class MainWindow(QMainWindow):
         self.result_log.setVisible(False)
         self.result_btn.danger = False
         self.result_mark.set_kind(status)
+        self.result_guide.setVisible(False)
         if status == "ok":
             self.track.set_step(len(STEPS))
             self.result_title.setText("Ready to boot")
-            guide = install_guide(distro)
             self.result_text.setText(
+                f"{drive.model} now holds {distro.name}. Plug it into your handheld and follow these steps."
+                if distro.install_steps else
                 f"{drive.model} now holds {distro.name}. Plug it into your handheld, open the boot "
-                "menu and choose the USB drive." + (f"\n\n{guide}" if guide else ""))
+                "menu and choose the USB drive.")
+            self.result_guide.setText(guide_html(distro))
+            self.result_guide.setVisible(bool(distro.install_steps))
             self.result_btn.setText("Make another")
         elif status == "cancelled":
             self.result_title.setText("Stopped")
@@ -752,7 +853,7 @@ class MainWindow(QMainWindow):
 
     def _escape(self) -> None:
         if self.stack.currentWidget() is self.confirm_page:
-            self.stack.setCurrentWidget(self.choose_page)
+            self._leave_confirm()
 
     def closeEvent(self, event) -> None:
         if self.thread is not None:

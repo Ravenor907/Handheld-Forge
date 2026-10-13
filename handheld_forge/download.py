@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import http.client
 import os
+import shutil
 import threading
 import urllib.error
 import urllib.request
@@ -16,6 +18,10 @@ from .verify import CHUNK, VerificationError, parse_checksum, sha256_file, verif
 
 USER_AGENT = f"HandheldForge/{__version__} (+https://github.com/Ravenor907/Handheld-Forge)"
 TIMEOUT = 30
+# Resume as long as each try gets somewhere; give up after this many in a row that
+# get nothing (about a minute and a half of backoff).
+MAX_STALLED_TRIES = 8
+SPACE_MARGIN = 200 * 1024 * 1024
 
 StageFn = Callable[[str, int, int], None]  # (stage, done, total)
 LogFn = Callable[[str], None]
@@ -84,6 +90,33 @@ def resolve_image(distro: Distro, log: LogFn = print) -> ImageSource:
 
 
 def _download(url: str, part: Path, stage: StageFn, cancel: threading.Event) -> None:
+    """Download with resume; retries dropped connections like the Android app does."""
+    attempt = 0
+    while True:
+        before = part.stat().st_size if part.exists() else 0
+        try:
+            _download_once(url, part, stage, cancel)
+            return
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500 and e.code not in (408, 429):
+                raise
+            err: Exception = e
+        except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets, "closed early"
+            err = e
+        if part.exists() and part.stat().st_size > before:
+            attempt = 0
+        attempt += 1
+        if attempt > MAX_STALLED_TRIES or cancel.is_set():
+            raise err
+        if cancel.wait(_backoff(attempt)):
+            raise Cancelled()
+
+
+def _backoff(attempt: int) -> float:
+    return min(2 * attempt, 15)
+
+
+def _download_once(url: str, part: Path, stage: StageFn, cancel: threading.Event) -> None:
     have = part.stat().st_size if part.exists() else 0
     headers = {"Range": f"bytes={have}-"} if have else {}
     try:
@@ -105,6 +138,8 @@ def _download(url: str, part: Path, stage: StageFn, cancel: threading.Event) -> 
                 f.write(chunk)
                 done += len(chunk)
                 stage("download", done, total)
+        if total and done < total:
+            raise ConnectionError("Connection closed early")
 
 
 def prepare_iso(
@@ -153,6 +188,16 @@ def prepare_iso(
     if part.exists() and (not part_stamp.exists() or part_stamp.read_text().strip() != expected):
         part.unlink()
     part_stamp.write_text(expected)
+
+    try:
+        size = remote_size(img.iso_url) or 0
+    except OSError:
+        size = 0  # the download itself will report the problem
+    need = size - (part.stat().st_size if part.exists() else 0)
+    free = shutil.disk_usage(cdir).free
+    if need > 0 and free < need + SPACE_MARGIN:
+        raise DownloadError(f"Not enough space. Free up {(need + SPACE_MARGIN - free) / 1e9:.1f} GB "
+                            f"in {cdir} and try again.")
 
     log(f"Downloading {img.iso_url}")
     _download(img.iso_url, part, stage, cancel)

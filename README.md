@@ -2,15 +2,17 @@
 
 Pick a system, pick a USB drive, press **Create boot drive**. No terminal, no password.
 
-| System | Status |
-| --- | --- |
-| Bazzite (Handheld KDE) | Ready |
-| SteamOS (Steam Deck recovery image) | Ready on Android |
-| CachyOS Handheld | Ready on Android |
+| System | Linux desktop | Android |
+| --- | --- | --- |
+| Bazzite (Handheld KDE) | Ready | Ready |
+| SteamOS (Steam Deck recovery image) | Use Android | Ready |
+| CachyOS Handheld | Use Android | Ready |
+
+Both apps work the same way: a short "Before you start" check (battery, internet, metered connection) and a tick box to leave it alone, a reminder while it works, Stop asks before stopping, downloads resume through dropped connections, and when the drive is ready they show how to open the boot menu and get through that system's installer.
 
 ## What it does
 
-1. **Gets the latest release** from the official Bazzite server. It's cached in `~/.cache/handheld-forge`, so if you already have the newest one it isn't downloaded again, and an interrupted download resumes.
+1. **Gets the latest release** from the official Bazzite server. It's cached in `~/.cache/handheld-forge`, so if you already have the newest one it isn't downloaded again, and an interrupted download resumes, including after a dropped connection. It checks for free space first, and keeps the computer from sleeping until the drive is done.
 2. **Proves it's genuine.** The SHA256 checksum catches a corrupted download. The cosign signature, checked against Bazzite's public key pinned in this repo, catches a tampered one.
 3. **Builds the drive** (see below), then unmounts it, mounts it fresh and **reads every file back** to confirm it landed intact.
 4. **Ejects it**, ready to plug into your handheld.
@@ -27,6 +29,8 @@ Handheld Forge doesn't raw-image. It asks the desktop's own disk service (udisks
 Bazzite's live boot looks for its files by that label, so the stick boots exactly like a flashed one. If an ISO ever has a label too long for ext4, the boot config is pointed at the partition's UUID instead.
 
 Every call tells the system *never* to prompt. If a system's rules would require a password anyway, Handheld Forge stops and says so instead of showing a dialog.
+
+That's also why SteamOS and CachyOS are Android only. SteamOS's recovery image is a whole disk image, and CachyOS expects its ISO written as is, so both need a byte-for-byte write, which Linux only allows with an admin password. The phone talks to the stick directly over USB, so it can write them without one.
 
 ## Safety
 

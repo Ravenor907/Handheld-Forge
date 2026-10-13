@@ -19,6 +19,7 @@ from handheld_forge.verify import VerificationError
 
 FILES: dict[str, bytes] = {}
 HITS: list[str] = []
+DROPS: dict[str, int] = {}  # path -> how many more GETs to cut off halfway
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -57,6 +58,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Length", str(len(chunk)))
         self.end_headers()
+        if DROPS.get(self.path, 0) > 0:  # a flaky connection: send half, then hang up
+            DROPS[self.path] -= 1
+            self.wfile.write(chunk[: len(chunk) // 2])
+            self.close_connection = True
+            return
         self.wfile.write(chunk)
 
 
@@ -74,6 +80,10 @@ class DownloadTests(unittest.TestCase):
     def setUp(self):
         FILES.clear()
         HITS.clear()
+        DROPS.clear()
+        self.no_wait = mock.patch.object(download, "_backoff", return_value=0)
+        self.no_wait.start()
+        self.addCleanup(self.no_wait.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.env = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": self.tmp.name,
                                                 "NO_PROXY": "*", "no_proxy": "*"})
@@ -158,6 +168,47 @@ class DownloadTests(unittest.TestCase):
         self.publish("live.iso", b"data" * 1000, sign=False)
         with self.assertRaises(VerificationError):
             download.prepare_iso(self.distro("live.iso"), log=lambda m: None)
+
+    def test_resumes_after_dropped_connections(self):
+        data = os.urandom(2 * 1024 * 1024)
+        self.publish("live.iso", data)
+        DROPS["/live.iso"] = 3
+        img = download.prepare_iso(self.distro("live.iso"), log=lambda m: None)
+        self.assertEqual(img.path.read_bytes(), data)
+        self.assertEqual(HITS.count("/live.iso"), 4)
+
+    def test_gives_up_when_nothing_arrives(self):
+        calls = []
+
+        def stalled(url, part, stage, cancel):
+            calls.append(url)
+            raise ConnectionResetError("reset by peer")
+
+        with mock.patch.object(download, "_download_once", stalled), self.assertRaises(ConnectionResetError):
+            download._download(f"{self.base}/live.iso", Path(self.tmp.name) / "x.part",
+                               lambda *a: None, threading.Event())
+        self.assertEqual(len(calls), download.MAX_STALLED_TRIES + 1)
+
+    def test_client_errors_are_not_retried(self):
+        calls = []
+
+        def forbidden(url, part, stage, cancel):
+            calls.append(url)
+            raise download.urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+        with mock.patch.object(download, "_download_once", forbidden), \
+                self.assertRaises(download.urllib.error.HTTPError):
+            download._download("http://x/y", Path(self.tmp.name) / "y.part",
+                               lambda *a: None, threading.Event())
+        self.assertEqual(len(calls), 1)
+
+    def test_not_enough_space(self):
+        self.publish("live.iso", os.urandom(1024 * 1024))
+        usage = mock.Mock(free=10)
+        with mock.patch.object(download.shutil, "disk_usage", return_value=usage), \
+                self.assertRaises(download.DownloadError) as e:
+            download.prepare_iso(self.distro("live.iso"), log=lambda m: None)
+        self.assertIn("Not enough space", str(e.exception))
 
     def test_cancel(self):
         self.publish("live.iso", os.urandom(9 * 1024 * 1024))

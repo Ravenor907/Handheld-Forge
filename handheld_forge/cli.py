@@ -8,6 +8,7 @@ import time
 
 from . import APP_NAME, __version__
 from .config import get_distro, install_guide, load_catalog
+from .preflight import SleepBlocker, can_start, checks, read_state
 from .download import prepare_iso
 from .drives import list_drives
 
@@ -55,8 +56,18 @@ def cmd_drives(a: argparse.Namespace) -> int:
     return 0
 
 
+def _usable(distro) -> bool:
+    if not distro.enabled:
+        print(f"{distro.name} is made with the Android app (it needs a byte-for-byte write)."
+              if distro.android_only else f"{distro.name} isn't available yet.", file=sys.stderr)
+    return distro.enabled
+
+
 def cmd_download(a: argparse.Namespace) -> int:
-    img = prepare_iso(get_distro(a.distro), _Bar(), _log)
+    distro = get_distro(a.distro)
+    if not _usable(distro):
+        return 1
+    img = prepare_iso(distro, _Bar(), _log)
     sig = "verified" if img.signature_verified else "not available"
     print(f"\n{img.path}\nsha256 {img.sha256}  signature {sig}")
     return 0
@@ -66,6 +77,8 @@ def cmd_create(a: argparse.Namespace) -> int:
     from .builder import build_drive
 
     distro = get_distro(a.distro)
+    if not _usable(distro):
+        return 1
     drive = next((d for d in list_drives() if d.path == a.device), None)
     if drive is None:
         print(f"{a.device} is not an eligible USB drive. See: handheld-forge drives --all", file=sys.stderr)
@@ -73,14 +86,22 @@ def cmd_create(a: argparse.Namespace) -> int:
     if drive.size < distro.min_drive_gb * 1000**3 * 0.93:
         print(f"Use a drive of {distro.min_drive_gb} GB or larger.", file=sys.stderr)
         return 1
+    items = checks(read_state())
+    for c in items:
+        if not c.ok:
+            print(f"{'Blocked' if c.required else 'Warning'}: {c.title}. {c.detail}", file=sys.stderr)
+    if not can_start(items, acknowledged=True):
+        return 1
     if not a.yes:
         print(f"This will ERASE everything on {drive.label}")
+        print("Leave the drive plugged in until it's done. This can take 30 minutes or more.")
         if input("Type ERASE to continue: ").strip() != "ERASE":
             print("Cancelled.")
             return 1
     bar = _Bar()
-    img = prepare_iso(distro, bar, _log)
-    build_drive(drive, img.path, bar, _log)
+    with SleepBlocker():
+        img = prepare_iso(distro, bar, _log)
+        build_drive(drive, img.path, bar, _log)
     print(f"\n{distro.name} boot drive is ready.\n\n{install_guide(distro)}")
     return 0
 

@@ -112,6 +112,12 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(w.create_btn.isEnabled())
             shot(w, "2-one-drive")
 
+        from handheld_forge.preflight import MachineState
+
+        state = mock.patch.object(gui, "read_state", return_value=MachineState(80, True, True, True))
+        state.start()
+        self.addCleanup(state.stop)
+
         with mock.patch.object(gui, "list_drives", return_value=[sandisk, kingston]):
             w.refresh_drives()
             self.assertEqual(w._drive(), sandisk)  # selection survives a refresh
@@ -124,7 +130,19 @@ class GuiSmokeTests(unittest.TestCase):
             w._ask_confirm()
             self.assertIs(w.stack.currentWidget(), w.confirm_page)
             self.assertEqual(w.confirm_tile.title, "SanDisk Ultra Fit")
+            # Erase stays off until the person agrees to leave it alone.
+            self.assertFalse(w.erase_btn.isEnabled())
+            self.assertFalse(w.confirm_warning.isVisibleTo(w))  # Bazzite has no warning
+            w.ack.setChecked(True)
+            self.assertTrue(w.erase_btn.isEnabled())
             shot(w, "4-confirm")
+            # A low battery blocks it again, even with the tick.
+            gui.read_state.return_value = MachineState(12, False, True, True)
+            w._refresh_checks()
+            self.assertFalse(w.erase_btn.isEnabled())
+            self.assertIn("Plug in the charger", w.check_labels[0].text())
+            gui.read_state.return_value = MachineState(80, True, True, True)
+            w._refresh_checks()
 
             w.stack.setCurrentWidget(w.work_page)
             w.work_title.setText("Creating Bazzite on SanDisk Ultra Fit")
@@ -161,7 +179,8 @@ class GuiSmokeTests(unittest.TestCase):
             w.worker, w.thread = FakeWorker(), FakeThread()
             w.on_finished("ok", "")
             self.assertEqual(w.result_title.text(), "Ready to boot")
-            self.assertIn("Open the boot menu", w.result_text.text())
+            self.assertIn("Open the boot menu", w.result_guide.text())
+            self.assertIn("universalblue", w.result_guide.text())
             shot(w, "6-done")
 
             w.worker, w.thread = FakeWorker(), FakeThread()
