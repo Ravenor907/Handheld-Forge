@@ -17,6 +17,8 @@ export PIP_NO_CACHE_DIR=1  # leave nothing in ~/.cache/pip (the env var reaches 
 if [ "${1:-}" = "--uninstall" ]; then
     shift
     if [ -x "$VENV/bin/handheld-forge" ]; then
+        # This copy goes too, even if the app was installed or updated another way.
+        echo "$SRC" > "$APP_DIR/source"
         # Lists everything it will delete and asks first.
         exec "$VENV/bin/handheld-forge" uninstall "$@"
     fi
