@@ -67,6 +67,7 @@ object Forge {
     val hint = TextStyle(color = Ash, fontSize = 15.sp, lineHeight = 21.sp)
     val brand = TextStyle(color = Ash, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     val big = TextStyle(color = Bone, fontSize = 56.sp, fontWeight = FontWeight.Light)
+    val status = TextStyle(color = Bone, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, lineHeight = 23.sp)
 }
 
 @Composable
@@ -187,7 +188,8 @@ fun HeatBar(progress: Float, active: Boolean, modifier: Modifier = Modifier) {
     Canvas(modifier.fillMaxWidth().height(14.dp)) {
         val r = CornerRadius(size.height / 2)
         drawRoundRect(Forge.Iron, cornerRadius = r)
-        val w = (size.width * progress.coerceIn(0f, 1f)).coerceAtLeast(if (active) size.height else 0f)
+        // Exactly the progress, left to right; no sliver pretending something happened at 0%.
+        val w = size.width * progress.coerceIn(0f, 1f)
         if (w <= 0f) return@Canvas
         drawRoundRect(Brush.horizontalGradient(listOf(Forge.MoltenA, Forge.MoltenB), 0f, size.width), size = Size(w, size.height), cornerRadius = r)
         if (active) {

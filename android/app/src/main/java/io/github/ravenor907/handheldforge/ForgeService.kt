@@ -24,6 +24,7 @@ import io.github.ravenor907.handheldforge.core.DownloadException
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Downloader
 import io.github.ravenor907.handheldforge.core.ImageWriter
+import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.usb.UsbSticks
 import java.io.File
@@ -195,14 +196,11 @@ class ForgeService : Service() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastNotify < 1000) return
         lastNotify = now
-        val text = when (s) {
-            Stage.LOOKUP -> "Checking for the latest release"
-            Stage.DOWNLOAD -> "Downloading"
-            Stage.VERIFY -> "Making sure the download is genuine"
-            Stage.WRITE -> "Writing to the USB drive"
-            Stage.CHECK -> "Reading the drive back to confirm"
-        }
-        getSystemService(NotificationManager::class.java).notify(NOTIFY_ID, notification(text, d, t))
+        // The same overall percentage and step as the app's screen.
+        val job = Jobs.state.value as? JobState.Running ?: return
+        val pct = (job.fraction * 100).toInt().coerceIn(0, 100)
+        val text = "$pct%  " + Progress.describe(s, d, t, 0, job.distro).first
+        getSystemService(NotificationManager::class.java).notify(NOTIFY_ID, notification(text, pct.toLong(), 100))
     }
 
     private fun done(text: String) {

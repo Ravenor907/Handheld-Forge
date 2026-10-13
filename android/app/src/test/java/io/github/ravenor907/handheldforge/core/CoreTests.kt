@@ -480,3 +480,51 @@ class PreflightTest {
         assertEquals("Drive is write-protected", Preflight.explain("Drive is write-protected", false, false))
     }
 }
+
+class ProgressTest {
+    private var now = 0L
+    private fun fresh() = Progress { now }.also { now = 0 }
+
+    @Test
+    fun onlyCountsUpAndStaysWithin0To100() {
+        val p = fresh()
+        val seen = mutableListOf<Int>()
+        fun at(s: Stage, d: Long, t: Long) = p.update(s, d, t).also { seen += p.percent }
+        at(Stage.LOOKUP, 0, 0)
+        for (i in 0..10L) at(Stage.DOWNLOAD, i * 100, 1000)
+        at(Stage.DOWNLOAD, 200, 1000) // a restarted download
+        at(Stage.VERIFY, 0, 0)
+        at(Stage.VERIFY, 500, 1000)
+        at(Stage.DOWNLOAD, 0, 1000) // a late report from an earlier step
+        at(Stage.WRITE, -5, 1000) // odd numbers
+        at(Stage.WRITE, 5000, 1000)
+        at(Stage.CHECK, 1000, 1000)
+        assertEquals(seen, seen.sorted())
+        assertTrue(seen.all { it in 0..100 })
+        assertEquals(100, seen.last())
+        assertEquals(3, p.step)
+    }
+
+    @Test
+    fun timeLeftFromTheStepsAverageSpeed() {
+        val p = fresh()
+        p.update(Stage.WRITE, 0, 1000)
+        now = 2000
+        assertEquals("", p.timeLeft(100, 1000)) // too early for a fair estimate
+        now = 10_000
+        assertEquals("about 2 min left", p.timeLeft(100, 1000)) // 10/s, 900 to go
+        assertEquals("less than a minute left", p.timeLeft(900, 1000))
+        assertEquals("", p.timeLeft(2000, 1000))
+    }
+
+    @Test
+    fun describeSaysWhichStepAndWhatsHappening() {
+        val (h, d) = Progress.describe(Stage.WRITE, 4_100_000_000, 8_300_000_000, 0, "Bazzite", "about 7 min left")
+        assertEquals("Step 3 of 4: Writing to the drive", h)
+        assertEquals("4.1 of 8.3 GB, about 7 min left", d)
+        assertEquals("Step 1 of 4: Downloading CachyOS", Progress.describe(Stage.DOWNLOAD, 1, 2, 0, "CachyOS").first)
+        val quiet = Progress.describe(Stage.LOOKUP, 0, 0, 83_000, "Bazzite").second
+        assertTrue(quiet, quiet.endsWith("(1:23)"))
+        assertFalse(Progress.describe(Stage.LOOKUP, 0, 0, 2_000, "Bazzite").second.contains("("))
+    }
+}

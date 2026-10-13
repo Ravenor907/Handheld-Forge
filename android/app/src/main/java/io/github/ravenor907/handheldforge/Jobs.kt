@@ -1,5 +1,7 @@
 package io.github.ravenor907.handheldforge
 
+import android.os.SystemClock
+import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Stage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,6 +22,11 @@ sealed interface JobState {
         val done: Long = 0,
         val total: Long = 0,
         val stopping: Boolean = false,
+        /** Of the whole job, 0..1; only ever grows. */
+        val fraction: Float = 0f,
+        val timeLeft: String = "",
+        /** SystemClock.elapsedRealtime() when the current stage began, for the running timer. */
+        val stageStartMs: Long = SystemClock.elapsedRealtime(),
     ) : JobState
 
     data class Finished(val outcome: Outcome, val message: String, val distro: String, val drive: String) : JobState
@@ -58,17 +65,24 @@ object Jobs {
     }
 
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private var tracker = Progress { SystemClock.elapsedRealtime() }
 
     fun begin(distro: String, drive: String) {
         cancelRequested = false
         cancelReason = null
         leftDuringJob = !appVisible
         _log.value = emptyList()
+        tracker = Progress { SystemClock.elapsedRealtime() }
         _state.value = JobState.Running(distro, drive)
     }
 
     fun progress(stage: Stage, done: Long, total: Long) = _state.update {
-        if (it is JobState.Running) it.copy(stage = stage, done = done, total = total) else it
+        if (it !is JobState.Running) return@update it
+        tracker.update(stage, done, total)
+        it.copy(
+            stage = stage, done = done, total = total, fraction = tracker.fraction.toFloat(),
+            timeLeft = tracker.timeLeft(done, total), stageStartMs = tracker.stageStartMs,
+        )
     }
 
     fun log(msg: String) = _log.update { (it + "${clock.format(Date())}  $msg").takeLast(300) }

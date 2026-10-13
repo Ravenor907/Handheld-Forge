@@ -12,6 +12,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.WindowManager
 import android.widget.Toast
@@ -21,6 +22,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,6 +59,7 @@ import io.github.ravenor907.handheldforge.core.Distro
 import io.github.ravenor907.handheldforge.core.Fix
 import io.github.ravenor907.handheldforge.core.PhoneState
 import io.github.ravenor907.handheldforge.core.Preflight
+import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.ui.AckBox
 import io.github.ravenor907.handheldforge.ui.Banner
@@ -79,15 +84,9 @@ import kotlinx.coroutines.withContext
 
 private const val CACHY = "cachyos-handheld"
 
-val STEPS = listOf("Download", "Verify", "Write", "Check")
-private val STEP_WEIGHT = listOf(45, 8, 37, 10)
+val STEPS = Progress.STEPS
 
-private fun stepOf(s: Stage) = when (s) {
-    Stage.LOOKUP, Stage.DOWNLOAD -> 0
-    Stage.VERIFY -> 1
-    Stage.WRITE -> 2
-    Stage.CHECK -> 3
-}
+private fun stepOf(s: Stage) = Progress.stepOf(s)
 
 private fun gb(bytes: Long) = if (bytes >= 10e9) "%.0f GB".format(bytes / 1e9) else "%.1f GB".format(bytes / 1e9)
 
@@ -189,7 +188,13 @@ class MainActivity : ComponentActivity() {
             else -> PhoneState(76, charging = true, online = true, unmetered = true, backgroundAllowed = true)
         }
         when (demo) {
-            "working", "stop" -> Jobs.demo(JobState.Running(name, "SanDisk Ultra Fit", Stage.WRITE, 4_100_000_000, 8_300_000_000), lines)
+            "working", "stop" -> Jobs.demo(
+                JobState.Running(
+                    name, "SanDisk Ultra Fit", Stage.WRITE, 4_100_000_000, 8_300_000_000,
+                    fraction = 0.71f, timeLeft = "about 7 min left",
+                ),
+                lines,
+            )
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
             "done-cachyos" -> Jobs.demo(
                 JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
@@ -372,8 +377,16 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ColumnScope.Working(j: JobState.Running, askStopFirst: Boolean = false) {
         val step = stepOf(j.stage)
-        val frac = if (j.total > 0) j.done.toFloat() / j.total else 0f
-        val overall = (STEP_WEIGHT.take(step).sum() + STEP_WEIGHT[step] * frac) / STEP_WEIGHT.sum()
+        // The bar glides toward the job's overall progress, which only ever grows: 0 to 100, left to right.
+        val overall by animateFloatAsState(j.fraction, tween(700, easing = LinearEasing), label = "overall")
+        // Ticks every second so timers keep moving during steps that can't measure themselves.
+        var now by remember { mutableStateOf(SystemClock.elapsedRealtime()) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1000)
+                now = SystemClock.elapsedRealtime()
+            }
+        }
         var showLog by remember { mutableStateOf(false) }
         var backWarned by remember { mutableStateOf(false) }
         var askStop by remember { mutableStateOf(askStopFirst) }
@@ -395,21 +408,18 @@ class MainActivity : ComponentActivity() {
             },
         )
         Spacer(Modifier.weight(1f))
-        Txt("${(overall * 100).toInt()}%", Forge.big)
+        Txt("${(j.fraction * 100).toInt().coerceIn(0, 100)}%", Forge.big)
         HeatBar(overall, active = true)
-        Gap(10)
-        val text = when (j.stage) {
-            Stage.LOOKUP -> "Checking for the latest release"
-            Stage.DOWNLOAD -> "Downloading ${j.distro}"
-            Stage.VERIFY -> "Making sure the download is genuine"
-            Stage.WRITE -> "Writing to the drive"
-            Stage.CHECK -> "Reading the drive back to confirm"
-        } + if (j.total > 0 && j.stage in setOf(Stage.DOWNLOAD, Stage.WRITE)) {
-            ", %.1f of %.1f GB".format(j.done / 1e9, j.total / 1e9)
-        } else {
-            ""
+        Gap(12)
+        val (headline, detail) = Progress.describe(j.stage, j.done, j.total, now - j.stageStartMs, j.distro, j.timeLeft)
+        Txt(headline, Forge.status)
+        Gap(4)
+        Txt(detail, Forge.hint)
+        log.lastOrNull()?.let {
+            Gap(8)
+            // The latest thing that happened, without its timestamp.
+            Txt(it.substringAfter("  "), Forge.hint, maxLines = 2)
         }
-        Txt(text, Forge.hint)
         Spacer(Modifier.weight(1f))
         StepTrack(STEPS, step, failed = false)
         Gap(18)
