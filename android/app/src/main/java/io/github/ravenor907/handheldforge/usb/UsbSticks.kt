@@ -37,6 +37,10 @@ class AndroidUsbTransport(
     // Before Android 9, a single bulk transfer was capped at 16 KiB.
     override val maxTransfer: Int = if (Build.VERSION.SDK_INT >= 28) 64 * 1024 else 16 * 1024
 
+    // Each transfer waits for the last to finish, so small ones leave the bus idle most of the time.
+    // Android 9 and later can pass much bigger ones straight to the kernel; the disk probes this first.
+    override val largestTransfer: Int = if (Build.VERSION.SDK_INT >= 28) 1024 * 1024 else maxTransfer
+
     override fun bulkOut(data: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int =
         conn.bulkTransfer(outEp, data, offset, length, timeoutMs)
 

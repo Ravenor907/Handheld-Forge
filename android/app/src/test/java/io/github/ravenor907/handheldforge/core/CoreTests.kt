@@ -306,6 +306,39 @@ class ScsiTest {
     }
 
     @Test
+    fun usesTheBiggestTransferThePhoneAllows() {
+        val f = FakeUsbDrive(blocks = 8192, maxTransfer = 64 * 1024, largestTransfer = 1024 * 1024)
+        val d = disk(f)
+        assertEquals(1024 * 1024, d.transferSize)
+        val data = Random.nextBytes(4 * 1024 * 1024)
+        d.write(0, data.size / 512, data)
+        assertEquals(1024 * 1024, f.biggestTransfer)
+        assertArrayEquals(data, f.disk.copyOfRange(0, data.size))
+    }
+
+    @Test
+    fun fallsBackWhenBigTransfersAreRefused() {
+        // This phone's kernel refuses anything over 128 KB: 1 MB fails, 256 KB fails, 64 KB is safe.
+        val f = FakeUsbDrive(
+            blocks = 8192, maxTransfer = 64 * 1024, largestTransfer = 1024 * 1024, refuseAbove = 128 * 1024,
+        )
+        val d = disk(f)
+        assertEquals(64 * 1024, d.transferSize)
+        assertTrue(f.resets >= 2)
+        val data = Random.nextBytes(2 * 1024 * 1024)
+        d.write(10, data.size / 512, data)
+        val back = ByteArray(data.size)
+        d.read(10, data.size / 512, back)
+        assertArrayEquals(data, back)
+    }
+
+    @Test
+    fun tinyDriveSkipsTheProbe() {
+        val d = disk(FakeUsbDrive(blocks = 64, maxTransfer = 16384, largestTransfer = 1024 * 1024))
+        assertEquals(1024 * 1024, d.transferSize) // the whole 32 KB drive read fine in one go
+    }
+
+    @Test
     fun writeProtectedStickGetsPlainMessage() {
         val d = disk(FakeUsbDrive(writeProtected = true))
         val e = assertThrows<ScsiException> { d.write(0, 1, ByteArray(512)) }
@@ -318,7 +351,7 @@ class ImageWriterTest {
 
     @Test
     fun writesExactImageAndClearsTail() {
-        val f = FakeUsbDrive(blocks = 16384)
+        val f = FakeUsbDrive(blocks = 65536)
         f.disk.fill(7)
         val d = ScsiDisk(BulkOnly(f)).init()
         val img = iso(3 * ImageWriter.CHUNK + 1234) // not block aligned on purpose
@@ -333,7 +366,7 @@ class ImageWriterTest {
 
     @Test
     fun counterfeitStickCaught() {
-        val f = FakeUsbDrive(blocks = 16384)
+        val f = FakeUsbDrive(blocks = 65536)
         val d = ScsiDisk(BulkOnly(f)).init()
         val img = iso(2 * ImageWriter.CHUNK)
         f.corruptReadsFrom = ImageWriter.CHUNK + 5L
@@ -352,14 +385,14 @@ class ImageWriterTest {
 
     @Test
     fun cancelStops() {
-        val d = ScsiDisk(BulkOnly(FakeUsbDrive(blocks = 16384))).init()
+        val d = ScsiDisk(BulkOnly(FakeUsbDrive(blocks = 65536))).init()
         val img = iso(3 * ImageWriter.CHUNK)
         assertThrows<CancelledException> { ImageWriter.write(img, d, sha(img.readBytes()), { _, _, _ -> }, {}, { true }) }
     }
 
     @Test
     fun wrongExpectedHashFails() {
-        val d = ScsiDisk(BulkOnly(FakeUsbDrive(blocks = 16384))).init()
+        val d = ScsiDisk(BulkOnly(FakeUsbDrive(blocks = 65536))).init()
         val img = iso(ImageWriter.CHUNK)
         try {
             ImageWriter.write(img, d, "0".repeat(64), { _, _, _ -> }, {}, { false })
@@ -397,7 +430,7 @@ class ImageWriterTest {
 
     @Test
     fun writesDecompressedRawBz2Image() {
-        val f = FakeUsbDrive(blocks = 16384)
+        val f = FakeUsbDrive(blocks = 65536)
         f.disk.fill(7)
         val data = diskLike(3 * ImageWriter.CHUNK + 777)
         val split = ImageWriter.CHUNK + 100
@@ -425,7 +458,7 @@ class ImageWriterTest {
         val notBz2 = Random.nextBytes(10_000)
         for (bad in listOf(flipped, truncated, notBz2)) {
             val file = Files.createTempFile("bad", ".img.bz2").toFile().apply { writeBytes(bad) }
-            assertThrows<CorruptImageException> { writeBz2(file, FakeUsbDrive(blocks = 16384)) }
+            assertThrows<CorruptImageException> { writeBz2(file, FakeUsbDrive(blocks = 65536)) }
         }
     }
 

@@ -14,7 +14,8 @@ class CorruptImageException(cause: Throwable) : IOException("The image file is d
  * image, so this is a bootable drive), then reads the drive back and compares.
  */
 object ImageWriter {
-    const val CHUNK = 1 shl 20
+    /** Bytes per write command. Big commands let the stick write in long runs, like a PC does. */
+    const val CHUNK = 4 shl 20
 
     /** Writes a plain image file (an ISO); [expectedSha256] must match what's written. */
     fun write(
@@ -57,6 +58,7 @@ object ImageWriter {
         dev.write(dev.blockCount - tailBlocks, tailBlocks.toInt(), buf)
 
         log("Writing ${dev.name}")
+        if (dev is ScsiDisk) log("USB transfers of ${dev.transferSize / 1024} KB")
         var done = 0L
         val raw = CountingStream(file.inputStream().buffered(CHUNK))
         decoding { decode(raw) }.use { input ->

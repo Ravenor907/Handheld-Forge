@@ -6,8 +6,15 @@ import java.nio.ByteOrder
 
 /** Raw bulk pipe to a USB mass-storage device. Android implements this over UsbDeviceConnection. */
 interface UsbTransport {
-    /** Largest single bulk transfer to attempt. */
+    /** Largest single bulk transfer known to work everywhere. */
     val maxTransfer: Int
+
+    /**
+     * Largest single bulk transfer worth trying. Bigger transfers keep the USB bus busy instead of
+     * waiting on the phone between small pieces, which is most of the speed; the drive is probed
+     * at this size first and falls back to [maxTransfer] if the phone or stick refuses.
+     */
+    val largestTransfer: Int get() = maxTransfer
 
     /** Returns bytes transferred, or a negative number on failure. */
     fun bulkOut(data: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int
@@ -32,8 +39,11 @@ interface BlockDevice {
 class ScsiException(msg: String, val senseKey: Int = -1, val asc: Int = -1) : IOException(msg)
 
 /** USB Mass Storage Class, Bulk-Only Transport: CBW, optional data phase, CSW. */
-class BulkOnly(private val t: UsbTransport, private val lun: Int = 0) {
+class BulkOnly(val t: UsbTransport, private val lun: Int = 0) {
     private var tag = 1
+
+    /** Size of each bulk transfer in a data phase; [ScsiDisk.init] raises it when the drive allows. */
+    var transferSize = t.maxTransfer
 
     /**
      * Runs one SCSI command. Exactly one of [dataIn]/[dataOut] may be given.
@@ -59,7 +69,7 @@ class BulkOnly(private val t: UsbTransport, private val lun: Int = 0) {
         if (length > 0) {
             var done = 0
             while (done < length) {
-                val n = minOf(t.maxTransfer, length - done)
+                val n = minOf(transferSize, length - done)
                 val r = if (dataIn != null) {
                     t.bulkIn(dataIn, offset + done, n, timeoutMs)
                 } else {
@@ -119,8 +129,34 @@ class ScsiDisk(private val bot: BulkOnly) : BlockDevice {
         }
         if (!ready) throw ScsiException("The drive isn't ready. Unplug it, plug it back in and try again.")
         readCapacity()
+        tuneTransfers()
         return this
     }
+
+    /**
+     * Finds the biggest bulk transfer this phone and drive accept, by reading the start of the drive
+     * (harmless) at each size from the largest down. Anything that goes wrong just means a smaller size.
+     */
+    private fun tuneTransfers() {
+        val safe = bot.t.maxTransfer
+        var size = bot.t.largestTransfer
+        while (size > safe) {
+            val blocks = minOf(size / blockSize.toLong(), blockCount).toInt()
+            if (blocks * blockSize <= safe) break
+            bot.transferSize = size
+            try {
+                if (bot.command(rwCdb(READ10, READ16, 0, blocks), dataIn = ByteArray(blocks * blockSize)) == 0) return
+                requestSense()
+            } catch (_: IOException) {
+                // BulkOnly already reset the pipes.
+            }
+            size /= 4
+        }
+        bot.transferSize = safe
+    }
+
+    /** Bytes per bulk transfer, after tuning (for the log). */
+    val transferSize: Int get() = bot.transferSize
 
     private fun inquiry() {
         val buf = ByteArray(36)

@@ -18,7 +18,12 @@ class FakeUsbDrive(
     /** Flip a bit in data returned by reads at or after this byte offset (fake/failing stick). */
     var corruptReadsFrom: Long = -1,
     override val maxTransfer: Int = 16384,
+    override val largestTransfer: Int = maxTransfer,
+    /** Bulk transfers longer than this fail, like a phone whose kernel caps them. */
+    private val refuseAbove: Int = Int.MAX_VALUE,
 ) : UsbTransport {
+    /** The biggest bulk transfer that went through. */
+    var biggestTransfer = 0
     val disk = ByteArray((blocks * blockSize).toInt())
     val commands = ArrayList<Int>()
     var resets = 0
@@ -34,6 +39,8 @@ class FakeUsbDrive(
     private class Cbw(val tag: Int, val length: Int, val dirIn: Boolean, val cdb: ByteArray)
 
     override fun bulkOut(data: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int {
+        if (length > refuseAbove) return -1
+        biggestTransfer = maxOf(biggestTransfer, length)
         val p = pending
         if (p == null) {
             if (length != 31) return -1
@@ -72,6 +79,8 @@ class FakeUsbDrive(
     }
 
     override fun bulkIn(data: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int {
+        if (length > refuseAbove) return -1
+        biggestTransfer = maxOf(biggestTransfer, length)
         val p = pending ?: return -1
         if (!cswReady) {
             val n = minOf(length, inBuf.size - dataPos)
