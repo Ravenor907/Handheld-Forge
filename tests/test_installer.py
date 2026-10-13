@@ -29,8 +29,13 @@ class InstallerTests(unittest.TestCase):
         self.refreshes = []
         self.refresh_patch = mock.patch.object(installer, "refresh_menus", side_effect=self.refreshes.append)
         self.refresh_patch.start()
+        self.reloads = []
+        self.reload_patch = mock.patch.object(installer, "reload_launcher",
+                                              side_effect=lambda: self.reloads.append(1))
+        self.reload_patch.start()
 
     def tearDown(self):
+        self.reload_patch.stop()
         self.home_patch.stop()
         self.refresh_patch.stop()
         self.tmp.cleanup()
@@ -193,6 +198,29 @@ class InstallerTests(unittest.TestCase):
             installer.uninstall(self.p)
         self.refresh_patch.start()
         self.assertFalse(self.p.desktop.parent.exists())
+
+    def test_uninstall_reloads_the_launcher(self):
+        installer.write_menu_entry(self.p)
+        installer.uninstall(self.p)
+        self.assertEqual(self.reloads, [1])
+
+    def test_reload_launcher_only_on_kde(self):
+        self.reload_patch.stop()
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0)
+
+        try:
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME"}):
+                self.assertIsNone(installer.reload_launcher(run=run))
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}), \
+                    mock.patch.object(installer.shutil, "which", side_effect=lambda c: f"/usr/bin/{c}"):
+                self.assertEqual(installer.reload_launcher(run=run), "panel reloaded")
+        finally:
+            self.reload_patch.start()
+        self.assertEqual(calls, [["systemctl", "--user", "restart", "plasma-plasmashell"]])
 
     def test_keeps_a_non_empty_local_bin(self):
         installer.write_menu_entry(self.p)

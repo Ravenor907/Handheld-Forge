@@ -98,6 +98,35 @@ def refresh_menus(apps: Path | None = None, run=subprocess.run) -> list[str]:
     return done
 
 
+def reload_launcher(run=subprocess.run) -> str | None:
+    """Reload KDE's panel so its launcher forgets removed apps.
+
+    KDE's launcher keeps showing an app whose entry was removed until the panel
+    reloads, even after its cache is rebuilt. Returns what ran, or None outside KDE.
+    """
+    if "KDE" not in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+        return None
+    attempts = [["systemctl", "--user", "restart", "plasma-plasmashell"]]  # Plasma 6, Plasma 5.25+
+    for cmd in attempts:
+        if shutil.which(cmd[0]):
+            try:
+                if run(cmd, capture_output=True, timeout=60).returncode == 0:
+                    return "panel reloaded"
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    # Older Plasma without the systemd unit: quit and start it again.
+    for quit_tool in ("kquitapp6", "kquitapp5"):
+        if shutil.which(quit_tool) and shutil.which("kstart"):
+            try:
+                run([quit_tool, "plasmashell"], capture_output=True, timeout=60)
+                subprocess.Popen(["kstart", "plasmashell"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                return "panel reloaded"
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return None
+
+
 def write_menu_entry(p: Paths | None = None, refresh=None, force_refresh: bool = False) -> Path:
     """Write the app menu entry and the command link. The menu is refreshed when the entry
     changed, or always with force_refresh (installs and updates, in case the cache is stale)."""
@@ -354,6 +383,8 @@ def uninstall(p: Paths | None = None, keep_downloads: bool = False, keep_source:
     removed += clear_menu_overrides()
     if removed or app:
         refresh_menus(p.desktop.parent)
+    if p.desktop in removed:
+        reload_launcher()
     for folder in (p.bin_link.parent, p.desktop.parent):
         try:
             # Outside KDE, the menu refresh leaves a generated mimeinfo.cache; on its own it's empty.
@@ -451,6 +482,8 @@ def run_uninstall(ask: bool, keep_downloads: bool, keep_source: bool = False) ->
     lines = [f"- {i.what}" + (f" ({human(i.size)})" if human(i.size) else "") + f"\n  {i.path}" for i in plan]
     total = human(sum(i.size for i in plan))
     detail = "This deletes:\n" + "\n".join(lines) + (f"\n\nIn total {total}." if total else "")
+    if any(i.path == p.desktop for i in plan) and "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+        detail += "\n\nYour taskbar reloads for a second afterwards, so the app menu forgets it right away."
     if running_copies(p):
         detail += (f"\n\n{APP_NAME} is open and will be closed. If it's making a drive right now, "
                    "that drive won't be finished.")
