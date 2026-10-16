@@ -50,14 +50,17 @@ def rd(f, lba, n): f.seek(lba * 512); return f.read(n * 512)
 a, b = rd(ours, 0, 1), rd(ref, 0, 1)
 bad = []
 if a[:384] != b[:384] or a[400:440] != b[400:440]: bad.append("boot code in sector 0")
+def entries(m):
+    return [(m[446+16*i], m[450+16*i], *struct.unpack("<II", m[454+16*i:462+16*i])) for i in range(4)]
 if a[446:512] != b[446:512]:
-    bad.append("partition table")
-    for i in range(2):
-        o = 446 + 16 * i
-        print("ours", a[o:o+16].hex(), "ref", b[o:o+16].hex())
+    bad.append("partition table: ours (flag,type,start,len) %s vs Ventoy2Disk.sh %s" % (entries(a), entries(b)))
 p2 = struct.unpack("<I", b[470:474])[0]
 if rd(ours, 1, 2047) != rd(ref, 1, 2047): bad.append("core.img (sectors 1-2047)")
-if rd(ours, p2, 65536) != rd(ref, p2, 65536): bad.append("EFI partition")
+p2o = struct.unpack("<I", a[470:474])[0]
+if rd(ours, p2o, 65536) != rd(ref, p2, 65536):
+    x, y = rd(ours, p2o, 65536), rd(ref, p2, 65536)
+    first = next(i for i in range(len(x)) if x[i] != y[i])
+    bad.append("EFI partition (first difference at byte %d of the partition: ours %s ref %s)" % (first, x[first:first+16].hex(), y[first:first+16].hex()))
 print("part2 at", p2)
 if bad:
     print("::error title=Ventoy differs from Ventoy2Disk.sh::" + ", ".join(bad)); sys.exit(1)
