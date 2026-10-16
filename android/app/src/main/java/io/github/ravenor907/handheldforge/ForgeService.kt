@@ -26,6 +26,7 @@ import io.github.ravenor907.handheldforge.core.Distro
 import io.github.ravenor907.handheldforge.core.DownloadException
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Downloader
+import io.github.ravenor907.handheldforge.core.ImageKind
 import io.github.ravenor907.handheldforge.core.ImageWriter
 import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Stage
@@ -85,7 +86,10 @@ class ForgeService : Service() {
         try {
             val (name, size) = describeFile(this, uri)
             if (size <= 0) throw IOException("Couldn't read the size of $name. Copy it to the phone's storage and try again.")
-            val decode = decoderFor(name)
+            // Judge the file by its contents; the name and Android's type can't be trusted.
+            val kind = sniffFile(this, uri)
+            if (!kind.writable) throw IOException("$name is a ${kind.label} file, which can't be written yet. Unpack it first.")
+            Jobs.log("$name: ${kind.label}")
             val sticks = UsbSticks(this)
             val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
             val stage = { st: Stage, d: Long, t: Long ->
@@ -94,11 +98,11 @@ class ForgeService : Service() {
             }
             Jobs.log("Writing $name (%.1f GB)".format(size / 1e9))
             sticks.open(device).use { s ->
-                if (decode == null && s.disk.sizeBytes < size) throw IOException("This drive is too small for $name.")
+                if (!kind.compressed && s.disk.sizeBytes < size) throw IOException("This drive is too small for $name.")
                 try {
                     ImageWriter.writeStream(
                         { contentResolver.openInputStream(uri) ?: throw IOException("Couldn't open $name") },
-                        size, decode ?: { it }, s.disk, null, stage, Jobs::log, { Jobs.cancelRequested },
+                        size, ImageKind.decoder(kind), s.disk, null, stage, Jobs::log, { Jobs.cancelRequested },
                     )
                 } catch (e: CorruptImageException) {
                     throw IOException("$name is damaged or isn't a compressed disk image. Download it again.")
@@ -268,17 +272,24 @@ class ForgeService : Service() {
         const val EXTRA_URI = "uri"
         const val CUSTOM_ID = "custom-file"
 
-        /** File types the picker offers. Compressed images are unpacked while they're written. */
-        val PICK_TYPES = arrayOf(
-            "application/x-iso9660-image", "application/octet-stream", "application/x-raw-disk-image",
-            "application/x-bzip2", "application/gzip", "application/x-gzip", "application/x-cd-image",
-        )
+        /**
+         * Every file is pickable. Phones label ISOs and images inconsistently (and greyed-out
+         * files can't be tapped), so the file's own bytes decide what it is, not its type.
+         */
+        val PICK_TYPES = arrayOf("*/*")
 
-        /** null for an uncompressed image, else a decoder for .bz2 / .gz. */
-        fun decoderFor(name: String): ((java.io.InputStream) -> java.io.InputStream)? = when {
-            name.endsWith(".bz2", true) -> { s -> BZip2CompressorInputStream(s, true) }
-            name.endsWith(".gz", true) -> { s -> java.util.zip.GZIPInputStream(s, 1 shl 16) }
-            else -> null
+        /** Reads the start of a picked file to see what kind of image it is. */
+        fun sniffFile(context: Context, uri: Uri): ImageKind {
+            val head = ByteArray(ImageKind.SNIFF_BYTES)
+            var n = 0
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                while (n < head.size) {
+                    val r = input.read(head, n, head.size - n)
+                    if (r < 0) break
+                    n += r
+                }
+            } ?: throw IOException("Couldn't open the file")
+            return ImageKind.sniff(head.copyOf(n))
         }
 
         /** (display name, size in bytes) of a picked file. */

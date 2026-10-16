@@ -595,3 +595,80 @@ class CustomFileTest {
         assertTrue(Preflight.canStart(Preflight.checks(offline, download = false)))
     }
 }
+
+class ImageKindTest {
+    private fun iso(hybrid: Boolean) = ByteArray(ImageKind.SNIFF_BYTES).also {
+        "CD001".toByteArray().copyInto(it, 32_769)
+        if (hybrid) { it[510] = 0x55; it[511] = 0xAA.toByte() }
+    }
+
+    @Test
+    fun recognizesEveryFormat() {
+        assertEquals(ImageKind.ISO_HYBRID, ImageKind.sniff(iso(true)))
+        assertEquals(ImageKind.ISO_DVD_ONLY, ImageKind.sniff(iso(false)))
+        assertEquals(ImageKind.DISK, ImageKind.sniff(ByteArray(1024).also { it[510] = 0x55; it[511] = 0xAA.toByte() }))
+        assertEquals(ImageKind.DISK, ImageKind.sniff(ByteArray(1024).also { "EFI PART".toByteArray().copyInto(it, 512) }))
+        assertEquals(ImageKind.BZIP2, ImageKind.sniff("BZh91AY".toByteArray()))
+        assertEquals(ImageKind.GZIP, ImageKind.sniff(byteArrayOf(0x1F, 0x8B.toByte(), 8)))
+        assertEquals(ImageKind.XZ, ImageKind.sniff(byteArrayOf(0xFD.toByte(), 0x37, 0x7A, 0x58, 0x5A, 0)))
+        assertEquals(ImageKind.ZIP, ImageKind.sniff("PK\u0003\u0004".toByteArray()))
+        assertEquals(ImageKind.ZSTD, ImageKind.sniff(byteArrayOf(0x28, 0xB5.toByte(), 0x2F, 0xFD.toByte())))
+        assertEquals(ImageKind.UNKNOWN, ImageKind.sniff("hello".toByteArray()))
+        assertEquals(ImageKind.UNKNOWN, ImageKind.sniff(ByteArray(0)))
+        assertFalse(ImageKind.ZSTD.writable)
+        assertTrue(ImageKind.ISO_DVD_ONLY.warning!!.contains("DVD"))
+        assertEquals(null, ImageKind.ISO_HYBRID.warning)
+    }
+
+    private fun roundTrip(kind: ImageKind, packed: ByteArray, data: ByteArray) {
+        val f = FakeUsbDrive(blocks = 32768)
+        val d = ScsiDisk(BulkOnly(f)).init()
+        assertEquals(kind, ImageKind.sniff(packed.copyOf(minOf(packed.size, ImageKind.SNIFF_BYTES))))
+        ImageWriter.writeStream(
+            { java.io.ByteArrayInputStream(packed) }, packed.size.toLong(), ImageKind.decoder(kind),
+            d, null, { _, _, _ -> }, {}, { false },
+        )
+        assertArrayEquals(data, f.disk.copyOfRange(0, data.size))
+    }
+
+    private val data = kotlin.random.Random.nextBytes(2 * 1024 * 1024 + 5)
+
+    @Test
+    fun writesXz() = roundTrip(
+        ImageKind.XZ,
+        java.io.ByteArrayOutputStream().also { o -> org.tukaani.xz.XZOutputStream(o, org.tukaani.xz.LZMA2Options(0)).use { it.write(data) } }.toByteArray(),
+        data,
+    )
+
+    @Test
+    fun writesZipSkippingMacClutter() = roundTrip(
+        ImageKind.ZIP,
+        java.io.ByteArrayOutputStream().also { o ->
+            java.util.zip.ZipOutputStream(o).use { z ->
+                z.putNextEntry(java.util.zip.ZipEntry("__MACOSX/._os.img")); z.write(byteArrayOf(1, 2, 3)); z.closeEntry()
+                z.putNextEntry(java.util.zip.ZipEntry("os.img")); z.write(data); z.closeEntry()
+            }
+        }.toByteArray(),
+        data,
+    )
+
+    @Test
+    fun writesBz2() = roundTrip(
+        ImageKind.BZIP2,
+        java.io.ByteArrayOutputStream().also { o ->
+            org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream(o).use { it.write(data) }
+        }.toByteArray(),
+        data,
+    )
+
+    @Test
+    fun brokenXzIsReportedAsDamaged() {
+        val d = ScsiDisk(BulkOnly(FakeUsbDrive(blocks = 32768))).init()
+        val junk = byteArrayOf(0xFD.toByte(), 0x37, 0x7A, 0x58, 0x5A, 0) + ByteArray(5000) { 7 }
+        try {
+            ImageWriter.writeStream({ java.io.ByteArrayInputStream(junk) }, junk.size.toLong(), ImageKind.decoder(ImageKind.XZ), d, null, { _, _, _ -> }, {}, { false })
+            fail("should have thrown")
+        } catch (e: CorruptImageException) {
+        }
+    }
+}

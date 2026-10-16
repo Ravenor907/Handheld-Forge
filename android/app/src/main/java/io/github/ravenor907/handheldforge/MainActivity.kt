@@ -47,6 +47,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -57,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import io.github.ravenor907.handheldforge.core.Distro
 import io.github.ravenor907.handheldforge.core.Fix
+import io.github.ravenor907.handheldforge.core.ImageKind
 import io.github.ravenor907.handheldforge.core.PhoneState
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Progress
@@ -79,6 +81,7 @@ import io.github.ravenor907.handheldforge.usb.UsbSticks
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val CACHY = "cachyos-handheld"
@@ -87,7 +90,11 @@ val STEPS = Progress.STEPS
 
 private fun stepOf(s: Stage) = Progress.stepOf(s)
 
-private fun gb(bytes: Long) = if (bytes >= 10e9) "%.0f GB".format(bytes / 1e9) else "%.1f GB".format(bytes / 1e9)
+private fun gb(bytes: Long) = when {
+    bytes >= 10e9 -> "%.0f GB".format(bytes / 1e9)
+    bytes >= 1e9 -> "%.1f GB".format(bytes / 1e9)
+    else -> "%.0f MB".format(maxOf(1.0, bytes / 1e6))
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var sticks: UsbSticks
@@ -219,6 +226,9 @@ class MainActivity : ComponentActivity() {
         var fileUri by rememberSaveable { mutableStateOf<String?>(if (demo == "file") "content://demo/new-os.img.bz2" else null) }
         var fileName by rememberSaveable { mutableStateOf(if (demo == "file") "new-os.img.bz2" else "") }
         var fileSize by rememberSaveable { mutableStateOf(if (demo == "file") 3_400_000_000L else -1L) }
+        var fileKind by rememberSaveable { mutableStateOf(if (demo == "file") ImageKind.XZ.name else ImageKind.UNKNOWN.name) }
+        val kind = ImageKind.valueOf(fileKind)
+        val scope = rememberCoroutineScope()
         val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
                 try {
@@ -226,12 +236,26 @@ class MainActivity : ComponentActivity() {
                 } catch (_: Exception) {
                     // Not every file provider offers lasting access; this session's access is enough.
                 }
-                val (n, size) = ForgeService.describeFile(this@MainActivity, uri)
-                fileUri = uri.toString()
-                fileName = n
-                fileSize = size
-                distroId = ForgeService.CUSTOM_ID
-                hint = ""
+                scope.launch {
+                    val picked = withContext(Dispatchers.IO) {
+                        try {
+                            Triple(ForgeService.describeFile(this@MainActivity, uri), ForgeService.sniffFile(this@MainActivity, uri), null)
+                        } catch (e: Exception) {
+                            Triple(null, null, e.message ?: "Couldn't read that file")
+                        }
+                    }
+                    val (desc, k, err) = picked
+                    if (desc == null || k == null) {
+                        hint = "Couldn't read that file: $err"
+                        return@launch
+                    }
+                    fileUri = uri.toString()
+                    fileName = desc.first
+                    fileSize = desc.second
+                    fileKind = k.name
+                    distroId = ForgeService.CUSTOM_ID
+                    hint = if (k.writable) "" else "${desc.first} is a ${k.label} file, which can't be written yet. Unpack it first."
+                }
             }
         }
         var list by remember { mutableStateOf(if (demo != null && demo != "empty") demoSticks else emptyList()) }
@@ -251,7 +275,7 @@ class MainActivity : ComponentActivity() {
         val custom = distroId == ForgeService.CUSTOM_ID && fileUri != null
         // A picked file runs as a one-off "system" named after the file.
         val distro = if (custom) {
-            Distro(ForgeService.CUSTOM_ID, fileName, "Your file", true, 1, null, emptyList())
+            Distro(ForgeService.CUSTOM_ID, fileName, kind.label, true, 1, null, emptyList(), warning = kind.warning)
         } else {
             catalog.firstOrNull { it.id == distroId }
         }
@@ -289,7 +313,7 @@ class MainActivity : ComponentActivity() {
                         }
                     } else {
                         Choose(
-                            catalog, distroId, fileName.takeIf { fileUri != null }, fileSize, list, stickKey, hint,
+                            catalog, distroId, fileName.takeIf { fileUri != null }, fileSize, kind, list, stickKey, hint,
                             onDistro = { distroId = it },
                             onPickFile = { pickFile.launch(ForgeService.PICK_TYPES) },
                             onStick = { s ->
@@ -304,7 +328,9 @@ class MainActivity : ComponentActivity() {
                                     !stick.hasPermission -> sticks.device(stick.key)?.let { sticks.requestPermission(it) }
                                     !custom && size != null && size < distro.minDriveBytes ->
                                         hint = "That drive is too small. ${distro.name} needs ${distro.minDriveGb} GB or more."
-                                    custom && size != null && ForgeService.decoderFor(fileName) == null && fileSize > size ->
+                                    custom && !kind.writable ->
+                                        hint = "$fileName is a ${kind.label} file, which can't be written yet. Unpack it first."
+                                    custom && size != null && !kind.compressed && fileSize > size ->
                                         hint = "That drive is too small for $fileName."
                                     else -> confirming = true
                                 }
@@ -322,6 +348,7 @@ class MainActivity : ComponentActivity() {
         distroId: String?,
         pickedName: String?,
         pickedSize: Long,
+        pickedKind: ImageKind,
         list: List<Stick>,
         stickKey: String?,
         hint: String,
@@ -346,8 +373,8 @@ class MainActivity : ComponentActivity() {
         Tile(
             pickedName ?: "Your own file",
             if (pickedName == null) "Pick an ISO or disk image on this phone"
-            else if (pickedSize > 0) "${gb(pickedSize)}, tap to pick another" else "Tap to pick another",
-            selected = fileChosen, modifier = Modifier.fillMaxWidth(),
+            else listOfNotNull(pickedKind.label, if (pickedSize > 0) gb(pickedSize) else null).joinToString(", "),
+            selected = fileChosen, tag = if (fileChosen) "Change" else "", modifier = Modifier.fillMaxWidth(),
         ) { if (fileChosen || pickedName == null) onPickFile() else onDistro(ForgeService.CUSTOM_ID) }
         Gap(14)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = RowGap) {
@@ -367,7 +394,8 @@ class MainActivity : ComponentActivity() {
             Txt(hint, Forge.hint.copy(color = Forge.Danger))
             Gap(10)
         }
-        val ready = (fileChosen || catalog.any { it.id == distroId && it.enabled }) && list.any { it.key == stickKey }
+        val ready = ((fileChosen && pickedKind.writable) || catalog.any { it.id == distroId && it.enabled }) &&
+            list.any { it.key == stickKey }
         MoltenButton(if (fileChosen) "Write to drive" else "Create boot drive", enabled = ready, modifier = Modifier.fillMaxWidth(), onClick = onCreate)
     }
 

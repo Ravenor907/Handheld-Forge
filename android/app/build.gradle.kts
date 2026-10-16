@@ -50,8 +50,8 @@ android {
         applicationId = "io.github.ravenor907.handheldforge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 70
-        versionName = "0.7.0"
+        versionCode = 71
+        versionName = "0.7.1"
     }
 
     signingConfigs {
@@ -111,6 +111,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("org.apache.commons:commons-compress:1.27.1") // bzip2 for SteamOS images
+    implementation("org.tukaani:xz:1.10") // .xz images picked from the phone
 
     testImplementation("junit:junit:4.13.2")
 }
