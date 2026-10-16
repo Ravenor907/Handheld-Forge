@@ -94,6 +94,8 @@ private val VENTOY = Distro(
             "after unplugging and plugging the drive back in.",
         "Plug the drive into your handheld and start it from USB.",
         "Ventoy shows a menu of the ISOs on the drive. Pick one to start it.",
+        "With Secure Boot on, the first start shows a blue key screen: choose Enroll key from disk, open VTOYEFI, " +
+            "pick ENROLL_THIS_KEY_IN_MOKMANAGER.cer, confirm, and restart. Or turn Secure Boot off in the BIOS.",
     ),
 )
 private val FORMAT = Distro(ForgeService.FORMAT_ID, "Format drive", "Empty exFAT", true, 1, null, emptyList())
@@ -215,7 +217,7 @@ class MainActivity : ComponentActivity() {
                 lines,
             )
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
-            "done-ventoy" -> Jobs.demo(JobState.Finished(Outcome.OK, "1.1.07", VENTOY.name, "SanDisk Ultra Fit"), lines)
+            "done-ventoy" -> Jobs.demo(JobState.Finished(Outcome.OK, "1.1.18", VENTOY.name, "SanDisk Ultra Fit"), lines)
             "done-format" -> Jobs.demo(JobState.Finished(Outcome.OK, "", FORMAT.name, "SanDisk Ultra Fit"), lines)
             "done-cachyos" -> Jobs.demo(
                 JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
@@ -652,10 +654,12 @@ class MainActivity : ComponentActivity() {
                     Txt(s, body, Modifier.weight(1f))
                 }
             }
-            if (bootMenu.isNotEmpty()) {
+            // The general boot-menu help, minus lines about a particular system.
+            val menu = bootMenu.filterNot { it.contains("Bazzite") || it.contains("Secure Boot") }
+            if (menu.isNotEmpty()) {
                 Gap(22)
                 Txt("Starting from USB", Forge.brand)
-                bootMenu.forEach {
+                menu.forEach {
                     Gap(8)
                     Txt(it, body)
                 }
