@@ -327,3 +327,92 @@ object Fat16Builder {
         return img
     }
 }
+
+class VentoyConfigTest {
+    @Test
+    fun setsAndClearsBootNextOnAFreshDrive() {
+        val (d, v) = volume()
+        v.add("forge-test.iso", 4096, ByteArrayInputStream(ByteArray(4096)), { _, _ -> }, { false })
+        assertNull(VentoyConfig.bootNext(v))
+        VentoyConfig.setBootNext(v, "forge-test.iso")
+        // Read back from a fresh open: it's really on the disk, in /ventoy/ventoy.json.
+        val v2 = ExFatVolume.open(d, 2048)
+        assertEquals("forge-test.iso", VentoyConfig.bootNext(v2))
+        assertTrue(v2.lookup("ventoy")!!.isDir)
+        val json = v2.readFile(VentoyConfig.PATH)!!.toString(Charsets.UTF_8)
+        assertTrue(json, json.contains("\"VTOY_DEFAULT_IMAGE\": \"/forge-test.iso\""))
+        assertTrue(json.contains("\"VTOY_MENU_TIMEOUT\": \"5\""))
+        assertTrue(json.contains("\"VTOY_SECONDARY_BOOT_MENU\": \"0\""))
+        // The folder doesn't show up as an image.
+        assertEquals(listOf("forge-test.iso"), v2.files().map { it.name })
+        // Change it, then clear it: the file goes away when nothing else is in it.
+        VentoyConfig.setBootNext(v2, "other.iso")
+        assertEquals("other.iso", VentoyConfig.bootNext(v2))
+        val free = v2.freeClusters()
+        VentoyConfig.setBootNext(v2, null)
+        assertNull(VentoyConfig.bootNext(v2))
+        assertNull(v2.lookup(VentoyConfig.PATH))
+        assertEquals(free + 1, v2.freeClusters())
+    }
+
+    @Test
+    fun keepsEverythingElseInAnExistingVentoyJson() {
+        val existing = """
+            {
+                "theme": { "file": "/ventoy/theme/blur/theme.txt", "gfxmode": "1920x1080" },
+                "control": [
+                    { "VTOY_DEFAULT_MENU_MODE": "1" },
+                    { "VTOY_MENU_TIMEOUT": "30" },
+                    { "VTOY_FILT_DOT_UNDERSCORE_FILE": "1" }
+                ],
+                "menu_alias": [ { "image": "/a \"b\".iso", "alias": "Ünïcode ✓", "n": 1.50e3 } ]
+            }
+        """.trimIndent()
+        val set = VentoyConfig.withBootNext(existing, "Bazzite Deck.iso")!!
+        assertEquals("Bazzite Deck.iso", VentoyConfig.bootNext(set))
+        val parsed = JsonText.parse(set) as Map<*, *>
+        assertEquals(JsonText.parse(existing).let { (it as Map<*, *>)["theme"] }, parsed["theme"])
+        assertEquals((JsonText.parse(existing) as Map<*, *>)["menu_alias"], parsed["menu_alias"])
+        assertTrue(set.contains("1.50e3")) // numbers kept as written
+        val control = parsed["control"] as List<*>
+        assertTrue(control.contains(mapOf("VTOY_DEFAULT_MENU_MODE" to "1")))
+        assertTrue(control.contains(mapOf("VTOY_FILT_DOT_UNDERSCORE_FILE" to "1")))
+        assertTrue(control.contains(mapOf("VTOY_MENU_TIMEOUT" to "5")))
+        assertFalse(control.contains(mapOf("VTOY_MENU_TIMEOUT" to "30")))
+        // Clearing keeps the person's other settings and the file.
+        val cleared = VentoyConfig.withBootNext(set, null)!!
+        assertNull(VentoyConfig.bootNext(cleared))
+        val c2 = (JsonText.parse(cleared) as Map<*, *>)["control"] as List<*>
+        assertEquals(listOf(mapOf("VTOY_DEFAULT_MENU_MODE" to "1"), mapOf("VTOY_FILT_DOT_UNDERSCORE_FILE" to "1")), c2)
+        // Our own output parses again identically (stable round trip).
+        assertEquals(set, JsonText.write(JsonText.parse(set)) + "\n")
+    }
+
+    @Test
+    fun refusesToOverwriteABrokenVentoyJson() {
+        try {
+            VentoyConfig.withBootNext("{ \"control\": [ { \"VTOY_MENU_TIMEOUT\": \"5\" } ", "a.iso")
+            fail("should refuse")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!, e.message!!.contains("Fix or remove it"))
+        }
+        assertEquals("a.iso", VentoyConfig.bootNext(VentoyConfig.withBootNext("﻿{}", "a.iso")))
+    }
+
+    @Test
+    fun writeFileReplacesInAFolderAndRefusesAFileAsFolder() {
+        val (_, v) = volume()
+        val folder = v.createFolder("ventoy")
+        v.writeFile("ventoy/notes.txt", "hello".toByteArray())
+        v.writeFile("VENTOY/NOTES.TXT", "hello again".toByteArray()) // replaces, ignoring case
+        assertEquals("hello again", v.readFile("ventoy/notes.txt")!!.toString(Charsets.UTF_8))
+        assertEquals(1, v.entries(folder).size)
+        v.add("forge.iso", 1, ByteArrayInputStream(ByteArray(1)), { _, _ -> }, { false })
+        try {
+            v.writeFile("forge.iso/x", ByteArray(1))
+            fail("a file isn't a folder")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!, e.message!!.contains("is a file"))
+        }
+    }
+}

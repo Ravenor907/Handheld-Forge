@@ -163,14 +163,18 @@ class VentoyTest {
                 Ventoy.install(it, files, { _, _, _ -> }, ::println, { false }, secureBoot = false)
             }
             // Ventoy plus images added by the importer, plain and compressed (CI boots one from Ventoy's menu).
+            // The same with one image set to start on its own (CI boots it with no key presses).
             System.getenv("HF_IMPORT_DIR")?.let { src ->
-                FileDisk(File(dir, "ventoy-import.img"), sectors).use { d ->
-                    Ventoy.install(d, files, { _, _, _ -> }, ::println, { false })
-                    val vol = VentoyDrive.detect(d)!!.openData(d)
-                    val sources = File(src).listFiles()!!.filter { it.isFile }.sortedBy { it.name }
-                        .map { f -> VentoyImport.Source(f.name, f.length()) { f.inputStream() } }
-                    val plans = sources.map { VentoyImport.plan(it, { _, _ -> }, { false }) }
-                    println("Imported: " + VentoyImport.run(vol, plans, { _, _, _ -> }, ::println, { false }))
+                for (image in listOf("ventoy-import", "ventoy-bootnext")) {
+                    FileDisk(File(dir, "$image.img"), sectors).use { d ->
+                        Ventoy.install(d, files, { _, _, _ -> }, ::println, { false })
+                        val vol = VentoyDrive.detect(d)!!.openData(d)
+                        val sources = File(src).listFiles()!!.filter { it.isFile }.sortedBy { it.name }
+                            .map { f -> VentoyImport.Source(f.name, f.length()) { f.inputStream() } }
+                        val plans = sources.map { VentoyImport.plan(it, { _, _ -> }, { false }) }
+                        println("Imported: " + VentoyImport.run(vol, plans, { _, _, _ -> }, ::println, { false }))
+                        if (image == "ventoy-bootnext") VentoyConfig.setBootNext(vol, "forge-zip.iso")
+                    }
                 }
             }
         }

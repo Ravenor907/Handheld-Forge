@@ -26,6 +26,9 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +68,8 @@ import io.github.ravenor907.handheldforge.core.PhoneState
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Stage
+import io.github.ravenor907.handheldforge.core.VentoyConfig
+import io.github.ravenor907.handheldforge.core.VentoyImport
 import io.github.ravenor907.handheldforge.ui.Banner
 import io.github.ravenor907.handheldforge.ui.CheckRow
 import io.github.ravenor907.handheldforge.ui.EmptySlot
@@ -116,6 +121,10 @@ private data class VentoyInfo(
     val free: Long,
     val largest: Long,
     val files: List<Pair<String, Long>>,
+    /** Image Ventoy starts on its own (ventoy.json), or null. */
+    val bootNext: String? = null,
+    /** Set when the drive's ventoy.json couldn't be read, so boot-next can't be changed safely. */
+    val configError: String? = null,
 )
 private val FORMAT = Distro(ForgeService.FORMAT_ID, "Format drive", "Empty exFAT", true, 1, null, emptyList())
 private val TOOLS = listOf(VENTOY, FORMAT)
@@ -843,7 +852,11 @@ class MainActivity : ComponentActivity() {
 
         LaunchedEffect(stick.key, reload) {
             if (demo != null) {
-                info = VentoyInfo("1.1.18", true, 21_400_000_000, 21_400_000_000, listOf("bazzite-deck-stable.iso" to 8_300_000_000))
+                info = VentoyInfo(
+                    "1.1.18", true, 21_400_000_000, 21_400_000_000,
+                    listOf("bazzite-deck-stable.iso" to 8_300_000_000, "SteamOS-recovery.img" to 2_800_000_000),
+                    bootNext = "bazzite-deck-stable.iso",
+                )
                 return@LaunchedEffect
             }
             busy = true
@@ -851,11 +864,14 @@ class MainActivity : ComponentActivity() {
                 info = withContext(Dispatchers.IO) {
                     withVolume { vd, vol, disk ->
                         val efi = vd.readEfi(disk)
+                        val config = runCatching { VentoyConfig.bootNext(vol) }
                         VentoyInfo(
                             io.github.ravenor907.handheldforge.core.Ventoy.versionOf(efi),
                             io.github.ravenor907.handheldforge.core.Ventoy.secureBootEnabled(efi),
                             vol.freeBytes, vol.largestFreeRun(),
                             vol.files().sortedBy { it.name.lowercase() }.map { it.name to it.size },
+                            bootNext = config.getOrNull(),
+                            configError = config.exceptionOrNull()?.let { it.message ?: "ventoy.json couldn't be read" },
                         )
                     }
                 }
@@ -902,14 +918,50 @@ class MainActivity : ComponentActivity() {
             Gap(18)
             Txt("On the drive", Forge.brand)
             val files = info?.files.orEmpty()
+            val bootNext = info?.bootNext
             if (info != null && files.isEmpty()) {
                 Gap(8)
                 Txt("Nothing yet.", Forge.hint)
+            } else if (info != null) {
+                Gap(4)
+                Txt(
+                    info?.configError ?: if (bootNext != null) {
+                        "Ventoy starts the marked image on its own after ${VentoyConfig.TIMEOUT_SECONDS} seconds. Tap it again to go back to choosing from the menu."
+                    } else {
+                        "Tap an image to have Ventoy start it on its own, no buttons needed."
+                    },
+                    Forge.hint.copy(fontSize = 13.sp, color = if (info?.configError != null) Forge.Danger else Forge.hint.color),
+                )
+            }
+            fun setBootNext(name: String?) {
+                busy = true
+                removeError = ""
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { withVolume { _, vol, _ -> VentoyConfig.setBootNext(vol, name) } }
+                    } catch (e: Exception) {
+                        removeError = "Couldn't change what starts on its own: ${e.message}"
+                    }
+                    reload++
+                }
             }
             files.forEach { (name, size) ->
                 Gap(8)
                 val asking = confirmRemove == name
-                FileRow(name, gb(size), warn = if (asking) "Tap Remove again to delete it from the drive." else null, action = if (asking) "Remove?" else "Remove") {
+                val auto = name == bootNext
+                val bootable = name.substringAfterLast('.', "").lowercase() in VentoyImport.BOOTABLE
+                FileRow(
+                    name,
+                    gb(size) + if (auto) ", starts on its own" else "",
+                    warn = if (asking) "Tap Remove again to delete it from the drive." else null,
+                    action = if (asking) "Remove?" else "Remove",
+                    selected = auto,
+                    onClick = if (bootable && info?.configError == null && !busy && demo == null) {
+                        { setBootNext(if (auto) null else name) }
+                    } else {
+                        null
+                    },
+                ) {
                     if (!asking) {
                         confirmRemove = name
                     } else {
@@ -918,7 +970,13 @@ class MainActivity : ComponentActivity() {
                         busy = true
                         scope.launch {
                             try {
-                                withContext(Dispatchers.IO) { withVolume { _, vol, _ -> vol.find(name)?.let { vol.delete(it) } } }
+                                withContext(Dispatchers.IO) {
+                                    withVolume { _, vol, _ ->
+                                        vol.find(name)?.let { vol.delete(it) }
+                                        // Don't leave Ventoy pointed at an image that's gone.
+                                        if (name == bootNext) runCatching { VentoyConfig.setBootNext(vol, null) }
+                                    }
+                                }
                             } catch (e: Exception) {
                                 removeError = "Couldn't remove $name: ${e.message}"
                             }
@@ -952,9 +1010,21 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun FileRow(name: String, detail: String, warn: String?, action: String, onAction: () -> Unit) {
+    private fun FileRow(
+        name: String,
+        detail: String,
+        warn: String?,
+        action: String,
+        selected: Boolean = false,
+        onClick: (() -> Unit)? = null,
+        onAction: () -> Unit,
+    ) {
+        val shape = RoundedCornerShape(14.dp)
+        var m = Modifier.fillMaxWidth().background(Forge.Iron, shape)
+        if (selected) m = m.border(2.dp, Forge.molten, shape)
+        if (onClick != null) m = m.clip(shape).clickable(onClick = onClick)
         Row(
-            Modifier.fillMaxWidth().background(Forge.Iron, RoundedCornerShape(14.dp)).padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+            m.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {

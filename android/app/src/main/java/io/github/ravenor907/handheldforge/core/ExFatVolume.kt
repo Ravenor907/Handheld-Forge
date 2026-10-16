@@ -32,7 +32,14 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     val clusterBytes get() = sectorsPerCluster.toLong() * bs
     var label = ""; private set
 
-    data class FileInfo(val name: String, val size: Long, val firstCluster: Long, val contiguous: Boolean, internal val entryOffsets: List<Long>)
+    data class FileInfo(
+        val name: String,
+        val size: Long,
+        val firstCluster: Long,
+        val contiguous: Boolean,
+        internal val entryOffsets: List<Long>,
+        val isDir: Boolean = false,
+    )
 
     companion object {
         private const val FIRST = 2L
@@ -175,15 +182,19 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         return out
     }
 
-    /** The root directory's clusters and its raw bytes. */
-    private class Dir(val clusters: List<Long>, val bytes: ByteArray)
+    /** A directory's clusters and its raw bytes; [folder] is null for the root. */
+    private class Dir(val clusters: List<Long>, val bytes: ByteArray, val folder: FileInfo? = null)
 
-    private fun rootEntries(): Dir {
-        val clusters = chain(rootCluster, false, -1)
+    private fun rootEntries(): Dir = readDir(chain(rootCluster, false, -1), null)
+
+    private fun readDir(clusters: List<Long>, folder: FileInfo?): Dir {
         val bytes = ByteArray((clusters.size * clusterBytes).toInt())
         clusters.forEachIndexed { i, c -> readBytes(sectorOf(c), clusterBytes.toInt()).copyInto(bytes, (i * clusterBytes).toInt()) }
-        return Dir(clusters, bytes)
+        return Dir(clusters, bytes, folder)
     }
+
+    private fun dirOf(folder: FileInfo?): Dir =
+        if (folder == null) rootEntries() else readDir(chain(folder.firstCluster, folder.contiguous, folder.size), folder)
 
     private inline fun forEachEntry(d: Dir, f: (Int, ByteArray) -> Unit) {
         var o = 0
@@ -202,8 +213,12 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
 
     // ---------------------------------------------------------------- reading
 
-    fun files(): List<FileInfo> {
-        val d = rootEntries()
+    /** Files in the root folder (what Ventoy lists by default). */
+    fun files(): List<FileInfo> = entries(null).filter { !it.isDir }
+
+    /** Files and folders directly in [folder] (null: the root). */
+    fun entries(folder: FileInfo?): List<FileInfo> {
+        val d = dirOf(folder)
         val out = ArrayList<FileInfo>()
         var o = 0
         while (o + 32 <= d.bytes.size) {
@@ -225,9 +240,9 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
                         if (e + 32 > d.bytes.size || (d.bytes[e].toInt() and 0xFF) != 0xC1) break
                         for (j in 0 until 15) if (sb.length < nameLen) sb.append(bb.getShort(e + 2 + j * 2).toInt().toChar())
                     }
-                    if (attrs and 0x10 == 0) { // files only; folders are listed elsewhere by Ventoy anyway
-                        out.add(FileInfo(sb.toString(), size, first, flags and 0x02 != 0, (0..count).map { dirOffsetOnVolume(d, o + it * 32) }))
-                    }
+                    out.add(
+                        FileInfo(sb.toString(), size, first, flags and 0x02 != 0, (0..count).map { dirOffsetOnVolume(d, o + it * 32) }, attrs and 0x10 != 0),
+                    )
                 }
                 o += 32 * (count + 1)
                 continue
@@ -317,6 +332,66 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
 
     fun find(name: String): FileInfo? = files().firstOrNull { sameName(it.name, name) }
 
+    /** A file or folder by path from the root ("ventoy/ventoy.json"), matched the way exFAT does (ignoring case). */
+    fun lookup(path: String): FileInfo? {
+        var folder: FileInfo? = null
+        val parts = path.split('/').filter { it.isNotEmpty() }
+        for ((i, p) in parts.withIndex()) {
+            val e = entries(folder).firstOrNull { sameName(it.name, p) } ?: return null
+            if (i == parts.lastIndex) return e
+            if (!e.isDir) return null
+            folder = e
+        }
+        return null
+    }
+
+    /** A small file's contents by path, or null if it isn't there. */
+    fun readFile(path: String, limit: Int = 1 shl 20): ByteArray? {
+        val f = lookup(path)?.takeIf { !it.isDir } ?: return null
+        if (f.size > limit) throw IOException("$path is unexpectedly large.")
+        return readChain(f.firstCluster, f.contiguous, f.size)
+    }
+
+    /**
+     * Writes a small file at [path] (at most one folder deep), replacing any file already there
+     * and creating the folder if needed.
+     */
+    fun writeFile(path: String, data: ByteArray) {
+        val parts = path.split('/').filter { it.isNotEmpty() }
+        require(parts.size in 1..2) { "only one folder level is supported" }
+        val folder = if (parts.size == 2) {
+            lookup(parts[0])?.also { if (!it.isDir) throw IOException("${parts[0]} on the drive is a file, not a folder.") }
+                ?: createFolder(parts[0])
+        } else {
+            null
+        }
+        entries(folder).firstOrNull { sameName(it.name, parts.last()) }?.let {
+            if (it.isDir) throw IOException("$path on the drive is a folder.")
+            delete(it)
+        }
+        add(parts.last(), data.size.toLong(), data.inputStream(), { _, _ -> }, { false }, folder)
+    }
+
+    /** Deletes the file at [path]; false if it wasn't there. */
+    fun deleteFile(path: String): Boolean {
+        val f = lookup(path)?.takeIf { !it.isDir } ?: return false
+        delete(f)
+        return true
+    }
+
+    /** Makes an empty folder in the root: one zeroed cluster, contiguous. */
+    fun createFolder(name: String): FileInfo {
+        val clean = cleanName(name)
+        if (entries(null).any { sameName(it.name, clean) }) throw IOException("$clean is already on the drive.")
+        val c = findRun(1) ?: throw IOException("The drive is full.")
+        writeSectors(sectorOf(c), ByteArray(clusterBytes.toInt()))
+        setBits(c, 1, true)
+        flushBitmap(c, 1)
+        writeEntrySet(clean, c, clusterBytes, null, folder = true)
+        dev.sync()
+        return lookup(clean) ?: throw IOException("Couldn't create the $clean folder.")
+    }
+
     // ---------------------------------------------------------------- changes
 
     /** Deletes a file in the root folder: entries marked unused, clusters freed in the bitmap. */
@@ -352,13 +427,14 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         source: InputStream,
         progress: (Long, Long) -> Unit,
         cancel: () -> Boolean,
+        folder: FileInfo? = null,
     ): ByteArray {
         val clean = cleanName(name)
-        if (find(clean) != null) throw IOException("$clean is already on the drive.")
+        if (entries(folder).any { sameName(it.name, clean) }) throw IOException("$clean is already on the drive.")
         if (size == 0L) {
             // An empty file owns no clusters (first cluster 0), per the spec.
             if (source.read() != -1) throw IOException("$clean is bigger than expected; it may still be changing.")
-            writeEntrySet(clean, 0, 0)
+            writeEntrySet(clean, 0, 0, folder)
             dev.sync()
             return MessageDigest.getInstance("SHA-256").digest()
         }
@@ -405,7 +481,7 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         flushBitmap(first, clusters)
 
         // 3. Directory entries, last.
-        writeEntrySet(clean, first, size)
+        writeEntrySet(clean, first, size, folder)
         dev.sync()
         return md.digest()
     }
@@ -444,7 +520,7 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         }
     }
 
-    private fun writeEntrySet(name: String, first: Long, size: Long) {
+    private fun writeEntrySet(name: String, first: Long, size: Long, parent: FileInfo?, folder: Boolean = false) {
         val nameEntries = (name.length + 14) / 15
         val count = 2 + nameEntries
         val set = ByteArray(count * 32)
@@ -452,7 +528,7 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         val ts = timestamp()
         set[0] = 0x85.toByte()
         set[1] = (count - 1).toByte()
-        bb.putShort(4, 0x20) // archive
+        bb.putShort(4, if (folder) 0x10 else 0x20) // directory, or archive
         bb.putInt(8, ts); bb.putInt(12, ts); bb.putInt(16, ts)
         set[22] = 0x80.toByte(); set[23] = 0x80.toByte(); set[24] = 0x80.toByte() // times are UTC
         set[32] = 0xC0.toByte()
@@ -470,19 +546,18 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
                 if (idx < name.length) bb.putShort(o + 2 + j * 2, name[idx].code.toShort())
             }
         }
-        var sum = 0
-        for (i in set.indices) {
-            if (i == 2 || i == 3) continue
-            sum = ((if (sum and 1 != 0) 0x8000 else 0) + (sum ushr 1) + (set[i].toInt() and 0xFF)) and 0xFFFF
-        }
-        bb.putShort(2, sum.toShort())
+        bb.putShort(2, setChecksum(set).toShort())
 
         // A run of free slots: unused (InUse bit clear) or past the end marker.
-        var d = rootEntries()
+        var d = dirOf(parent)
         var slot = findSlots(d, count)
         if (slot == null) {
-            growRoot(d)
-            d = rootEntries()
+            d = if (parent == null) {
+                growRoot(d)
+                rootEntries()
+            } else {
+                dirOf(growFolder(parent))
+            }
             slot = findSlots(d, count) ?: throw IOException("Couldn't make room in the drive's folder.")
         }
         // Write the set sector by sector (it may cross a sector or cluster boundary).
@@ -519,6 +594,53 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
             o += 32
         }
         return null
+    }
+
+    /**
+     * Adds one zeroed cluster to a folder in the root and updates its entry set (size, and
+     * NoFatChain cleared with a FAT chain written if the next cluster isn't free). Returns it fresh.
+     */
+    private fun growFolder(f: FileInfo): FileInfo {
+        val clusters = chain(f.firstCluster, f.contiguous, f.size)
+        val c = findRun(1) ?: throw IOException("The drive is full.")
+        writeSectors(sectorOf(c), ByteArray(clusterBytes.toInt()))
+        setBits(c, 1, true)
+        flushBitmap(c, 1)
+        val stillContiguous = f.contiguous && c == clusters.last() + 1
+        if (!stillContiguous) {
+            val links = HashMap<Long, Long>()
+            if (f.contiguous) clusters.zipWithNext().forEach { (a, b) -> links[a] = b }
+            links[clusters.last()] = c
+            links[c] = 0xFFFFFFFFL
+            setFatEntries(links)
+        }
+        // Rewrite the folder's entry set: new length, flags, checksum.
+        val set = ByteArray(f.entryOffsets.size * 32)
+        f.entryOffsets.forEachIndexed { i, off -> readBytes(off / bs, bs).copyInto(set, i * 32, (off % bs).toInt(), (off % bs).toInt() + 32) }
+        val bb = ByteBuffer.wrap(set).order(ByteOrder.LITTLE_ENDIAN)
+        val newSize = f.size + clusterBytes
+        set[33] = if (stillContiguous) 0x03 else 0x01
+        bb.putLong(40, newSize)
+        bb.putLong(56, newSize)
+        bb.putShort(2, setChecksum(set).toShort())
+        f.entryOffsets.forEachIndexed { i, off ->
+            val sector = off / bs
+            val sec = readBytes(sector, bs)
+            set.copyInto(sec, (off % bs).toInt(), i * 32, i * 32 + 32)
+            writeSectors(sector, sec)
+        }
+        dev.sync()
+        return entries(null).firstOrNull { it.entryOffsets.first() == f.entryOffsets.first() }
+            ?: throw IOException("Lost track of the ${f.name} folder while growing it.")
+    }
+
+    private fun setChecksum(set: ByteArray): Int {
+        var sum = 0
+        for (i in set.indices) {
+            if (i == 2 || i == 3) continue
+            sum = ((if (sum and 1 != 0) 0x8000 else 0) + (sum ushr 1) + (set[i].toInt() and 0xFF)) and 0xFFFF
+        }
+        return sum
     }
 
     /** Adds one zeroed cluster to the root folder's chain. */

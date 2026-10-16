@@ -150,7 +150,7 @@ jobs:
           xz -T0 -c forge-test.iso > imports/forge-packed.iso.xz
           cp forge-test.iso forge-zip.iso && zip -j imports/forge-zip.zip forge-zip.iso && rm forge-zip.iso
           ls -l imports
-      - name: Make the app's drives (Format, Ventoy, Ventoy without Secure Boot, Ventoy with imported images)
+      - name: Make the app's drives (Format, Ventoy, Ventoy without Secure Boot, Ventoy with imported images, boot next)
         working-directory: android
         env:
           HF_IMAGE_OUT: ${{ github.workspace }}/img
@@ -160,7 +160,7 @@ jobs:
           export HF_VENTOY_TAR="$VTTAR"
           ./gradlew --no-daemon :app:testDebugUnitTest --tests '*VentoyTest.exportImagesForCi' --rerun-tasks 2>&1 | tail -5
           ls -ls "$HF_IMAGE_OUT"
-          for f in plain ventoy ventoy-nosb ventoy-import; do test -s "$HF_IMAGE_OUT/$f.img"; done
+          for f in plain ventoy ventoy-nosb ventoy-import ventoy-bootnext; do test -s "$HF_IMAGE_OUT/$f.img"; done
       - name: Check them with the real tools
         env:
           IMG: ${{ github.workspace }}/img
