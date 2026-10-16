@@ -126,8 +126,9 @@ jobs:
       - name: Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y exfatprogs qemu-system-x86 ovmf socat imagemagick python3-pil grub-pc-bin grub-efi-amd64-bin grub-common mtools xorriso
-          sudo modprobe exfat || true
+          sudo apt-get install -y exfatprogs exfat-fuse qemu-system-x86 ovmf socat imagemagick python3-pil grub-pc-bin grub-efi-amd64-bin grub-common mtools xorriso
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe exfat && echo "kernel exFAT driver loaded" || echo "no kernel exFAT driver; using exfat-fuse"
       - name: Latest Ventoy release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

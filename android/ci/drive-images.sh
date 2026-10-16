@@ -6,6 +6,9 @@
 #      mounted, an ISO is copied on, and both drives are booted in QEMU (BIOS and UEFI) with screenshots.
 # Expects: IMG (dir with plain.img, ventoy.img), VTDIR (extracted ventoy-x.y.z), SECTORS.
 set -euo pipefail
+trap 'echo "::error title=drive-images.sh line $LINENO::$BASH_COMMAND"' ERR
+# The kernel's exFAT driver if this runner has it, otherwise exfat-fuse (an independent implementation).
+mnt() { sudo mount -t exfat "$1" "$2" 2>/dev/null || sudo mount.exfat-fuse "$1" "$2"; }
 shots=screens/drive-images
 mkdir -p "$shots"
 err() { echo "::error title=$1::$2"; exit 1; }
@@ -23,9 +26,9 @@ L=$(part_loop "$IMG/plain.img")
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$L"
 fsck_ok "${L}p1" "Format drive"
 [ "$(sudo blkid -s LABEL -o value "${L}p1")" = "USB DRIVE" ] || err "Format drive" "label isn't USB DRIVE"
-sudo mkdir -p /mnt/plain && sudo mount -t exfat "${L}p1" /mnt/plain
+sudo mkdir -p /mnt/plain && mnt "${L}p1" /mnt/plain
 head -c 5000000000 /dev/urandom | sudo tee /mnt/plain/big-5GB.bin | sha256sum | cut -d' ' -f1 > /tmp/want
-sudo umount /mnt/plain && sudo mount -t exfat "${L}p1" /mnt/plain
+sudo umount /mnt/plain && mnt "${L}p1" /mnt/plain
 sudo sha256sum /mnt/plain/big-5GB.bin | cut -d' ' -f1 > /tmp/got
 cmp -s /tmp/want /tmp/got || err "Format drive" "5 GB file didn't read back intact"
 sudo umount /mnt/plain
@@ -68,9 +71,9 @@ fsck_ok "${V}p1" "Ventoy"
 # A small bootable ISO for Ventoy's menu to list.
 mkdir -p iso/boot/grub && echo 'menuentry "Forge test" { echo "Booted Forge test ISO"; sleep 600 }' > iso/boot/grub/grub.cfg
 grub-mkrescue -o forge-test.iso iso >/dev/null 2>&1 || xorriso -as mkisofs -o forge-test.iso iso >/dev/null 2>&1
-sudo mkdir -p /mnt/vt && sudo mount -t exfat "${V}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt
+sudo mkdir -p /mnt/vt && mnt "${V}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt
 sudo losetup -d "$V"
-R=$(part_loop ref.img); sudo mount "${R}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt; sudo losetup -d "$R"
+R=$(part_loop ref.img); mnt "${R}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt; sudo losetup -d "$R"
 
 boot() { # image, name, extra qemu args...
   local img=$1 name=$2; shift 2
