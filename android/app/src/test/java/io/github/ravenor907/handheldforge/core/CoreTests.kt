@@ -306,36 +306,64 @@ class ScsiTest {
     }
 
     @Test
-    fun usesTheBiggestTransferThePhoneAllows() {
-        val f = FakeUsbDrive(blocks = 8192, maxTransfer = 64 * 1024, largestTransfer = 1024 * 1024)
+    fun neverSendsHugeTransfers() {
+        val f = FakeUsbDrive(blocks = 16384, maxTransfer = 64 * 1024, largestTransfer = 1024 * 1024)
         val d = disk(f)
-        assertEquals(1024 * 1024, d.transferSize)
         val data = Random.nextBytes(4 * 1024 * 1024)
         d.write(0, data.size / 512, data)
-        assertEquals(1024 * 1024, f.biggestTransfer)
+        assertTrue(f.biggestTransfer <= 64 * 1024)
         assertArrayEquals(data, f.disk.copyOfRange(0, data.size))
     }
 
     @Test
-    fun fallsBackWhenBigTransfersAreRefused() {
-        // This phone's kernel refuses anything over 128 KB: 1 MB fails, 256 KB fails, 64 KB is safe.
-        val f = FakeUsbDrive(
-            blocks = 8192, maxTransfer = 64 * 1024, largestTransfer = 1024 * 1024, refuseAbove = 128 * 1024,
-        )
+    fun stickThatChokesOnBigWritesStillGetsWritten() {
+        // Like the failure on the owner's phone: reads are fine, big write commands stall.
+        val f = FakeUsbDrive(blocks = 16384, maxTransfer = 64 * 1024, writeCommandLimit = 120 * 1024)
         val d = disk(f)
-        assertEquals(64 * 1024, d.transferSize)
-        assertTrue(f.resets >= 2)
-        val data = Random.nextBytes(2 * 1024 * 1024)
-        d.write(10, data.size / 512, data)
-        val back = ByteArray(data.size)
-        d.read(10, data.size / 512, back)
-        assertArrayEquals(data, back)
+        val notes = ArrayList<String>()
+        d.onNote = { notes.add(it) }
+        val data = Random.nextBytes(4 * 1024 * 1024)
+        d.write(8, data.size / 512, data)
+        assertArrayEquals(data, f.disk.copyOfRange(8 * 512, 8 * 512 + data.size))
+        assertTrue(d.commandBytes <= 120 * 1024)
+        assertTrue(f.resets >= 1)
+        assertTrue(notes.any { it.contains("KB per command") })
     }
 
     @Test
-    fun tinyDriveSkipsTheProbe() {
-        val d = disk(FakeUsbDrive(blocks = 64, maxTransfer = 16384, largestTransfer = 1024 * 1024))
-        assertEquals(1024 * 1024, d.transferSize) // the whole 32 KB drive read fine in one go
+    fun flakyConnectionIsRetried() {
+        val f = FakeUsbDrive(blocks = 16384, maxTransfer = 64 * 1024)
+        val d = disk(f)
+        f.flakyTransfers = 3
+        val data = Random.nextBytes(2 * 1024 * 1024)
+        d.write(0, data.size / 512, data)
+        assertArrayEquals(data, f.disk.copyOfRange(0, data.size))
+    }
+
+    @Test
+    fun queuedTransfersWriteCorrectlyAndSwitchOffOnTrouble() {
+        val f = FakeUsbDrive(blocks = 16384, maxTransfer = 64 * 1024, canPipeline = true)
+        val d = disk(f)
+        assertTrue(d.pipelined)
+        val data = Random.nextBytes(3 * 1024 * 1024)
+        d.write(0, data.size / 512, data)
+        val back = ByteArray(data.size)
+        d.read(0, data.size / 512, back)
+        assertArrayEquals(data, back)
+        f.flakyTransfers = 1
+        d.write(0, data.size / 512, data)
+        assertFalse(d.pipelined) // first hiccup turns queuing off before anything else
+        assertEquals(1 shl 20, d.commandBytes)
+        assertArrayEquals(data, f.disk.copyOfRange(0, data.size))
+    }
+
+    @Test
+    fun deadConnectionGivesAdvice() {
+        val f = FakeUsbDrive(blocks = 16384, maxTransfer = 64 * 1024)
+        val d = disk(f)
+        f.flakyTransfers = Int.MAX_VALUE
+        val e = assertThrows<java.io.IOException> { d.write(0, 64, ByteArray(64 * 512)) }
+        assertTrue(e.message!!.contains("adapter"))
     }
 
     @Test

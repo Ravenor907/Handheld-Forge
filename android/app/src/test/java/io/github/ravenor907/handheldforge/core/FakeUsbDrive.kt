@@ -21,7 +21,15 @@ class FakeUsbDrive(
     override val largestTransfer: Int = maxTransfer,
     /** Bulk transfers longer than this fail, like a phone whose kernel caps them. */
     private val refuseAbove: Int = Int.MAX_VALUE,
+    /** WRITE commands carrying more than this many bytes stall partway, like a stick that chokes on big writes. */
+    var writeCommandLimit: Int = Int.MAX_VALUE,
+    /** The next this-many data-phase transfers fail once each, like a flaky cable or adapter. */
+    var flakyTransfers: Int = 0,
+    /** Take the queued-transfers path (the fake still moves them one by one). */
+    override val canPipeline: Boolean = false,
 ) : UsbTransport {
+    /** Largest WRITE command (bytes) that succeeded. */
+    var biggestWriteCommand = 0
     /** The biggest bulk transfer that went through. */
     var biggestTransfer = 0
     val disk = ByteArray((blocks * blockSize).toInt())
@@ -69,6 +77,12 @@ class FakeUsbDrive(
             return 31
         }
         if (p.dirIn) return -1
+        if (flakyTransfers > 0) {
+            flakyTransfers--
+            return -1
+        }
+        val op = p.cdb[0].toInt() and 0xFF
+        if ((op == 0x2A || op == 0x8A) && p.length > writeCommandLimit && dataPos + length > writeCommandLimit) return -1
         System.arraycopy(data, offset, outBuf, dataPos, length)
         dataPos += length
         if (dataPos >= p.length) {

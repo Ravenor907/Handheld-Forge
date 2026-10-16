@@ -29,6 +29,8 @@ import io.github.ravenor907.handheldforge.core.Downloader
 import io.github.ravenor907.handheldforge.core.ImageKind
 import io.github.ravenor907.handheldforge.core.ImageWriter
 import io.github.ravenor907.handheldforge.core.Progress
+import io.github.ravenor907.handheldforge.core.Ventoy
+import io.github.ravenor907.handheldforge.core.PlainDrive
 import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.usb.UsbSticks
 import java.io.File
@@ -50,7 +52,13 @@ class ForgeService : Service() {
         ensureChannel()
         goForeground()
         val file = intent.getStringExtra(EXTRA_URI)?.let { Uri.parse(it) }
-        worker = Thread({ if (file != null) runFile(file, stickKey) else run(distroId, stickKey) }, "forge").also { it.start() }
+        worker = Thread({
+            when {
+                distroId == FORMAT_ID || distroId == VENTOY_ID -> runTool(distroId, stickKey)
+                file != null -> runFile(file, stickKey)
+                else -> run(distroId, stickKey)
+            }
+        }, "forge").also { it.start() }
         return START_NOT_STICKY
     }
 
@@ -98,6 +106,7 @@ class ForgeService : Service() {
             }
             Jobs.log("Writing $name (%.1f GB)".format(size / 1e9))
             sticks.open(device).use { s ->
+                s.disk.onNote = { Jobs.log(it) }
                 if (!kind.compressed && s.disk.sizeBytes < size) throw IOException("This drive is too small for $name.")
                 try {
                     ImageWriter.writeStream(
@@ -112,6 +121,51 @@ class ForgeService : Service() {
             done("$name is on the drive")
         } catch (e: CancelledException) {
             Jobs.finish(Outcome.CANCELLED, listOfNotNull(Jobs.cancelReason, "The drive is unfinished, so write it again before booting from it.").joinToString(" "))
+            done("Stopped")
+        } catch (e: Exception) {
+            Jobs.log("${e.javaClass.simpleName}: ${e.message}")
+            Jobs.finish(Outcome.ERROR, e.message ?: e.javaClass.simpleName)
+            done("The drive wasn't finished")
+        } finally {
+            if (wake.isHeld) wake.release()
+            worker = null
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            stopSelf()
+        }
+    }
+
+    /** Format drive (plain exFAT) or install Ventoy. */
+    private fun runTool(tool: String, stickKey: String) {
+        val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:write")
+        wake.acquire(60 * 60 * 1000L)
+        try {
+            val sticks = UsbSticks(this)
+            val stage = { st: Stage, d: Long, t: Long ->
+                Jobs.progress(st, d, t)
+                maybeNotify(st, d, t)
+            }
+            val cancel = { Jobs.cancelRequested }
+            val ventoy = if (tool == VENTOY_ID) {
+                val dl = Downloader(isoDir(this), readKey = { "" }, userAgent = "HandheldForge-Android/${BuildConfigCompat.versionName(this)}")
+                Ventoy.fetchLatest(dl, File(isoDir(this), "ventoy"), stage, Jobs::log, cancel)
+            } else {
+                null
+            }
+            val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
+            sticks.open(device).use { s ->
+                s.disk.onNote = { Jobs.log(it) }
+                Jobs.log("Drive: ${s.disk.name}, ${"%.1f".format(s.disk.sizeBytes / 1e9)} GB")
+                if (ventoy != null) {
+                    Ventoy.install(s.disk, ventoy.second, stage, Jobs::log, cancel)
+                } else {
+                    PlainDrive.format(s.disk, stage = stage, log = Jobs::log, cancel = cancel)
+                }
+            }
+            Jobs.finish(Outcome.OK, ventoy?.first?.version ?: "")
+            done(if (ventoy != null) "Ventoy ${ventoy.first.version} is installed" else "The drive is formatted")
+        } catch (e: CancelledException) {
+            Jobs.finish(Outcome.CANCELLED, "Stopped. The drive is unfinished; run it again before using the drive.")
             done("Stopped")
         } catch (e: Exception) {
             Jobs.log("${e.javaClass.simpleName}: ${e.message}")
@@ -151,6 +205,7 @@ class ForgeService : Service() {
             // Check the stick before spending time on a big download.
             val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
             sticks.open(device).use { s ->
+                s.disk.onNote = { Jobs.log(it) }
                 Jobs.log("Drive: ${s.disk.name}, ${"%.1f".format(s.disk.sizeBytes / 1e9)} GB")
                 if (s.disk.sizeBytes < distro.minDriveBytes) {
                     throw IOException("This drive is too small. ${distro.name} needs ${distro.minDriveGb} GB or more.")
@@ -168,6 +223,7 @@ class ForgeService : Service() {
             val again = sticks.device(stickKey)
                 ?: throw IOException("The USB drive was unplugged during the download. Plug it back in and try again.")
             sticks.open(again).use { s ->
+                s.disk.onNote = { Jobs.log(it) }
                 try {
                     if (distro.format == "raw-bz2") {
                         // No published checksum: bzip2's block CRCs catch a damaged download.
@@ -271,6 +327,17 @@ class ForgeService : Service() {
         const val EXTRA_STICK = "stick"
         const val EXTRA_URI = "uri"
         const val CUSTOM_ID = "custom-file"
+        const val FORMAT_ID = "format-drive"
+        const val VENTOY_ID = "ventoy"
+
+        /** Format drive or Ventoy. Ventoy downloads its latest release first; formatting is local. */
+        fun startTool(context: Context, tool: String, name: String, stickKey: String, stickLabel: String) {
+            Jobs.begin(name, stickLabel, local = tool == FORMAT_ID)
+            val i = Intent(context, ForgeService::class.java)
+                .putExtra(EXTRA_DISTRO, tool)
+                .putExtra(EXTRA_STICK, stickKey)
+            ContextCompat.startForegroundService(context, i)
+        }
 
         /**
          * Every file is pickable. Phones label ISOs and images inconsistently (and greyed-out

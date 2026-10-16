@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Checks the app's Format and Ventoy output against the real tools.
+#   1. Format drive: fsck.exfat, then the kernel's exFAT driver mounts it and a 5 GB file round-trips.
+#   2. Ventoy: the image the app made is compared with Ventoy2Disk.sh's own install on a disk of the
+#      same size (boot code, partition table, core.img, the EFI partition), its exFAT is checked and
+#      mounted, an ISO is copied on, and both drives are booted in QEMU (BIOS and UEFI) with screenshots.
+# Expects: IMG (dir with plain.img, ventoy.img), VTDIR (extracted ventoy-x.y.z), SECTORS.
+set -euo pipefail
+shots=screens/drive-images
+mkdir -p "$shots"
+err() { echo "::error title=$1::$2"; exit 1; }
+
+part_loop() { # image -> loop device with partitions
+  local l; l=$(sudo losetup -f --show -P "$1"); sudo partprobe "$l" || true; sleep 1; echo "$l"
+}
+
+echo "== Format drive"
+L=$(part_loop "$IMG/plain.img")
+lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$L"
+sudo fsck.exfat -n "${L}p1" || err "Format drive" "fsck.exfat found problems"
+[ "$(sudo blkid -s LABEL -o value "${L}p1")" = "USB DRIVE" ] || err "Format drive" "label isn't USB DRIVE"
+sudo mkdir -p /mnt/plain && sudo mount -t exfat "${L}p1" /mnt/plain
+head -c 5000000000 /dev/urandom | sudo tee /mnt/plain/big-5GB.bin | sha256sum | cut -d' ' -f1 > /tmp/want
+sudo umount /mnt/plain && sudo mount -t exfat "${L}p1" /mnt/plain
+sudo sha256sum /mnt/plain/big-5GB.bin | cut -d' ' -f1 > /tmp/got
+cmp -s /tmp/want /tmp/got || err "Format drive" "5 GB file didn't read back intact"
+sudo umount /mnt/plain
+sudo fsck.exfat -n "${L}p1" || err "Format drive" "fsck.exfat found problems after writing"
+sudo losetup -d "$L"
+echo "Format drive: clean, mounts, 5 GB file round-trips"
+
+echo "== Ventoy: reference install with Ventoy2Disk.sh"
+truncate -s $((SECTORS * 512)) ref.img
+R=$(part_loop ref.img)
+(cd "$VTDIR" && printf 'y\ny\n' | sudo sh Ventoy2Disk.sh -I "$R") | tail -5
+sudo losetup -d "$R"
+
+echo "== Ventoy: compare with the app's install"
+python3 - "$IMG/ventoy.img" ref.img <<'PY'
+import struct, sys
+ours, ref = (open(p, "rb") for p in sys.argv[1:3])
+def rd(f, lba, n): f.seek(lba * 512); return f.read(n * 512)
+a, b = rd(ours, 0, 1), rd(ref, 0, 1)
+bad = []
+if a[:384] != b[:384] or a[400:440] != b[400:440]: bad.append("boot code in sector 0")
+if a[446:512] != b[446:512]:
+    bad.append("partition table")
+    for i in range(2):
+        o = 446 + 16 * i
+        print("ours", a[o:o+16].hex(), "ref", b[o:o+16].hex())
+p2 = struct.unpack("<I", b[470:474])[0]
+if rd(ours, 1, 2047) != rd(ref, 1, 2047): bad.append("core.img (sectors 1-2047)")
+if rd(ours, p2, 65536) != rd(ref, p2, 65536): bad.append("EFI partition")
+print("part2 at", p2)
+if bad:
+    print("::error title=Ventoy differs from Ventoy2Disk.sh::" + ", ".join(bad)); sys.exit(1)
+print("Ventoy layout identical to Ventoy2Disk.sh (except the random disk UUID and signature)")
+PY
+
+V=$(part_loop "$IMG/ventoy.img")
+lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$V"
+sudo fsck.exfat -n "${V}p1" || err "Ventoy" "exFAT partition has problems"
+[ "$(sudo blkid -s LABEL -o value "${V}p1")" = "Ventoy" ] || err "Ventoy" "partition 1 isn't labeled Ventoy"
+# A small bootable ISO for Ventoy's menu to list.
+mkdir -p iso/boot/grub && echo 'menuentry "Forge test" { echo "Booted Forge test ISO"; sleep 600 }' > iso/boot/grub/grub.cfg
+grub-mkrescue -o forge-test.iso iso >/dev/null 2>&1 || xorriso -as mkisofs -o forge-test.iso iso >/dev/null 2>&1
+sudo mkdir -p /mnt/vt && sudo mount -t exfat "${V}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt
+sudo losetup -d "$V"
+R=$(part_loop ref.img); sudo mount "${R}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt; sudo losetup -d "$R"
+
+boot() { # image, name, extra qemu args...
+  local img=$1 name=$2; shift 2
+  rm -f /tmp/qmon
+  qemu-system-x86_64 -m 1024 -drive file="$img",format=raw,if=ide -display none -monitor unix:/tmp/qmon,server,nowait "$@" &
+  local pid=$!
+  sleep 75
+  printf 'screendump /tmp/%s.ppm\n' "$name" | socat - UNIX-CONNECT:/tmp/qmon >/dev/null || true
+  sleep 2; kill $pid || true; wait $pid 2>/dev/null || true
+  convert "/tmp/$name.ppm" "$shots/$name.png" && echo "screenshot $name"
+}
+sudo chmod a+r "$IMG/ventoy.img" ref.img
+boot "$IMG/ventoy.img" ventoy-app-bios
+boot ref.img ventoy-ref-bios
+OVMF=$(ls /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
+cp "$OVMF" /tmp/ovmf.fd
+boot "$IMG/ventoy.img" ventoy-app-uefi -bios /tmp/ovmf.fd
+boot ref.img ventoy-ref-uefi -bios /tmp/ovmf.fd
+
+# The app's drive and Ventoy's own should look the same at boot.
+python3 - "$shots" <<'PY'
+import sys
+from PIL import Image, ImageChops
+d = sys.argv[1]
+for fw in ("bios", "uefi"):
+    a = Image.open(f"{d}/ventoy-app-{fw}.png").convert("L"); b = Image.open(f"{d}/ventoy-ref-{fw}.png").convert("L")
+    lit = sum(1 for p in a.getdata() if p > 40)
+    diff = ImageChops.difference(a.resize(b.size), b).getbbox()
+    print(fw, "lit pixels", lit, "diff box", diff)
+    if lit < 2000:
+        print(f"::error title=Ventoy {fw} boot::the app's drive showed a blank screen"); sys.exit(1)
+PY
+echo "Ventoy boots in BIOS and UEFI"

@@ -66,6 +66,8 @@ jobs:
     # Boots an emulator, opens every screen (debug builds accept a demo extra),
     # screenshots them and fails on any crash.
     needs: build
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +92,16 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: android/ci/screens.sh && android/ci/picker.sh
+      - name: Share screenshots for review (TEMPORARY, feature branch only)
+        if: always() && github.ref == 'refs/heads/android-tools'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd screens
+          git init -q -b review-screens
+          git -c user.name=ci -c user.email=ci@localhost add .
+          git -c user.name=ci -c user.email=ci@localhost commit -qm screens
+          git push -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" review-screens
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -97,11 +109,74 @@ jobs:
           path: screens/
           if-no-files-found: ignore
 
+
+  drive-images:
+    # Format drive and Ventoy, checked against the real tools: fsck.exfat, the kernel's exFAT
+    # driver, Ventoy's own Ventoy2Disk.sh (byte for byte), and booting both in QEMU.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y exfatprogs qemu-system-x86 ovmf socat imagemagick python3-pil grub-pc-bin grub-efi-amd64-bin grub-common mtools xorriso
+          sudo modprobe exfat || true
+      - name: Latest Ventoy release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir vt && cd vt
+          gh release download -R ventoy/Ventoy --pattern '*-linux.tar.gz' --pattern sha256.txt
+          tar=$(ls ventoy-*-linux.tar.gz)
+          grep " $tar\$" sha256.txt | sha256sum -c -
+          tar xzf "$tar"
+          echo "VTTAR=$PWD/$tar" >> "$GITHUB_ENV"
+          echo "VTDIR=$PWD/$(ls -d ventoy-*/ | head -1)" >> "$GITHUB_ENV"
+          echo "Ventoy: $tar"
+      - name: Make the app's drives (Format, Ventoy) as disk images
+        working-directory: android
+        env:
+          HF_IMAGE_OUT: ${{ github.workspace }}/img
+          HF_IMAGE_SECTORS: "16777216"
+        run: |
+          export HF_VENTOY_TAR="$VTTAR"
+          ./gradlew --no-daemon :app:testDebugUnitTest --tests '*VentoyTest.exportImagesForCi' --rerun-tasks 2>&1 | tail -5
+          ls -ls "$HF_IMAGE_OUT"
+          test -s "$HF_IMAGE_OUT/ventoy.img" && test -s "$HF_IMAGE_OUT/plain.img"
+      - name: Check them with the real tools
+        env:
+          IMG: ${{ github.workspace }}/img
+          SECTORS: "16777216"
+        run: android/ci/drive-images.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: drive-images-screens
+          path: screens/
+          if-no-files-found: ignore
+      - name: Share screenshots for review (TEMPORARY, feature branch only)
+        if: always() && github.ref == 'refs/heads/android-tools'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd screens
+          git init -q -b review-drive-images
+          git -c user.name=ci -c user.email=ci@localhost add .
+          git -c user.name=ci -c user.email=ci@localhost commit -qm screens
+          git push -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" review-drive-images
+
   release:
     # Publishes when main carries a versionName that has no release yet,
     # so bumping versionName in android/app/build.gradle.kts is what ships a build.
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/android-v')
-    needs: [build, screens]
+    needs: [build, screens, drive-images]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -86,6 +86,19 @@ import kotlinx.coroutines.withContext
 
 private const val CACHY = "cachyos-handheld"
 
+/** Things the app can put on a drive besides a listed system. */
+private val VENTOY = Distro(
+    ForgeService.VENTOY_ID, "Ventoy", "Latest release", true, 1, null, emptyList(),
+    installSteps = listOf(
+        "Copy ISO files onto the drive's big partition (named Ventoy). Use a computer, or this phone's Files app " +
+            "after unplugging and plugging the drive back in.",
+        "Plug the drive into your handheld and start it from USB.",
+        "Ventoy shows a menu of the ISOs on the drive. Pick one to start it.",
+    ),
+)
+private val FORMAT = Distro(ForgeService.FORMAT_ID, "Format drive", "Empty exFAT", true, 1, null, emptyList())
+private val TOOLS = listOf(VENTOY, FORMAT)
+
 val STEPS = Progress.STEPS
 
 private fun stepOf(s: Stage) = Progress.stepOf(s)
@@ -202,6 +215,8 @@ class MainActivity : ComponentActivity() {
                 lines,
             )
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
+            "done-ventoy" -> Jobs.demo(JobState.Finished(Outcome.OK, "1.1.07", VENTOY.name, "SanDisk Ultra Fit"), lines)
+            "done-format" -> Jobs.demo(JobState.Finished(Outcome.OK, "", FORMAT.name, "SanDisk Ultra Fit"), lines)
             "done-cachyos" -> Jobs.demo(
                 JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
             )
@@ -218,9 +233,17 @@ class MainActivity : ComponentActivity() {
         val tick by permissionTick.collectAsState()
         // The confirm demo shows CachyOS so its handheld warning is in the screenshot.
         val first = if (demo == "confirm") CACHY else catalog.firstOrNull { it.enabled }?.id
-        var distroId by rememberSaveable { mutableStateOf(if (demo == "file") ForgeService.CUSTOM_ID else first) }
+        var distroId by rememberSaveable {
+            mutableStateOf(
+                when (demo) {
+                    "file" -> ForgeService.CUSTOM_ID
+                    "ventoy", "confirm-ventoy" -> ForgeService.VENTOY_ID
+                    else -> first
+                },
+            )
+        }
         var stickKey by rememberSaveable { mutableStateOf(if (demo != null && demo != "empty") "demo1" else null) }
-        var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ready") }
+        var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ventoy") }
         var hint by remember { mutableStateOf("") }
         // A file the person picked to write instead of a listed system.
         var fileUri by rememberSaveable { mutableStateOf<String?>(if (demo == "file") "content://demo/new-os.img.bz2" else null) }
@@ -273,11 +296,12 @@ class MainActivity : ComponentActivity() {
 
         val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
         val custom = distroId == ForgeService.CUSTOM_ID && fileUri != null
+        val tool = TOOLS.firstOrNull { it.id == distroId }
         // A picked file runs as a one-off "system" named after the file.
-        val distro = if (custom) {
-            Distro(ForgeService.CUSTOM_ID, fileName, kind.label, true, 1, null, emptyList(), warning = kind.warning)
-        } else {
-            catalog.firstOrNull { it.id == distroId }
+        val distro = when {
+            custom -> Distro(ForgeService.CUSTOM_ID, fileName, kind.label, true, 1, null, emptyList(), warning = kind.warning)
+            tool != null -> tool
+            else -> catalog.firstOrNull { it.id == distroId }
         }
         val stick = list.firstOrNull { it.key == stickKey }
 
@@ -293,12 +317,12 @@ class MainActivity : ComponentActivity() {
                 Gap(18)
                 when (val j = job) {
                     is JobState.Running -> Working(j, askStopFirst = demo == "stop")
-                    is JobState.Finished -> Result(j, catalog.firstOrNull { it.name == j.distro }) {
+                    is JobState.Finished -> Result(j, (catalog + TOOLS).firstOrNull { it.name == j.distro }) {
                         Jobs.reset()
                         confirming = false
                     }
                     JobState.Idle -> if (confirming && distro != null && stick != null) {
-                        Confirm(distro, stick, custom, onBack = { confirming = false }) {
+                        Confirm(distro, stick, needsInternet = !custom && distroId != ForgeService.FORMAT_ID, onBack = { confirming = false }) {
                             if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                                     this@MainActivity, Manifest.permission.POST_NOTIFICATIONS,
                                 ) != PackageManager.PERMISSION_GRANTED
@@ -307,6 +331,8 @@ class MainActivity : ComponentActivity() {
                             }
                             if (custom) {
                                 ForgeService.startFile(this@MainActivity, Uri.parse(fileUri), fileName, stick.key, stick.label)
+                            } else if (tool != null) {
+                                ForgeService.startTool(this@MainActivity, tool.id, tool.name, stick.key, stick.label)
                             } else {
                                 ForgeService.start(this@MainActivity, distro, stick.key, stick.label)
                             }
@@ -376,6 +402,15 @@ class MainActivity : ComponentActivity() {
             else listOfNotNull(pickedKind.label, if (pickedSize > 0) gb(pickedSize) else null).joinToString(", "),
             selected = fileChosen, tag = if (fileChosen) "Change" else "", modifier = Modifier.fillMaxWidth(),
         ) { if (fileChosen || pickedName == null) onPickFile() else onDistro(ForgeService.CUSTOM_ID) }
+        Gap(10)
+        Row(horizontalArrangement = RowGap) {
+            Tile(VENTOY.name, "Multi-boot: copy ISOs on after", selected = distroId == VENTOY.id, subtitleLines = 2, modifier = Modifier.weight(1f)) {
+                onDistro(VENTOY.id)
+            }
+            Tile(FORMAT.name, "Empty exFAT drive for files", selected = distroId == FORMAT.id, subtitleLines = 2, modifier = Modifier.weight(1f)) {
+                onDistro(FORMAT.id)
+            }
+        }
         Gap(14)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = RowGap) {
             if (list.isEmpty()) {
@@ -394,13 +429,20 @@ class MainActivity : ComponentActivity() {
             Txt(hint, Forge.hint.copy(color = Forge.Danger))
             Gap(10)
         }
-        val ready = ((fileChosen && pickedKind.writable) || catalog.any { it.id == distroId && it.enabled }) &&
+        val isTool = TOOLS.any { it.id == distroId }
+        val ready = ((fileChosen && pickedKind.writable) || isTool || catalog.any { it.id == distroId && it.enabled }) &&
             list.any { it.key == stickKey }
-        MoltenButton(if (fileChosen) "Write to drive" else "Create boot drive", enabled = ready, modifier = Modifier.fillMaxWidth(), onClick = onCreate)
+        MoltenButton(
+            when {
+                fileChosen -> "Write to drive"
+                distroId == VENTOY.id -> "Install Ventoy"
+                distroId == FORMAT.id -> "Format drive"
+                else -> "Create boot drive"
+            }, enabled = ready, modifier = Modifier.fillMaxWidth(), onClick = onCreate)
     }
 
     @Composable
-    private fun ColumnScope.Confirm(distro: Distro, stick: Stick, custom: Boolean, onBack: () -> Unit, onErase: () -> Unit) {
+    private fun ColumnScope.Confirm(distro: Distro, stick: Stick, needsInternet: Boolean, onBack: () -> Unit, onErase: () -> Unit) {
         val resumed by resumeTick.collectAsState()
         var phone by remember { mutableStateOf(phoneState()) }
         // Battery and network change while the person reads; keep it current.
@@ -410,12 +452,19 @@ class MainActivity : ComponentActivity() {
                 delay(2000)
             }
         }
-        val checks = Preflight.checks(phone, download = !custom)
+        val checks = Preflight.checks(phone, download = needsInternet)
         val problems = checks.filter { !it.ok }
 
         Txt("Erase this drive?", Forge.title)
         Gap(8)
-        Txt("Everything on it will be replaced with ${distro.name}.", Forge.hint)
+        Txt(
+            when (distro.id) {
+                ForgeService.FORMAT_ID -> "Everything on it will be erased, leaving one empty exFAT drive named USB DRIVE that works on Windows, Mac, Linux and Android."
+                ForgeService.VENTOY_ID -> "Everything on it will be replaced with the latest Ventoy. Afterwards you copy ISO files onto it and choose one when you start from it."
+                else -> "Everything on it will be replaced with ${distro.name}."
+            },
+            Forge.hint,
+        )
         Gap(14)
         Tile(stick.label, stick.sizeBytes?.let { gb(it) } ?: "", selected = true, usb = true, modifier = Modifier.fillMaxWidth())
         Gap(16)
@@ -433,7 +482,11 @@ class MainActivity : ComponentActivity() {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             QuietButton("Go back", onClick = onBack)
             MoltenButton(
-                "Erase and write", enabled = Preflight.canStart(checks), modifier = Modifier.weight(1f), onClick = onErase,
+                when (distro.id) {
+                    ForgeService.FORMAT_ID -> "Erase and format"
+                    ForgeService.VENTOY_ID -> "Erase and install"
+                    else -> "Erase and write"
+                }, enabled = Preflight.canStart(checks), modifier = Modifier.weight(1f), onClick = onErase,
             )
         }
     }
@@ -460,7 +513,15 @@ class MainActivity : ComponentActivity() {
         // While the stop question is showing, back just dismisses it.
         BackHandler(enabled = askStop) { askStop = false }
 
-        Txt(if (j.local) "Writing ${j.distro} to ${j.drive}" else "Creating ${j.distro} on ${j.drive}", Forge.title)
+        Txt(
+            when {
+                j.distro == FORMAT.name -> "Formatting ${j.drive}"
+                j.distro == VENTOY.name -> "Installing Ventoy on ${j.drive}"
+                j.local -> "Writing ${j.distro} to ${j.drive}"
+                else -> "Creating ${j.distro} on ${j.drive}"
+            },
+            Forge.title,
+        )
         Gap(12)
         Banner(
             if (backWarned) {
@@ -532,7 +593,11 @@ class MainActivity : ComponentActivity() {
             Gap(16)
             Txt(
                 when (j.outcome) {
-                    Outcome.OK -> "Ready to boot"
+                    Outcome.OK -> when (distro?.id) {
+                        ForgeService.FORMAT_ID -> "Drive formatted"
+                        ForgeService.VENTOY_ID -> "Ventoy is installed"
+                        else -> "Ready to boot"
+                    }
                     Outcome.CANCELLED -> "Stopped"
                     Outcome.ERROR -> "The drive wasn't finished"
                 },
@@ -540,7 +605,11 @@ class MainActivity : ComponentActivity() {
             )
             Gap(8)
             Txt(
-                if (j.outcome == Outcome.OK) {
+                if (j.outcome == Outcome.OK && distro?.id == ForgeService.FORMAT_ID) {
+                    "${j.drive} is now one empty exFAT drive named USB DRIVE. Unplug it and plug it back in to use it for files."
+                } else if (j.outcome == Outcome.OK && distro?.id == ForgeService.VENTOY_ID) {
+                    "${j.drive} now has Ventoy ${j.message}."
+                } else if (j.outcome == Outcome.OK) {
                     "${j.drive} now holds ${j.distro}. " + if (steps.isEmpty()) {
                         "Plug it into your handheld, open the boot menu and choose the USB drive."
                     } else {
@@ -551,7 +620,7 @@ class MainActivity : ComponentActivity() {
                 },
                 Forge.hint,
             )
-            if (steps.isNotEmpty()) InstallGuide(steps)
+            if (steps.isNotEmpty()) InstallGuide(steps, ventoy = distro?.id == ForgeService.VENTOY_ID)
         }
         Gap(12)
         if (showLog) LogBox(log)
@@ -571,8 +640,28 @@ class MainActivity : ComponentActivity() {
 
     /** Opening the boot menu, then the system's own install steps. */
     @Composable
-    private fun InstallGuide(steps: List<String>) {
+    private fun InstallGuide(steps: List<String>, ventoy: Boolean = false) {
         val body = TextStyle(color = Forge.Bone, fontSize = 14.sp, lineHeight = 20.sp)
+        if (ventoy) {
+            Gap(22)
+            Txt("How to use it", Forge.brand)
+            steps.forEachIndexed { i, s ->
+                Gap(8)
+                Row {
+                    Txt("${i + 1}.", body.copy(color = Forge.MoltenA), Modifier.width(24.dp))
+                    Txt(s, body, Modifier.weight(1f))
+                }
+            }
+            if (bootMenu.isNotEmpty()) {
+                Gap(22)
+                Txt("Starting from USB", Forge.brand)
+                bootMenu.forEach {
+                    Gap(8)
+                    Txt(it, body)
+                }
+            }
+            return
+        }
         if (bootMenu.isNotEmpty()) {
             Gap(22)
             Txt("Open the boot menu", Forge.brand)

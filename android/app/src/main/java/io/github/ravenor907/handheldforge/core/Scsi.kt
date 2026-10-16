@@ -22,6 +22,35 @@ interface UsbTransport {
 
     /** Bulk-Only Mass Storage Reset plus clearing both endpoint halts. */
     fun resetRecovery()
+
+    /** Whether [streamOut]/[streamIn] keep several transfers in flight at once. */
+    val canPipeline: Boolean get() = false
+
+    /**
+     * Moves [length] bytes as [piece]-sized transfers, ideally several queued at once so the bus never
+     * waits on the phone. Returns bytes moved (less than [length] on a short read), or -1 on failure.
+     */
+    fun streamOut(data: ByteArray, offset: Int, length: Int, piece: Int, timeoutMs: Int): Int {
+        var done = 0
+        while (done < length) {
+            val r = bulkOut(data, offset + done, minOf(piece, length - done), timeoutMs)
+            if (r < 0) return -1
+            done += r
+        }
+        return done
+    }
+
+    fun streamIn(data: ByteArray, offset: Int, length: Int, piece: Int, timeoutMs: Int): Int {
+        var done = 0
+        while (done < length) {
+            val n = minOf(piece, length - done)
+            val r = bulkIn(data, offset + done, n, timeoutMs)
+            if (r < 0) return -1
+            done += r
+            if (r < n) break
+        }
+        return done
+    }
 }
 
 /** What the writer needs from a disk. */
@@ -42,8 +71,11 @@ class ScsiException(msg: String, val senseKey: Int = -1, val asc: Int = -1) : IO
 class BulkOnly(val t: UsbTransport, private val lun: Int = 0) {
     private var tag = 1
 
-    /** Size of each bulk transfer in a data phase; [ScsiDisk.init] raises it when the drive allows. */
+    /** Size of each bulk transfer in a data phase. */
     var transferSize = t.maxTransfer
+
+    /** Queue several transfers at once (fast); switched off by the first sign of trouble. */
+    var pipelined = t.canPipeline
 
     /**
      * Runs one SCSI command. Exactly one of [dataIn]/[dataOut] may be given.
@@ -66,7 +98,14 @@ class BulkOnly(val t: UsbTransport, private val lun: Int = 0) {
         val cbwBytes = cbw.array()
         if (t.bulkOut(cbwBytes, 0, 31, timeoutMs) != 31) fail("Drive did not accept a command")
 
-        if (length > 0) {
+        if (length > 0 && pipelined) {
+            val r = if (dataIn != null) {
+                t.streamIn(dataIn, offset, length, transferSize, timeoutMs)
+            } else {
+                t.streamOut(dataOut!!, offset, length, transferSize, timeoutMs)
+            }
+            if (r < 0) fail("USB transfer failed")
+        } else if (length > 0) {
             var done = 0
             while (done < length) {
                 val n = minOf(transferSize, length - done)
@@ -129,34 +168,83 @@ class ScsiDisk(private val bot: BulkOnly) : BlockDevice {
         }
         if (!ready) throw ScsiException("The drive isn't ready. Unplug it, plug it back in and try again.")
         readCapacity()
-        tuneTransfers()
+        bot.transferSize = bot.t.maxTransfer
         return this
     }
 
+    /** Notes about the connection (slowing down after an error), for the job log. */
+    var onNote: (String) -> Unit = {}
+
     /**
-     * Finds the biggest bulk transfer this phone and drive accept, by reading the start of the drive
-     * (harmless) at each size from the largest down. Anything that goes wrong just means a smaller size.
+     * Bytes per SCSI read/write command. Sticks and phone USB ports differ in how much they take
+     * at once, so this starts at a size most handle well and only ever steps down: when a command
+     * fails, the stick is reset and the same blocks are sent again in smaller pieces. Linux uses
+     * 120 KB per command for many sticks for the same reason.
      */
-    private fun tuneTransfers() {
-        val safe = bot.t.maxTransfer
-        var size = bot.t.largestTransfer
-        while (size > safe) {
-            val blocks = minOf(size / blockSize.toLong(), blockCount).toInt()
-            if (blocks * blockSize <= safe) break
-            bot.transferSize = size
-            try {
-                if (bot.command(rwCdb(READ10, READ16, 0, blocks), dataIn = ByteArray(blocks * blockSize)) == 0) return
-                requestSense()
-            } catch (_: IOException) {
-                // BulkOnly already reset the pipes.
-            }
-            size /= 4
+    var commandBytes = COMMAND_LADDER.first()
+        private set
+
+    private fun stepDown(): Boolean {
+        if (bot.pipelined) {
+            bot.pipelined = false
+            onNote("USB hiccup: sending one transfer at a time from now on")
+            return true
         }
-        bot.transferSize = safe
+        val smallerCmd = COMMAND_LADDER.firstOrNull { it < commandBytes && it >= blockSize }
+        val smallerXfer = if (bot.transferSize > MIN_TRANSFER) MIN_TRANSFER else null
+        if (smallerCmd == null && smallerXfer == null) return false
+        smallerCmd?.let { commandBytes = it }
+        smallerXfer?.let { bot.transferSize = it }
+        onNote("USB hiccup: now sending ${commandBytes / 1024} KB per command, ${bot.transferSize / 1024} KB per transfer")
+        return true
     }
 
-    /** Bytes per bulk transfer, after tuning (for the log). */
+    /** After a failed command: give the stick a moment, then wait until it answers again. */
+    private fun recover(attempt: Int) {
+        Thread.sleep(250L * attempt)
+        for (i in 0 until 20) {
+            try {
+                if (bot.command(byteArrayOf(0, 0, 0, 0, 0, 0), timeoutMs = 5_000) == 0) return
+                requestSense() // clears "unit attention" after a reset
+            } catch (_: IOException) {
+                // still settling
+            }
+            Thread.sleep(250)
+        }
+    }
+
+    /**
+     * Runs one read or write command, retrying through USB hiccups. A stick that refuses
+     * (write-protected, media error) fails at once; a connection that keeps dropping fails with
+     * advice after [MAX_ATTEMPTS] tries.
+     */
+    private fun <T> retrying(what: String, op: () -> T): T {
+        var last: IOException? = null
+        for (attempt in 1..MAX_ATTEMPTS) {
+            try {
+                return op()
+            } catch (e: ScsiException) {
+                if (e.senseKey == 0x7 || e.senseKey == 0x3 || e.senseKey == 0x5) throw e // real answers, not hiccups
+                last = e
+            } catch (e: IOException) {
+                last = e
+                stepDown()
+            }
+            onNote("Retrying $what (attempt ${attempt + 1} of $MAX_ATTEMPTS): ${last.message}")
+            recover(attempt)
+        }
+        throw IOException(
+            "The USB connection to the drive kept failing while trying to $what. Try a different USB-C adapter " +
+                "or port, plug the phone into a charger (some phones can't power some drives), or use another drive.",
+            last,
+        )
+    }
+
+    /** Bytes per bulk transfer (for the log). */
     val transferSize: Int get() = bot.transferSize
+
+    /** Whether transfers are queued several at a time (for the log). */
+    val pipelined: Boolean get() = bot.pipelined
 
     private fun inquiry() {
         val buf = ByteArray(36)
@@ -197,14 +285,31 @@ class ScsiDisk(private val bot: BulkOnly) : BlockDevice {
         if (blockCount <= 0) throw ScsiException("No media in the drive")
     }
 
-    override fun read(lba: Long, blocks: Int, buf: ByteArray, offset: Int) {
-        check(bot.command(rwCdb(READ10, READ16, lba, blocks), dataIn = buf, offset = offset,
-            length = blocks * blockSize), "read from the drive")
-    }
+    override fun read(lba: Long, blocks: Int, buf: ByteArray, offset: Int) =
+        pieces("read from the drive", lba, blocks) { at, n, skip ->
+            check(bot.command(rwCdb(READ10, READ16, at, n), dataIn = buf, offset = offset + skip,
+                length = n * blockSize), "read from the drive")
+        }
 
-    override fun write(lba: Long, blocks: Int, buf: ByteArray, offset: Int) {
-        check(bot.command(rwCdb(WRITE10, WRITE16, lba, blocks), dataOut = buf, offset = offset,
-            length = blocks * blockSize, timeoutMs = 60_000), "write to the drive")
+    override fun write(lba: Long, blocks: Int, buf: ByteArray, offset: Int) =
+        pieces("write to the drive", lba, blocks) { at, n, skip ->
+            check(bot.command(rwCdb(WRITE10, WRITE16, at, n), dataOut = buf, offset = offset + skip,
+                length = n * blockSize, timeoutMs = 60_000), "write to the drive")
+        }
+
+    /**
+     * Sends a request as commands of at most [commandBytes]. Each attempt re-reads the size, so
+     * after a step down the same blocks are retried in smaller pieces.
+     */
+    private fun pieces(what: String, lba: Long, blocks: Int, each: (Long, Int, Int) -> Unit) {
+        var done = 0
+        while (done < blocks) {
+            retrying(what) {
+                val n = minOf(blocks - done, maxOf(1, commandBytes / blockSize))
+                each(lba + done, n, done * blockSize)
+                done += n
+            }
+        }
     }
 
     override fun sync() {
@@ -245,6 +350,10 @@ class ScsiDisk(private val bot: BulkOnly) : BlockDevice {
     }
 
     companion object {
+        /** Bytes per command, largest first. 120 KB is what Linux uses for sticks that need care. */
+        val COMMAND_LADDER = listOf(1 shl 20, 256 shl 10, 120 shl 10, 64 shl 10, 16 shl 10, 4 shl 10)
+        const val MIN_TRANSFER = 16 * 1024
+        const val MAX_ATTEMPTS = 8
         const val READ10 = 0x28
         const val WRITE10 = 0x2A
         const val READ16 = 0x88

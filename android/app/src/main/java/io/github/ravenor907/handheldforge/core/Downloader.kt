@@ -43,11 +43,11 @@ class Downloader(
         return c
     }
 
-    fun fetchText(url: String): String {
+    fun fetchText(url: String, cap: Int = 64 * 1024): String {
         val c = open(url)
         try {
             if (c.responseCode !in 200..299) throw HttpStatus(c.responseCode)
-            return c.inputStream.use { readCapped(it, 64 * 1024) }.toString(Charsets.UTF_8)
+            return c.inputStream.use { readCapped(it, cap) }.toString(Charsets.UTF_8)
         } finally {
             c.disconnect()
         }
@@ -178,7 +178,8 @@ class Downloader(
         return PreparedImage(iso, expected, img, signed, fromCache = false)
     }
 
-    private fun download(url: String, part: File, stage: StageFn, cancel: () -> Boolean) {
+    /** Downloads [url] into [part], resuming what's already there and retrying dropped connections. */
+    fun download(url: String, part: File, stage: StageFn, cancel: () -> Boolean) {
         var attempt = 0
         while (true) {
             val before = if (part.exists()) part.length() else 0L

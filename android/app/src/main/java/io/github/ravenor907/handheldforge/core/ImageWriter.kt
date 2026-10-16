@@ -70,7 +70,9 @@ object ImageWriter {
         dev.write(dev.blockCount - tailBlocks, tailBlocks.toInt(), buf)
 
         log("Writing ${dev.name}")
-        if (dev is ScsiDisk) log("USB transfers of ${dev.transferSize / 1024} KB")
+        if (dev is ScsiDisk) {
+            log("USB: ${dev.commandBytes / 1024} KB per command, ${dev.transferSize / 1024} KB transfers" + if (dev.pipelined) ", several in flight" else "")
+        }
         var done = 0L
         val raw = CountingStream(open().buffered(CHUNK))
         decoding { decode(raw) }.use { input ->
