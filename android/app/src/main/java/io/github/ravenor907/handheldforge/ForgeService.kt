@@ -202,14 +202,16 @@ class ForgeService : Service() {
                 if (size < 0) throw IOException("Couldn't read the size of $name. Copy it to the phone's storage and try again.")
                 VentoyImport.Source(name, size) { contentResolver.openInputStream(u) ?: throw IOException("Couldn't open $name") }
             }
-            // Learn what each file is first, so nothing is written if one can't be added.
+            // Learn what each file is first (a quick look at its start), so a file that can't be added stops it early.
             val plans = sources.map { src ->
-                if (ImageKind.sniff(src.open().use { it.readNBytesCompat(ImageKind.SNIFF_BYTES) }).compressed) {
-                    Jobs.log("Measuring ${src.name} (unpacking it once to learn its full size)")
-                    stage(Stage.UNPACK, 0, 0)
-                }
-                VentoyImport.plan(src, { _, _ -> }, cancel).also {
-                    Jobs.log("${src.name}: ${it.content.label}, %.2f GB on the drive as ${it.targetName}".format(it.targetSize / 1e9))
+                VentoyImport.plan(src).also {
+                    Jobs.log(
+                        "${src.name}: ${it.content.label}, " + if (it.unpacks) {
+                            "unpacked once, straight onto the drive, as ${it.targetName}"
+                        } else {
+                            "%.2f GB, copied as ${it.targetName}".format(it.targetSize / 1e9)
+                        },
+                    )
                     if (!it.bootable) Jobs.log("Note: Ventoy lists only .iso, .img, .wim, .vhd, .vhdx, .efi and .vtoy files, so ${it.targetName} won't show in its menu")
                 }
             }
@@ -483,17 +485,6 @@ class ForgeService : Service() {
 }
 
 /** InputStream.readNBytes needs Android 13; this works everywhere. */
-fun java.io.InputStream.readNBytesCompat(n: Int): ByteArray {
-    val out = ByteArray(n)
-    var got = 0
-    while (got < n) {
-        val r = read(out, got, n - got)
-        if (r < 0) break
-        got += r
-    }
-    return out.copyOf(got)
-}
-
 /** Version name without generating BuildConfig. */
 object BuildConfigCompat {
     fun versionName(c: Context): String = try {

@@ -333,13 +333,24 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     }
 
     /** Longest run of free space in bytes: the biggest file that can be added. */
-    fun largestFreeRun(): Long {
+    fun largestFreeRun(): Long = largestRun().second * clusterBytes
+
+    /** First cluster and length (in clusters) of the longest free run. */
+    private fun largestRun(): Pair<Long, Long> {
         var best = 0L
+        var bestStart = 0L
         var run = 0L
+        var start = 0L
         for (i in 0 until clusterCount) {
-            if (bit(i)) run = 0 else { run++; if (run > best) best = run }
+            if (bit(i)) {
+                run = 0
+            } else {
+                if (run == 0L) start = i
+                run++
+                if (run > best) { best = run; bestStart = start }
+            }
         }
-        return best * clusterBytes
+        return (bestStart + FIRST) to best
     }
 
     // ---------------------------------------------------------------- names
@@ -501,14 +512,84 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         }
         if (source.read() != -1) throw IOException("$clean is bigger than expected; it may still be changing.")
 
+        commit(clean, first, size, folder)
+        return md.digest()
+    }
+
+    /** Steps 2 and 3 of adding a file whose data is already on the disk: bitmap, then entries. */
+    private fun commit(name: String, first: Long, size: Long, folder: FileInfo?) {
+        val clusters = maxOf(1L, (size + clusterBytes - 1) / clusterBytes)
         // 2. Allocation bitmap.
         setBits(first, clusters, true)
         flushBitmap(first, clusters)
-
-        // 3. Directory entries, last.
-        writeEntrySet(clean, first, size, folder)
+        // 3. Directory entries, last. If they can't be written, give the clusters back.
+        try {
+            writeEntrySet(name, first, size, folder)
+        } catch (e: IOException) {
+            setBits(first, clusters, false)
+            runCatching { flushBitmap(first, clusters) }
+            throw e
+        }
         dev.sync()
-        return md.digest()
+    }
+
+    /**
+     * Adds a file whose size is only known once [source] ends, such as an image unpacked on the
+     * way in: it's written into the longest free run, and only the clusters it used are claimed.
+     * [progress] gets the bytes written so far. Returns the size and SHA-256 of what was written.
+     * Nothing is recorded on the drive unless the whole file fit and was written.
+     */
+    fun addStreaming(
+        name: String,
+        source: InputStream,
+        progress: (Long) -> Unit,
+        cancel: () -> Boolean,
+        folder: FileInfo? = null,
+    ): Pair<Long, ByteArray> {
+        val clean = cleanName(name)
+        if (entries(folder).any { sameName(it.name, clean) }) throw IOException("$clean is already on the drive.")
+        val (first, runClusters) = largestRun()
+        val limit = runClusters * clusterBytes
+        val md = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(2048 * bs)
+        var written = 0L
+        var sector = sectorOf(first)
+        while (true) {
+            if (cancel()) throw CancelledException()
+            var got = 0
+            while (got < buf.size) {
+                val n = source.read(buf, got, buf.size - got)
+                if (n < 0) break
+                got += n
+            }
+            if (got == 0) break
+            if (written + got > limit) {
+                throw IOException(
+                    "$clean unpacks to more than the %.1f GB free in one piece on the drive. ".format(limit / 1e9) +
+                        "Free up space on the drive and try again.",
+                )
+            }
+            md.update(buf, 0, got)
+            val padded = (got + bs - 1) / bs * bs
+            java.util.Arrays.fill(buf, got, padded, 0)
+            var at = 0
+            while (at < padded / bs) {
+                val n = minOf(padded / bs - at, 2048)
+                dev.write(partitionStart + sector + at, n, buf, at * bs)
+                at += n
+            }
+            sector += padded / bs
+            written += got
+            progress(written)
+            if (got < buf.size) break
+        }
+        if (written == 0L) {
+            writeEntrySet(clean, 0, 0, folder)
+            dev.sync()
+        } else {
+            commit(clean, first, written, folder)
+        }
+        return written to md.digest()
     }
 
     /** Reads a file back from the drive and compares it with the hash [add] returned. */

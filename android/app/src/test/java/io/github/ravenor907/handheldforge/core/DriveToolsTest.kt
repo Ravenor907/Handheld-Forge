@@ -171,7 +171,7 @@ class VentoyTest {
                         val vol = VentoyDrive.detect(d)!!.openData(d)
                         val sources = File(src).listFiles()!!.filter { it.isFile }.sortedBy { it.name }
                             .map { f -> VentoyImport.Source(f.name, f.length()) { f.inputStream() } }
-                        val plans = sources.map { VentoyImport.plan(it, { _, _ -> }, { false }) }
+                        val plans = sources.map { VentoyImport.plan(it) }
                         println("Imported: " + VentoyImport.run(vol, plans, { _, _, _ -> }, ::println, { false }))
                         if (image == "ventoy-bootnext") VentoyConfig.setBootNext(vol, "forge-zip.iso")
                     }

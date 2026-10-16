@@ -73,7 +73,7 @@ class Progress(
         fun stepOf(s: Stage) = when (s) {
             Stage.LOOKUP, Stage.DOWNLOAD -> 0
             Stage.VERIFY -> 1
-            Stage.UNPACK, Stage.WRITE -> 2
+            Stage.WRITE -> 2
             Stage.CHECK -> 3
         }
 
@@ -97,12 +97,11 @@ class Progress(
                 Stage.DOWNLOAD -> "Downloading $name"
                 Stage.VERIFY -> "Checking that the download is genuine"
                 Stage.WRITE -> "Writing to the drive"
-                Stage.UNPACK -> "Measuring compressed images"
                 Stage.CHECK -> "Reading the drive back to confirm"
             }
             val first = firstStep(local)
             val headline = "Step ${stepOf(stage) - first + 1} of ${STEPS.size - first}: $label"
-            if (total > 0 && stage != Stage.LOOKUP && stage != Stage.UNPACK) {
+            if (total > 0 && stage != Stage.LOOKUP) {
                 val detail = "%.1f of %.1f GB".format(minOf(done, total) / 1e9, total / 1e9)
                 return headline to (if (timeLeft.isEmpty()) detail else "$detail, $timeLeft")
             }
@@ -111,7 +110,6 @@ class Progress(
                 Stage.DOWNLOAD -> "Connecting to the download server."
                 Stage.VERIFY -> "Comparing it with the publisher's checksum."
                 Stage.WRITE -> "Getting the drive ready."
-                Stage.UNPACK -> "Unpacking each one once to learn its full size. Nothing is written yet."
                 Stage.CHECK -> "Comparing every byte on the drive with the image."
             }
             if (elapsedMs >= 5000) detail += " (${clockText(elapsedMs)})"

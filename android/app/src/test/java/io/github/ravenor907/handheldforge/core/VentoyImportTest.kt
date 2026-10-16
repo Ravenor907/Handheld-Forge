@@ -139,13 +139,21 @@ class VentoyImportTest {
         val xz = ByteArrayOutputStream().also { o -> org.tukaani.xz.XZOutputStream(o, org.tukaani.xz.LZMA2Options(0)).use { it.write(disk) } }.toByteArray()
         val gz = ByteArrayOutputStream().also { o -> java.util.zip.GZIPOutputStream(o).use { it.write(a) } }.toByteArray()
         val plans = listOf(src("first.iso", a), src("os.img.xz", xz), src("second.iso.gz", gz)).map {
-            VentoyImport.plan(it, { _, _ -> }, { false })
+            VentoyImport.plan(it)
         }
         assertEquals(listOf("first.iso", "os.img", "second.iso"), plans.map { it.targetName })
-        assertEquals(disk.size.toLong(), plans[1].targetSize)
+        assertEquals(-1L, plans[1].targetSize) // learned while unpacking onto the drive, not before
+        assertEquals(ImageKind.DISK, plans[1].content)
+        assertEquals(ImageKind.ISO_HYBRID, plans[2].content)
         assertTrue(plans.all { it.bootable })
         val stages = ArrayList<Stage>()
-        VentoyImport.run(v, plans, { s, _, _ -> stages.add(s) }, {}, { false })
+        val writes = ArrayList<Pair<Long, Long>>()
+        VentoyImport.run(v, plans, { s, d, t -> stages.add(s); if (s == Stage.WRITE) writes.add(d to t) }, {}, { false })
+        // Write progress never goes backwards and ends at 100%.
+        assertTrue(writes.zipWithNext().all { (a, b) -> b.first >= a.first })
+        assertEquals(writes.last().second, writes.last().first)
+        assertEquals(disk.size.toLong(), v.find("os.img")!!.size)
+        assertEquals(a.size.toLong(), v.find("second.iso")!!.size)
         assertEquals(setOf("first.iso", "os.img", "second.iso"), v.files().map { it.name }.toSet())
         // Checks come after all writes.
         assertEquals(Stage.CHECK, stages.last())
@@ -160,8 +168,8 @@ class VentoyImportTest {
         val (_, v) = volume(128)
         val one = iso(100_000)
         val two = iso(200_000)
-        VentoyImport.run(v, listOf(VentoyImport.plan(src("x.iso", one), { _, _ -> }, { false })), { _, _, _ -> }, {}, { false })
-        VentoyImport.run(v, listOf(VentoyImport.plan(src("X.ISO", two), { _, _ -> }, { false })), { _, _, _ -> }, {}, { false })
+        VentoyImport.run(v, listOf(VentoyImport.plan(src("x.iso", one))), { _, _, _ -> }, {}, { false })
+        VentoyImport.run(v, listOf(VentoyImport.plan(src("X.ISO", two))), { _, _, _ -> }, {}, { false })
         assertEquals(1, v.files().size)
         assertEquals(200_000L, v.files()[0].size)
     }
@@ -169,7 +177,7 @@ class VentoyImportTest {
     @Test
     fun duplicateNamesInOneBatchGetNumbered() {
         val (_, v) = volume(128)
-        val p = VentoyImport.plan(src("same.iso", iso(50_000)), { _, _ -> }, { false })
+        val p = VentoyImport.plan(src("same.iso", iso(50_000)))
         VentoyImport.run(v, listOf(p, p), { _, _, _ -> }, {}, { false })
         assertEquals(setOf("same.iso", "same (2).iso"), v.files().map { it.name }.toSet())
     }
@@ -178,7 +186,7 @@ class VentoyImportTest {
     fun damagedArchiveIsReportedBeforeAnythingIsWritten() {
         val junk = byteArrayOf(0xFD.toByte(), 0x37, 0x7A, 0x58, 0x5A, 0) + ByteArray(4000) { 9 }
         try {
-            VentoyImport.plan(src("broken.img.xz", junk), { _, _ -> }, { false })
+            VentoyImport.plan(src("broken.img.xz", junk))
             fail("should reject")
         } catch (e: java.io.IOException) {
             assertTrue(e.message!!.contains("damaged"))
@@ -443,5 +451,106 @@ class FragmentationTest {
             assertTrue(e.message!!, e.message!!.contains("not in one piece"))
         }
         assertEquals(before, v.files().map { it.name }) // nothing written
+    }
+}
+
+class OnePassTest {
+    private fun src(name: String, bytes: ByteArray) = VentoyImport.Source(name, bytes.size.toLong()) { ByteArrayInputStream(bytes) }
+    private fun bz2(b: ByteArray) = ByteArrayOutputStream().also { o ->
+        org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream(o, 1).use { it.write(b) }
+    }.toByteArray()
+
+    @Test
+    fun compressedImageIsReadOnceAndLandsIntact() {
+        val (_, v) = volume(128)
+        val disk = Random.nextBytes(5 * 1024 * 1024).also { it[510] = 0x55; it[511] = 0xAA.toByte() }
+        val packed = bz2(disk)
+        var opens = 0
+        var bytesRead = 0L
+        val s = VentoyImport.Source("steamdeck-repair.img.bz2", packed.size.toLong()) {
+            opens++
+            object : java.io.FilterInputStream(ByteArrayInputStream(packed)) {
+                override fun read(b: ByteArray, off: Int, len: Int) = super.read(b, off, len).also { if (it > 0) bytesRead += it }
+            }
+        }
+        val plan = VentoyImport.plan(s)
+        val afterPlan = bytesRead
+        assertTrue("plan should only look at the start, read $afterPlan of ${packed.size}", afterPlan < packed.size)
+        VentoyImport.run(v, listOf(plan), { _, _, _ -> }, {}, { false })
+        // The whole archive is read exactly once for the copy (plus the small look at its start).
+        assertEquals(packed.size.toLong(), bytesRead - afterPlan)
+        val f = v.find("steamdeck-repair.img")!!
+        assertEquals(disk.size.toLong(), f.size)
+        assertTrue(f.contiguous)
+        v.verify(f, java.security.MessageDigest.getInstance("SHA-256").digest(disk), { _, _ -> }, { false })
+        // Only the clusters it needs are claimed.
+        val (_, fresh) = volume(128)
+        assertEquals(fresh.freeClusters() - (disk.size + v.clusterBytes - 1) / v.clusterBytes, v.freeClusters())
+    }
+
+    @Test
+    fun damageHalfwayLeavesNothingOnTheDrive() {
+        val (_, v) = volume(128)
+        val disk = Random.nextBytes(3 * 1024 * 1024).also { it[510] = 0x55; it[511] = 0xAA.toByte() }
+        val packed = bz2(disk)
+        packed[packed.size / 2] = (packed[packed.size / 2].toInt() xor 0x55).toByte()
+        val free = v.freeClusters()
+        val plan = VentoyImport.plan(src("os.img.bz2", packed))
+        try {
+            VentoyImport.run(v, listOf(plan), { _, _, _ -> }, {}, { false })
+            fail("should report damage")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!, e.message!!.contains("damaged"))
+        }
+        assertTrue(v.files().isEmpty())
+        assertEquals(free, v.freeClusters())
+    }
+
+    @Test
+    fun tooBigOnceUnpackedIsRefusedCleanly() {
+        val (_, v) = volume(16) // about 15 MB of space
+        val disk = ByteArray(40 * 1024 * 1024).also { it[510] = 0x55; it[511] = 0xAA.toByte() } // compresses to almost nothing
+        val packed = bz2(disk)
+        val free = v.freeClusters()
+        try {
+            VentoyImport.run(v, listOf(VentoyImport.plan(src("huge.img.bz2", packed))), { _, _, _ -> }, {}, { false })
+            fail("should refuse")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!, e.message!!.contains("in one piece"))
+        }
+        assertTrue(v.files().isEmpty())
+        assertEquals(free, v.freeClusters())
+    }
+
+    @Test
+    fun cancelHalfwayLeavesNothingOnTheDrive() {
+        val (_, v) = volume(64)
+        val disk = Random.nextBytes(8 * 1024 * 1024).also { it[510] = 0x55; it[511] = 0xAA.toByte() }
+        val free = v.freeClusters()
+        var calls = 0
+        try {
+            VentoyImport.run(v, listOf(VentoyImport.plan(src("os.img.bz2", bz2(disk)))), { _, _, _ -> }, {}, { ++calls > 3 })
+            fail("should stop")
+        } catch (_: CancelledException) {
+        }
+        assertTrue(v.files().isEmpty())
+        assertEquals(free, v.freeClusters())
+    }
+
+    @Test
+    fun prefetchGivesTheSameBytesAndPassesErrorsOn() {
+        val data = Random.nextBytes(10 * 1024 * 1024 + 17)
+        val out = PrefetchInputStream(ByteArrayInputStream(data), chunk = 1 shl 20, depth = 2).use { it.readBytes() }
+        assertArrayEquals(data, out)
+        val failing = object : java.io.InputStream() {
+            var n = 0
+            override fun read(): Int = if (n++ < 3_000_000) 1 else throw java.io.IOException("boom")
+        }
+        try {
+            PrefetchInputStream(failing, chunk = 1 shl 20).use { it.readBytes() }
+            fail("should pass the error on")
+        } catch (e: java.io.IOException) {
+            assertEquals("boom", e.message)
+        }
     }
 }
