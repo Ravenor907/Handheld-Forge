@@ -252,7 +252,8 @@ PY
 echo "== Importer: Ventoy's menu, then boot the image that was unpacked from .xz"
 [ -f /tmp/vars.fd ] && cp "$vars" /tmp/vars.fd
 rm -f /tmp/qmon
-qemu-system-x86_64 -m 1024 -drive file="$IMG/ventoy-import.img",format=raw,if=ide -display none \
+rm -f /tmp/serial-ventoy-import.log
+qemu-system-x86_64 -m 1024 -drive file="$IMG/ventoy-import.img",format=raw,if=ide -display none -serial file:/tmp/serial-ventoy-import.log \
   -monitor unix:/tmp/qmon,server,nowait "${uefi[@]}" &
 qpid=$!
 sleep 75
@@ -267,7 +268,9 @@ shot import-booted
 booted=$(ocr "$shots/import-booted.png")
 echo "::notice title=Importer after choosing (OCR)::$(echo "$booted" | cut -c1-300)"
 kill $qpid || true; wait $qpid 2>/dev/null || true
-echo "$booted" | grep -q "booted forge" || err "Importer boot" "the imported ISO didn't boot from Ventoy's menu (OCR: $booted)"
+serial=$(tr -cd '[:print:]\n' < /tmp/serial-ventoy-import.log | tail -c 600)
+echo "::notice title=Importer serial console::$(echo "$serial" | tail -c 300 | tr '\n' ' ')"
+{ echo "$booted" | grep -q "booted forge" || grep -q "Booted Forge test ISO" /tmp/serial-ventoy-import.log; } || err "Importer boot" "the imported ISO didn't boot from Ventoy's menu (OCR: $booted)"
 echo "Importer: Ventoy lists all three images and boots the one unpacked from .xz"
 
 echo "== Boot next: Ventoy starts the chosen image on its own"
@@ -281,7 +284,8 @@ sudo losetup -d "$B"
 sudo chmod a+r "$IMG/ventoy-bootnext.img"
 [ -f /tmp/vars.fd ] && cp "$vars" /tmp/vars.fd
 rm -f /tmp/qmon
-qemu-system-x86_64 -m 1024 -drive file="$IMG/ventoy-bootnext.img",format=raw,if=ide -display none \
+rm -f /tmp/serial-ventoy-bootnext.log
+qemu-system-x86_64 -m 1024 -drive file="$IMG/ventoy-bootnext.img",format=raw,if=ide -display none -serial file:/tmp/serial-ventoy-bootnext.log \
   -monitor unix:/tmp/qmon,server,nowait "${uefi[@]}" &
 qpid=$!
 sleep 100
@@ -289,5 +293,6 @@ shot bootnext-no-keys
 auto=$(ocr "$shots/bootnext-no-keys.png")
 kill $qpid || true; wait $qpid 2>/dev/null || true
 echo "::notice title=Boot next, no keys (OCR)::$(echo "$auto" | cut -c1-300)"
-echo "$auto" | grep -q "booted forge" || err "Boot next" "Ventoy didn't start forge-zip.iso on its own (OCR: $auto)"
+echo "::notice title=Boot next serial console::$(tr -cd '[:print:]\n' < /tmp/serial-ventoy-bootnext.log | tail -c 300 | tr '\n' ' ')"
+{ echo "$auto" | grep -q "booted forge" || grep -q "Booted Forge test ISO" /tmp/serial-ventoy-bootnext.log; } || err "Boot next" "Ventoy didn't start forge-zip.iso on its own (OCR: $auto)"
 echo "Boot next: Ventoy started the chosen image with no input"

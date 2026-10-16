@@ -144,7 +144,9 @@ jobs:
       - name: Test ISOs for the importer (one plain, one .xz, one .zip)
         run: |
           mkdir -p iso/boot/grub imports
-          printf 'set timeout=1\nmenuentry "Forge test" { echo "Booted Forge test ISO"; sleep 600 }\n' > iso/boot/grub/grub.cfg
+          # Prints to the screen and to the serial port, so CI can tell it booted whatever the video mode.
+          printf '%s\n' 'set timeout=1' 'insmod serial' 'serial --unit=0 --speed=115200' 'terminal_output --append serial' \
+            'menuentry "Forge test" { echo "Booted Forge test ISO"; sleep 600 }' > iso/boot/grub/grub.cfg
           grub-mkrescue -o forge-test.iso iso
           cp forge-test.iso imports/forge-test.iso
           xz -T0 -c forge-test.iso > imports/forge-packed.iso.xz
