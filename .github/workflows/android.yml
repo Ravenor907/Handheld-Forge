@@ -66,8 +66,6 @@ jobs:
     # Boots an emulator, opens every screen (debug builds accept a demo extra),
     # screenshots them and fails on any crash.
     needs: build
-    permissions:
-      contents: write
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -92,16 +90,6 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: android/ci/screens.sh && android/ci/picker.sh
-      - name: Share screenshots for review (TEMPORARY, feature branch only)
-        if: always() && github.ref == 'refs/heads/android-ventoy-import'
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd screens
-          git init -q -b review-screens
-          git -c user.name=ci -c user.email=ci@localhost add .
-          git -c user.name=ci -c user.email=ci@localhost commit -qm screens
-          git push -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" review-screens
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -114,8 +102,6 @@ jobs:
     # Format drive and Ventoy, checked against the real tools: fsck.exfat, the kernel's exFAT
     # driver, Ventoy's own Ventoy2Disk.sh (byte for byte), and booting both in QEMU.
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
@@ -174,16 +160,6 @@ jobs:
           name: drive-images-screens
           path: screens/
           if-no-files-found: ignore
-      - name: Share screenshots for review (TEMPORARY, feature branch only)
-        if: always() && github.ref == 'refs/heads/android-ventoy-import'
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd screens
-          git init -q -b review-drive-images
-          git -c user.name=ci -c user.email=ci@localhost add .
-          git -c user.name=ci -c user.email=ci@localhost commit -qm screens
-          git push -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" review-drive-images
 
   release:
     # Publishes when main carries a versionName that has no release yet,
