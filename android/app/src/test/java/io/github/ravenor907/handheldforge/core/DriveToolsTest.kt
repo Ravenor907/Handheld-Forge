@@ -161,3 +161,30 @@ class VentoyTest {
         }
     }
 }
+
+class UpcaseTest {
+    /** Expands the compressed table the way readers do, then checks it against the case rules. */
+    @Test
+    fun compressedTableExpandsToFullMapping() {
+        val t = ExFat.upcaseTable()
+        assertTrue("table is ${t.size} bytes", t.size < 0x10000) // fits old tools' 16-bit size
+        val bb = ByteBuffer.wrap(t).order(ByteOrder.LITTLE_ENDIAN)
+        val full = IntArray(0x10000)
+        var c = 0
+        while (bb.hasRemaining()) {
+            val v = bb.short.toInt() and 0xFFFF
+            if (v == 0xFFFF) {
+                val run = bb.short.toInt() and 0xFFFF
+                for (i in 0 until run) full[c + i] = c + i
+                c += run
+            } else {
+                full[c++] = v
+            }
+        }
+        assertEquals(0x10000, c)
+        assertEquals('A'.code, full['a'.code])
+        assertEquals('Z'.code, full['z'.code])
+        assertEquals(0x0410, full[0x0430]) // Cyrillic а -> А
+        assertEquals('5'.code, full['5'.code])
+    }
+}

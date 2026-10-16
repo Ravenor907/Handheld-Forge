@@ -9,6 +9,10 @@ set -euo pipefail
 shots=screens/drive-images
 mkdir -p "$shots"
 err() { echo "::error title=$1::$2"; exit 1; }
+fsck_ok() { # device, what
+  local out; if out=$(sudo fsck.exfat -n "$1" 2>&1); then echo "$out" | tail -1; else
+    echo "::error title=$2 fsck.exfat::$(echo "$out" | tail -8 | sed ':a;N;$!ba;s/\n/%0A/g')"; exit 1; fi
+}
 
 part_loop() { # image -> loop device with partitions
   local l; l=$(sudo losetup -f --show -P "$1"); sudo partprobe "$l" || true; sleep 1; echo "$l"
@@ -17,7 +21,7 @@ part_loop() { # image -> loop device with partitions
 echo "== Format drive"
 L=$(part_loop "$IMG/plain.img")
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$L"
-sudo fsck.exfat -n "${L}p1" || err "Format drive" "fsck.exfat found problems"
+fsck_ok "${L}p1" "Format drive"
 [ "$(sudo blkid -s LABEL -o value "${L}p1")" = "USB DRIVE" ] || err "Format drive" "label isn't USB DRIVE"
 sudo mkdir -p /mnt/plain && sudo mount -t exfat "${L}p1" /mnt/plain
 head -c 5000000000 /dev/urandom | sudo tee /mnt/plain/big-5GB.bin | sha256sum | cut -d' ' -f1 > /tmp/want
@@ -25,7 +29,7 @@ sudo umount /mnt/plain && sudo mount -t exfat "${L}p1" /mnt/plain
 sudo sha256sum /mnt/plain/big-5GB.bin | cut -d' ' -f1 > /tmp/got
 cmp -s /tmp/want /tmp/got || err "Format drive" "5 GB file didn't read back intact"
 sudo umount /mnt/plain
-sudo fsck.exfat -n "${L}p1" || err "Format drive" "fsck.exfat found problems after writing"
+fsck_ok "${L}p1" "Format drive after writing"
 sudo losetup -d "$L"
 echo "Format drive: clean, mounts, 5 GB file round-trips"
 
@@ -59,7 +63,7 @@ PY
 
 V=$(part_loop "$IMG/ventoy.img")
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$V"
-sudo fsck.exfat -n "${V}p1" || err "Ventoy" "exFAT partition has problems"
+fsck_ok "${V}p1" "Ventoy"
 [ "$(sudo blkid -s LABEL -o value "${V}p1")" = "Ventoy" ] || err "Ventoy" "partition 1 isn't labeled Ventoy"
 # A small bootable ISO for Ventoy's menu to list.
 mkdir -p iso/boot/grub && echo 'menuentry "Forge test" { echo "Booted Forge test ISO"; sleep 600 }' > iso/boot/grub/grub.cfg

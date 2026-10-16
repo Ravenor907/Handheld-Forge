@@ -195,15 +195,42 @@ object ExFat {
 
     private var upcaseCache: ByteArray? = null
 
-    /** Uncompressed up-case table for the Basic Multilingual Plane, from Java's case rules. */
-    fun upcaseTable(): ByteArray = upcaseCache ?: ByteArray(0x10000 * 2).also { t ->
-        val b = ByteBuffer.wrap(t).order(ByteOrder.LITTLE_ENDIAN)
-        for (c in 0 until 0x10000) {
-            val up = Character.toUpperCase(c.toChar())
-            // A few characters upper-case to a different-length string; keep those as themselves.
-            b.putShort(c * 2, (if (Character.charCount(up.code) == 1) up.code else c).toShort())
+    /**
+     * Up-case table in the spec's compressed form (as Windows and mkfs.exfat write it): runs of
+     * characters that map to themselves become 0xFFFF followed by the run length. This keeps the
+     * table around 6 KB; some older tools can't read one over 64 KB.
+     */
+    fun upcaseTable(): ByteArray = upcaseCache ?: run {
+        val out = java.io.ByteArrayOutputStream()
+        fun u16(v: Int) {
+            out.write(v and 0xFF)
+            out.write((v ushr 8) and 0xFF)
         }
-        upcaseCache = t
+        fun map(c: Int): Int {
+            val up = Character.toUpperCase(c.toChar()).code
+            // Surrogates and noncharacters stay as themselves.
+            return if (c in 0xD800..0xDFFF) c else up
+        }
+        var c = 0
+        while (c < 0x10000) {
+            if (map(c) == c) {
+                var run = 1
+                while (c + run < 0x10000 && map(c + run) == c + run) run++
+                // Short runs are cheaper written out, except one that reaches 0xFFFF:
+                // a literal 0xFFFF would read as the start of a run.
+                if (run > 2 || c + run == 0x10000) {
+                    u16(0xFFFF)
+                    u16(run)
+                } else {
+                    for (i in 0 until run) u16(c + i)
+                }
+                c += run
+            } else {
+                u16(map(c))
+                c++
+            }
+        }
+        out.toByteArray().also { upcaseCache = it }
     }
 
     private fun align(v: Long, to: Long) = (v + to - 1) / to * to
