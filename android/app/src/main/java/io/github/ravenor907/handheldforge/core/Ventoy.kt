@@ -115,8 +115,48 @@ object Ventoy {
         return rel to tar.inputStream().use { extract(it) }
     }
 
+    /**
+     * Turns off Secure Boot support in the EFI partition image, exactly as Ventoy2Disk.sh -S does
+     * (vtoycli partresize -s): the Microsoft-signed shim in BOOTX64.EFI is replaced by Ventoy's own
+     * GRUB (grubx64_real.efi), and the shim's helpers and Ventoy's key file are removed. Same for
+     * 32-bit UEFI. Such a drive starts only with Secure Boot turned off, with no key to enroll.
+     */
+    fun disableSecureBoot(part2: ByteArray) {
+        val fs = Fat16(part2)
+        fs.find("/EFI/BOOT/grubx64_real.efi")?.let {
+            val real = fs.read("/EFI/BOOT/grubx64_real.efi")
+            for (f in listOf("grubx64.efi", "grubx64_real.efi", "MokManager.efi", "mmx64.efi")) fs.delete("/EFI/BOOT/$f")
+            fs.delete("/ENROLL_THIS_KEY_IN_MOKMANAGER.cer")
+            fs.replace("/EFI/BOOT/BOOTX64.EFI", real)
+        }
+        fs.find("/EFI/BOOT/grubia32_real.efi")?.let {
+            val real = fs.read("/EFI/BOOT/grubia32_real.efi")
+            for (f in listOf("grubia32.efi", "grubia32_real.efi", "mmia32.efi")) fs.delete("/EFI/BOOT/$f")
+            fs.replace("/EFI/BOOT/BOOTIA32.EFI", real)
+        }
+    }
+
+    /** Whether an EFI partition image has Secure Boot support (how Ventoy's own tools tell). */
+    fun secureBootEnabled(part2: ByteArray) = Fat16(part2).find("/EFI/BOOT/grubx64_real.efi") != null
+
+    /** The Ventoy version written in the EFI partition's grub.cfg, if it can be read. */
+    fun versionOf(part2: ByteArray): String? = try {
+        val cfg = String(Fat16(part2).read("/grub/grub.cfg"), Charsets.UTF_8)
+        Regex("VENTOY_VERSION=\"?([0-9][0-9.]*)").find(cfg)?.groupValues?.get(1)
+    } catch (e: IOException) {
+        null
+    }
+
     /** Lays Ventoy out on [dev], then reads back everything except the empty exFAT space and compares. */
-    fun install(dev: BlockDevice, files: Files, stage: StageFn, log: LogFn, cancel: () -> Boolean, random: SecureRandom = SecureRandom()) {
+    fun install(
+        dev: BlockDevice,
+        files: Files,
+        stage: StageFn,
+        log: LogFn,
+        cancel: () -> Boolean,
+        secureBoot: Boolean = true,
+        random: SecureRandom = SecureRandom(),
+    ) {
         if (dev.blockSize != 512) throw WriteException("This drive uses ${dev.blockSize}-byte sectors; Ventoy needs 512-byte sectors.")
         if (dev.sizeBytes < MIN_BYTES) throw WriteException("Ventoy needs a drive of at least 1 GB.")
         val p = plan(dev.blockCount)
@@ -125,6 +165,13 @@ object Ventoy {
         val part2 = ImageKind.decoder(ImageKind.XZ)(ByteArrayInputStream(files.diskImgXz)).readBytes()
         if (part2.size.toLong() != PART2_SECTORS * 512) {
             throw WriteException("This Ventoy release's EFI partition isn't the expected 32 MB; it can't be installed here.")
+        }
+        if (!secureBoot) {
+            if (!secureBootEnabled(part2)) throw WriteException("This Ventoy release has no Secure Boot files to remove.")
+            disableSecureBoot(part2)
+            log("Secure Boot support off: BOOTX64.EFI is Ventoy's GRUB, the shim and key are removed")
+        } else {
+            log("Secure Boot support on: first start asks to enroll Ventoy's key once")
         }
 
         val written = ArrayList<Pair<Long, ByteArray>>() // regions to read back

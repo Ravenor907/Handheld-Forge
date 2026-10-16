@@ -4,7 +4,12 @@
 #   2. Ventoy: the image the app made is compared with Ventoy2Disk.sh's own install on a disk of the
 #      same size (boot code, partition table, core.img, the EFI partition), its exFAT is checked and
 #      mounted, an ISO is copied on, and both drives are booted in QEMU (BIOS and UEFI) with screenshots.
-# Expects: IMG (dir with plain.img, ventoy.img), VTDIR (extracted ventoy-x.y.z), SECTORS.
+#   3. Secure Boot off: the EFI partition matches Ventoy2Disk.sh -I -S file for file (and an mtools
+#      edit of the release's image), is a clean FAT, and Secure Boot firmware behaves as expected.
+#   4. Importer: images the app added (plain, .xz, .zip) are intact, Ventoy's menu lists them, and
+#      the one unpacked from .xz boots from that menu.
+# Expects: IMG (plain.img, ventoy.img, ventoy-nosb.img, ventoy-import.img), VTDIR (extracted
+# ventoy-x.y.z), SECTORS, and forge-test.iso plus imports/ from the workflow.
 set -euo pipefail
 trap 'echo "::error title=drive-images.sh line $LINENO::$BASH_COMMAND"' ERR
 # The kernel's exFAT driver if this runner has it, otherwise exfat-fuse (an independent implementation).
@@ -96,9 +101,8 @@ V=$(part_loop "$IMG/ventoy.img")
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$V"
 fsck_ok "${V}p1" "Ventoy"
 [ "$(sudo blkid -s LABEL -o value "${V}p1")" = "Ventoy" ] || err "Ventoy" "partition 1 isn't labeled Ventoy"
-# A small bootable ISO for Ventoy's menu to list.
-mkdir -p iso/boot/grub && echo 'menuentry "Forge test" { echo "Booted Forge test ISO"; sleep 600 }' > iso/boot/grub/grub.cfg
-grub-mkrescue -o forge-test.iso iso >/dev/null 2>&1 || xorriso -as mkisofs -o forge-test.iso iso >/dev/null 2>&1
+# The small bootable ISO the workflow built, for Ventoy's menu to list.
+[ -s forge-test.iso ] || err "Ventoy" "forge-test.iso is missing (the workflow builds it)"
 sudo mkdir -p /mnt/vt && mnt "${V}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt
 sudo losetup -d "$V"
 R=$(part_loop ref.img); mnt "${R}p1" /mnt/vt && sudo cp forge-test.iso /mnt/vt/ && sudo umount /mnt/vt; sudo losetup -d "$R"
@@ -145,3 +149,114 @@ for fw in ("bios", "uefi"):
         print(f"::error title=Ventoy {fw} boot::the app's drive showed a blank screen"); sys.exit(1)
 PY
 echo "Ventoy boots in BIOS and UEFI"
+
+ocr() { # screenshot png -> lowercase text
+  convert "$1" -resize 200% -colorspace Gray -negate /tmp/ocr.png 2>/dev/null && tesseract /tmp/ocr.png - 2>/dev/null | tr 'A-Z' 'a-z' | tr -s ' \n' ' '
+}
+shot() { # name: screenshot the running QEMU
+  printf 'screendump /tmp/%s.ppm\n' "$1" | socat - UNIX-CONNECT:/tmp/qmon >/dev/null || true
+  sleep 2; convert "/tmp/$1.ppm" "$shots/$1.png" && echo "screenshot $1"
+}
+key() { printf 'sendkey %s\n' "$1" | socat - UNIX-CONNECT:/tmp/qmon >/dev/null || true; }
+
+echo "== Secure Boot off: reference install with Ventoy2Disk.sh -I -S"
+truncate -s $((SECTORS * 512)) ref-nosb.img
+R=$(part_loop ref-nosb.img)
+(cd "$VTDIR" && printf 'y\ny\n' | sudo sh Ventoy2Disk.sh -I -S "$R") | tail -5
+sudo losetup -d "$R"
+# An independent reference: the release's EFI image edited with mtools the way vtoycli partresize -s does.
+xz -dc "$VTDIR/ventoy/ventoy.disk.img.xz" > /tmp/efi-mtools.img
+mcopy -n -i /tmp/efi-mtools.img ::/EFI/BOOT/grubx64_real.efi /tmp/real64.efi
+mcopy -o -i /tmp/efi-mtools.img /tmp/real64.efi ::/EFI/BOOT/BOOTX64.EFI
+if mdir -i /tmp/efi-mtools.img ::/EFI/BOOT/grubia32_real.efi >/dev/null 2>&1; then
+  mcopy -n -i /tmp/efi-mtools.img ::/EFI/BOOT/grubia32_real.efi /tmp/real32.efi
+  mcopy -o -i /tmp/efi-mtools.img /tmp/real32.efi ::/EFI/BOOT/BOOTIA32.EFI
+fi
+for f in /EFI/BOOT/grubx64.efi /EFI/BOOT/grubx64_real.efi /EFI/BOOT/MokManager.efi /EFI/BOOT/mmx64.efi \
+         /EFI/BOOT/grubia32.efi /EFI/BOOT/grubia32_real.efi /EFI/BOOT/mmia32.efi /ENROLL_THIS_KEY_IN_MOKMANAGER.cer; do
+  mdel -i /tmp/efi-mtools.img "::$f" 2>/dev/null || true
+done
+# The app's Secure Boot-off EFI partition: a clean FAT, and the same files as both references.
+dd if="$IMG/ventoy-nosb.img" of=/tmp/efi-ours.img bs=512 skip="$P2" count=65536 status=none
+fsck.fat -n /tmp/efi-ours.img | tail -2 || err "Secure Boot off" "fsck.fat found problems in the EFI partition"
+sudo mkdir -p /mnt/sb-ours /mnt/sb-ref /mnt/sb-mtools
+sudo mount -o ro,loop /tmp/efi-ours.img /mnt/sb-ours
+sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) ref-nosb.img /mnt/sb-ref
+sudo mount -o ro,loop /tmp/efi-mtools.img /mnt/sb-mtools
+echo "Secure Boot off, the app's /EFI/BOOT: $(sudo ls /mnt/sb-ours/EFI/BOOT | tr '\n' ' ')"
+sudo diff -r /mnt/sb-ours /mnt/sb-mtools || err "Secure Boot off" "the app's EFI files differ from the release image edited with mtools"
+if ! sudo diff -r /mnt/sb-ours /mnt/sb-ref; then
+  err "Secure Boot off" "the app's EFI files differ from Ventoy2Disk.sh -I -S"
+fi
+[ ! -e /mnt/sb-ours/EFI/BOOT/grubx64_real.efi ] || err "Secure Boot off" "grubx64_real.efi is still there"
+sudo umount /mnt/sb-ours /mnt/sb-ref /mnt/sb-mtools
+# The Secure Boot-on drive kept shim and MokManager.
+sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) "$IMG/ventoy.img" /mnt/sb-ours
+for f in EFI/BOOT/grubx64_real.efi EFI/BOOT/MokManager.efi ENROLL_THIS_KEY_IN_MOKMANAGER.cer; do
+  sudo test -e "/mnt/sb-ours/$f" || err "Secure Boot on" "$f is missing"
+done
+sudo umount /mnt/sb-ours
+echo "Secure Boot off: EFI files identical to Ventoy2Disk.sh -I -S and to the mtools edit; fsck.fat clean"
+
+echo "== Importer: the drive the app added images to"
+I=$(part_loop "$IMG/ventoy-import.img")
+fsck_ok "${I}p1" "Importer"
+sudo mkdir -p /mnt/imp && mnt "${I}p1" /mnt/imp
+names=$(sudo ls /mnt/imp | tr '\n' ' ')
+echo "On the drive: $names"
+[ "$names" = "forge-packed.iso forge-test.iso forge-zip.iso " ] || err "Importer" "expected forge-packed.iso forge-test.iso forge-zip.iso, found: $names"
+want=$(sha256sum forge-test.iso | cut -d' ' -f1)
+for f in forge-packed.iso forge-test.iso forge-zip.iso; do
+  [ "$(sudo sha256sum "/mnt/imp/$f" | cut -d' ' -f1)" = "$want" ] || err "Importer" "$f doesn't match the original ISO"
+done
+sudo umount /mnt/imp
+sudo losetup -d "$I"
+echo "Importer: clean exFAT, the three images are byte-identical to the original ISO"
+
+# UEFI with Secure Boot enforced: Microsoft keys enrolled, SMM on.
+sbcode=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
+sbvars=/usr/share/OVMF/OVMF_VARS_4M.ms.fd
+sbboot() { # image, name
+  cp "$sbvars" /tmp/sbvars.fd
+  boot "$1" "$2" -machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on \
+    -drive "if=pflash,format=raw,unit=0,readonly=on,file=$sbcode" -drive "if=pflash,format=raw,unit=1,file=/tmp/sbvars.fd"
+}
+sudo chmod a+r "$IMG"/ventoy-*.img
+if [ -f "$sbcode" ] && [ -f "$sbvars" ]; then
+  sbboot "$IMG/ventoy.img" sb-on-secureboot-firmware
+  echo "Secure Boot on, Secure Boot firmware: $(ocr "$shots/sb-on-secureboot-firmware.png" | cut -c1-300)"
+  sbboot "$IMG/ventoy-nosb.img" sb-off-secureboot-firmware
+  echo "Secure Boot off, Secure Boot firmware: $(ocr "$shots/sb-off-secureboot-firmware.png" | cut -c1-300)"
+else
+  echo "::warning title=Secure Boot boot::no Secure Boot OVMF on this runner"
+fi
+[ -f /tmp/vars.fd ] && cp "$vars" /tmp/vars.fd
+boot "$IMG/ventoy-nosb.img" sb-off-uefi "${uefi[@]}"
+python3 - "$shots/sb-off-uefi.png" <<'PY'
+import sys
+from PIL import Image
+lit = sum(1 for p in Image.open(sys.argv[1]).convert("L").getdata() if p > 40)
+print("Secure Boot off drive, plain UEFI: lit pixels", lit)
+if lit < 2000: print("::error title=Secure Boot off boot::blank screen"); sys.exit(1)
+PY
+
+echo "== Importer: Ventoy's menu, then boot the image that was unpacked from .xz"
+[ -f /tmp/vars.fd ] && cp "$vars" /tmp/vars.fd
+rm -f /tmp/qmon
+qemu-system-x86_64 -m 1024 -drive file="$IMG/ventoy-import.img",format=raw,if=ide -display none \
+  -monitor unix:/tmp/qmon,server,nowait "${uefi[@]}" &
+qpid=$!
+sleep 75
+shot import-menu
+menu=$(ocr "$shots/import-menu.png")
+echo "Menu text: $menu"
+for n in packed test zip; do
+  echo "$menu" | grep -q "forge.$n" || err "Importer menu" "forge-$n.iso isn't in Ventoy's menu (OCR: $menu)"
+done
+key ret; sleep 10; shot import-after-enter; key ret; sleep 45
+shot import-booted
+booted=$(ocr "$shots/import-booted.png")
+echo "After choosing it: $booted"
+kill $qpid || true; wait $qpid 2>/dev/null || true
+echo "$booted" | grep -q "booted forge" || err "Importer boot" "the imported ISO didn't boot from Ventoy's menu (OCR: $booted)"
+echo "Importer: Ventoy lists all three images and boots the one unpacked from .xz"

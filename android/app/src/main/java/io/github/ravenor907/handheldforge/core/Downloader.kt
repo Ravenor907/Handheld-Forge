@@ -5,7 +5,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 
-enum class Stage { LOOKUP, DOWNLOAD, VERIFY, WRITE, CHECK }
+/** Steps of a job, in order. UNPACK: reading compressed images through once to learn their size (part of Write). */
+enum class Stage { LOOKUP, DOWNLOAD, VERIFY, UNPACK, WRITE, CHECK }
 
 typealias StageFn = (Stage, Long, Long) -> Unit
 typealias LogFn = (String) -> Unit

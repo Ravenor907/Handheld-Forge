@@ -158,6 +158,21 @@ class VentoyTest {
         System.getenv("HF_VENTOY_TAR")?.let { tar ->
             val files = File(tar).inputStream().use { Ventoy.extract(it) }
             FileDisk(File(dir, "ventoy.img"), sectors).use { Ventoy.install(it, files, { _, _, _ -> }, ::println, { false }) }
+            // Without Secure Boot support (CI compares it with Ventoy2Disk.sh -I -S).
+            FileDisk(File(dir, "ventoy-nosb.img"), sectors).use {
+                Ventoy.install(it, files, { _, _, _ -> }, ::println, { false }, secureBoot = false)
+            }
+            // Ventoy plus images added by the importer, plain and compressed (CI boots one from Ventoy's menu).
+            System.getenv("HF_IMPORT_DIR")?.let { src ->
+                FileDisk(File(dir, "ventoy-import.img"), sectors).use { d ->
+                    Ventoy.install(d, files, { _, _, _ -> }, ::println, { false })
+                    val vol = VentoyDrive.detect(d)!!.openData(d)
+                    val sources = File(src).listFiles()!!.filter { it.isFile }.sortedBy { it.name }
+                        .map { f -> VentoyImport.Source(f.name, f.length()) { f.inputStream() } }
+                    val plans = sources.map { VentoyImport.plan(it, { _, _ -> }, { false }) }
+                    println("Imported: " + VentoyImport.run(vol, plans, { _, _, _ -> }, ::println, { false }))
+                }
+            }
         }
     }
 }

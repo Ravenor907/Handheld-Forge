@@ -31,7 +31,14 @@ sealed interface JobState {
         val local: Boolean = false,
     ) : JobState
 
-    data class Finished(val outcome: Outcome, val message: String, val distro: String, val drive: String) : JobState
+    data class Finished(
+        val outcome: Outcome,
+        val message: String,
+        val distro: String,
+        val drive: String,
+        /** Facts about what was made, for the result screen (e.g. "secureboot-off"). */
+        val flags: Set<String> = emptySet(),
+    ) : JobState
 }
 
 /** Process-wide job state shared by the service (writer) and the activity (reader). */
@@ -89,8 +96,8 @@ object Jobs {
 
     fun log(msg: String) = _log.update { (it + "${clock.format(Date())}  $msg").takeLast(300) }
 
-    fun finish(outcome: Outcome, message: String) = _state.update {
-        if (it is JobState.Running) JobState.Finished(outcome, message, it.distro, it.drive) else it
+    fun finish(outcome: Outcome, message: String, flags: Set<String> = emptySet()) = _state.update {
+        if (it is JobState.Running) JobState.Finished(outcome, message, it.distro, it.drive, flags) else it
     }
 
     fun cancel(reason: String? = null) {

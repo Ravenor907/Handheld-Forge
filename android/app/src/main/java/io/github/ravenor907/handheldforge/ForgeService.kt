@@ -30,6 +30,8 @@ import io.github.ravenor907.handheldforge.core.ImageKind
 import io.github.ravenor907.handheldforge.core.ImageWriter
 import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Ventoy
+import io.github.ravenor907.handheldforge.core.VentoyImport
+import io.github.ravenor907.handheldforge.core.VentoyDrive
 import io.github.ravenor907.handheldforge.core.PlainDrive
 import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.usb.UsbSticks
@@ -54,7 +56,8 @@ class ForgeService : Service() {
         val file = intent.getStringExtra(EXTRA_URI)?.let { Uri.parse(it) }
         worker = Thread({
             when {
-                distroId == FORMAT_ID || distroId == VENTOY_ID -> runTool(distroId, stickKey)
+                distroId == FORMAT_ID || distroId == VENTOY_ID -> runTool(distroId, stickKey, intent.getBooleanExtra(EXTRA_SECURE_BOOT, true))
+                distroId == IMPORT_ID -> runImport(intent.getStringArrayListExtra(EXTRA_URIS).orEmpty().map { Uri.parse(it) }, stickKey)
                 file != null -> runFile(file, stickKey)
                 else -> run(distroId, stickKey)
             }
@@ -135,7 +138,7 @@ class ForgeService : Service() {
     }
 
     /** Format drive (plain exFAT) or install Ventoy. */
-    private fun runTool(tool: String, stickKey: String) {
+    private fun runTool(tool: String, stickKey: String, secureBoot: Boolean) {
         val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:write")
         wake.acquire(60 * 60 * 1000L)
@@ -157,12 +160,15 @@ class ForgeService : Service() {
                 s.disk.onNote = { Jobs.log(it) }
                 Jobs.log("Drive: ${s.disk.name}, ${"%.1f".format(s.disk.sizeBytes / 1e9)} GB")
                 if (ventoy != null) {
-                    Ventoy.install(s.disk, ventoy.second, stage, Jobs::log, cancel)
+                    Ventoy.install(s.disk, ventoy.second, stage, Jobs::log, cancel, secureBoot = secureBoot)
                 } else {
                     PlainDrive.format(s.disk, stage = stage, log = Jobs::log, cancel = cancel)
                 }
             }
-            Jobs.finish(Outcome.OK, ventoy?.first?.version ?: "")
+            Jobs.finish(
+                Outcome.OK, ventoy?.first?.version ?: "",
+                if (ventoy != null) setOf(if (secureBoot) FLAG_SB_ON else FLAG_SB_OFF) else emptySet(),
+            )
             done(if (ventoy != null) "Ventoy ${ventoy.first.version} is installed" else "The drive is formatted")
         } catch (e: CancelledException) {
             Jobs.finish(Outcome.CANCELLED, "Stopped. The drive is unfinished; run it again before using the drive.")
@@ -171,6 +177,62 @@ class ForgeService : Service() {
             Jobs.log("${e.javaClass.simpleName}: ${e.message}")
             Jobs.finish(Outcome.ERROR, e.message ?: e.javaClass.simpleName)
             done("The drive wasn't finished")
+        } finally {
+            if (wake.isHeld) wake.release()
+            worker = null
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            stopSelf()
+        }
+    }
+
+    /** Copies picked images onto a Ventoy drive's image partition (nothing is erased). */
+    private fun runImport(uris: List<Uri>, stickKey: String) {
+        val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:write")
+        wake.acquire(4 * 60 * 60 * 1000L)
+        try {
+            if (uris.isEmpty()) throw IOException("No files were picked.")
+            val stage = { st: Stage, d: Long, t: Long ->
+                Jobs.progress(st, d, t)
+                maybeNotify(st, d, t)
+            }
+            val cancel = { Jobs.cancelRequested }
+            val sources = uris.map { u ->
+                val (name, size) = describeFile(this, u)
+                if (size < 0) throw IOException("Couldn't read the size of $name. Copy it to the phone's storage and try again.")
+                VentoyImport.Source(name, size) { contentResolver.openInputStream(u) ?: throw IOException("Couldn't open $name") }
+            }
+            // Learn what each file is first, so nothing is written if one can't be added.
+            val plans = sources.map { src ->
+                if (ImageKind.sniff(src.open().use { it.readNBytesCompat(ImageKind.SNIFF_BYTES) }).compressed) {
+                    Jobs.log("Measuring ${src.name} (unpacking it once to learn its full size)")
+                    stage(Stage.UNPACK, 0, 0)
+                }
+                VentoyImport.plan(src, { _, _ -> }, cancel).also {
+                    Jobs.log("${src.name}: ${it.content.label}, %.2f GB on the drive as ${it.targetName}".format(it.targetSize / 1e9))
+                    if (!it.bootable) Jobs.log("Note: Ventoy lists only .iso, .img, .wim, .vhd, .vhdx, .efi and .vtoy files, so ${it.targetName} won't show in its menu")
+                }
+            }
+            val device = UsbSticks(this).device(stickKey) ?: throw IOException("The USB drive was unplugged.")
+            val added = UsbSticks(this).open(device).use { s ->
+                s.disk.onNote = { Jobs.log(it) }
+                val vd = VentoyDrive.detect(s.disk) ?: throw IOException("This drive doesn't have Ventoy on it any more.")
+                val vol = vd.openData(s.disk)
+                Jobs.log("Ventoy partition: %.1f GB free".format(vol.freeBytes / 1e9))
+                VentoyImport.run(vol, plans, stage, Jobs::log, cancel)
+            }
+            Jobs.finish(Outcome.OK, added.joinToString("\n"), setOf(FLAG_IMPORT))
+            done(if (added.size == 1) "${added[0]} is on the Ventoy drive" else "${added.size} images are on the Ventoy drive")
+        } catch (e: CancelledException) {
+            Jobs.finish(
+                Outcome.CANCELLED,
+                "Stopped. Files already copied are on the drive; the one being copied wasn't added.", setOf(FLAG_IMPORT),
+            )
+            done("Stopped")
+        } catch (e: Exception) {
+            Jobs.log("${e.javaClass.simpleName}: ${e.message}")
+            Jobs.finish(Outcome.ERROR, e.message ?: e.javaClass.simpleName, setOf(FLAG_IMPORT))
+            done("The images weren't added")
         } finally {
             if (wake.isHeld) wake.release()
             worker = null
@@ -329,13 +391,31 @@ class ForgeService : Service() {
         const val CUSTOM_ID = "custom-file"
         const val FORMAT_ID = "format-drive"
         const val VENTOY_ID = "ventoy"
+        const val IMPORT_ID = "ventoy-import"
+        const val EXTRA_SECURE_BOOT = "secureBoot"
+        const val EXTRA_URIS = "uris"
+        const val FLAG_SB_ON = "secureboot-on"
+        const val FLAG_SB_OFF = "secureboot-off"
+        const val FLAG_IMPORT = "import"
+
+        /** Add images to a Ventoy drive. Local job: no download steps. */
+        fun startImport(context: Context, uris: List<Uri>, stickKey: String, stickLabel: String) {
+            Jobs.begin(if (uris.size == 1) "1 image" else "${uris.size} images", stickLabel, local = true)
+            val i = Intent(context, ForgeService::class.java)
+                .putExtra(EXTRA_DISTRO, IMPORT_ID)
+                .putExtra(EXTRA_STICK, stickKey)
+                .putStringArrayListExtra(EXTRA_URIS, ArrayList(uris.map { it.toString() }))
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            ContextCompat.startForegroundService(context, i)
+        }
 
         /** Format drive or Ventoy. Ventoy downloads its latest release first; formatting is local. */
-        fun startTool(context: Context, tool: String, name: String, stickKey: String, stickLabel: String) {
+        fun startTool(context: Context, tool: String, name: String, stickKey: String, stickLabel: String, secureBoot: Boolean = true) {
             Jobs.begin(name, stickLabel, local = tool == FORMAT_ID)
             val i = Intent(context, ForgeService::class.java)
                 .putExtra(EXTRA_DISTRO, tool)
                 .putExtra(EXTRA_STICK, stickKey)
+                .putExtra(EXTRA_SECURE_BOOT, secureBoot)
             ContextCompat.startForegroundService(context, i)
         }
 
@@ -400,6 +480,18 @@ class ForgeService : Service() {
 
         fun isoDir(context: Context): File = File(context.getExternalFilesDir(null) ?: context.filesDir, "iso")
     }
+}
+
+/** InputStream.readNBytes needs Android 13; this works everywhere. */
+fun java.io.InputStream.readNBytesCompat(n: Int): ByteArray {
+    val out = ByteArray(n)
+    var got = 0
+    while (got < n) {
+        val r = read(out, got, n - got)
+        if (r < 0) break
+        got += r
+    }
+    return out.copyOf(got)
 }
 
 /** Version name without generating BuildConfig. */

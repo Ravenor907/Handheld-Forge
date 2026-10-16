@@ -51,6 +51,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -89,14 +91,31 @@ private const val CACHY = "cachyos-handheld"
 /** Things the app can put on a drive besides a listed system. */
 private val VENTOY = Distro(
     ForgeService.VENTOY_ID, "Ventoy", "Latest release", true, 1, null, emptyList(),
-    installSteps = listOf(
-        "Copy ISO files onto the drive's big partition (named Ventoy). Use a computer, or this phone's Files app " +
-            "after unplugging and plugging the drive back in.",
-        "Plug the drive into your handheld and start it from USB.",
-        "Ventoy shows a menu of the ISOs on the drive. Pick one to start it.",
-        "With Secure Boot on, the first start shows a blue key screen: choose Enroll key from disk, open VTOYEFI, " +
-            "pick ENROLL_THIS_KEY_IN_MOKMANAGER.cer, confirm, and restart. Or turn Secure Boot off in the BIOS.",
-    ),
+    installSteps = ventoySteps(secureBoot = true),
+)
+
+private fun ventoySteps(secureBoot: Boolean) = listOf(
+    "Add images: tap Add images below, or copy ISO files onto the drive's Ventoy partition from a computer.",
+    "Plug the drive into your handheld and start it from USB.",
+    if (secureBoot) {
+        "If Secure Boot is on, the first start shows a blue key screen: choose Enroll key from disk, open VTOYEFI, " +
+            "pick ENROLL_THIS_KEY_IN_MOKMANAGER.cer, confirm, and restart. Only needed once per handheld."
+    } else {
+        "This drive was made without Secure Boot support, so turn Secure Boot off in the BIOS first."
+    },
+    "Ventoy shows a menu of the images on the drive. Pick one to start it.",
+)
+
+/** A file picked to add to a Ventoy drive. */
+private data class Picked(val uri: String, val name: String, val size: Long, val kind: ImageKind)
+
+/** What's on a Ventoy drive, read when its screen opens. */
+private data class VentoyInfo(
+    val version: String?,
+    val secureBoot: Boolean,
+    val free: Long,
+    val largest: Long,
+    val files: List<Pair<String, Long>>,
 )
 private val FORMAT = Distro(ForgeService.FORMAT_ID, "Format drive", "Empty exFAT", true, 1, null, emptyList())
 private val TOOLS = listOf(VENTOY, FORMAT)
@@ -197,7 +216,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val demoSticks = listOf(
-        Stick("demo1", "SanDisk Ultra Fit", true, 32_000_000_000),
+        Stick("demo1", "SanDisk Ultra Fit", true, 32_000_000_000, ventoy = true),
         Stick("demo2", "Kingston DataTraveler", false, null),
     )
 
@@ -217,7 +236,16 @@ class MainActivity : ComponentActivity() {
                 lines,
             )
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
-            "done-ventoy" -> Jobs.demo(JobState.Finished(Outcome.OK, "1.1.18", VENTOY.name, "SanDisk Ultra Fit"), lines)
+            "done-ventoy" -> Jobs.demo(
+                JobState.Finished(Outcome.OK, "1.1.18", VENTOY.name, "SanDisk Ultra Fit", setOf(ForgeService.FLAG_SB_ON)), lines,
+            )
+            "done-import" -> Jobs.demo(
+                JobState.Finished(
+                    Outcome.OK, "Nobara-44-Steam-Handheld.iso\nbazzite-deck-stable.iso", "2 images", "SanDisk Ultra Fit",
+                    setOf(ForgeService.FLAG_IMPORT),
+                ),
+                lines,
+            )
             "done-format" -> Jobs.demo(JobState.Finished(Outcome.OK, "", FORMAT.name, "SanDisk Ultra Fit"), lines)
             "done-cachyos" -> Jobs.demo(
                 JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
@@ -247,13 +275,48 @@ class MainActivity : ComponentActivity() {
         var stickKey by rememberSaveable { mutableStateOf(if (demo != null && demo != "empty") "demo1" else null) }
         var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ventoy") }
         var hint by remember { mutableStateOf("") }
+        val scope = rememberCoroutineScope()
+        var importing by rememberSaveable { mutableStateOf(demo == "import") }
+        var secureBoot by rememberSaveable { mutableStateOf(true) }
+        var picked by remember {
+            mutableStateOf(
+                if (demo == "import") {
+                    listOf(
+                        Picked("d1", "Nobara-44-Steam-Handheld-2026-10-13.iso", 9_300_000_000, ImageKind.ISO_HYBRID),
+                        Picked("d2", "steamdeck-repair-latest.img.bz2", 2_800_000_000, ImageKind.BZIP2),
+                    )
+                } else {
+                    emptyList()
+                },
+            )
+        }
+        val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isEmpty()) return@rememberLauncherForActivityResult
+            scope.launch {
+                val found = withContext(Dispatchers.IO) {
+                    uris.mapNotNull { uri ->
+                        try {
+                            try {
+                                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            } catch (_: Exception) {
+                            }
+                            val (n, size) = ForgeService.describeFile(this@MainActivity, uri)
+                            Picked(uri.toString(), n, size, ForgeService.sniffFile(this@MainActivity, uri))
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                }
+                picked = (picked + found).distinctBy { it.uri }
+                hint = if (found.size < uris.size) "Some files couldn't be read and were left out." else ""
+            }
+        }
         // A file the person picked to write instead of a listed system.
         var fileUri by rememberSaveable { mutableStateOf<String?>(if (demo == "file") "content://demo/new-os.img.bz2" else null) }
         var fileName by rememberSaveable { mutableStateOf(if (demo == "file") "new-os.img.bz2" else "") }
         var fileSize by rememberSaveable { mutableStateOf(if (demo == "file") 3_400_000_000L else -1L) }
         var fileKind by rememberSaveable { mutableStateOf(if (demo == "file") ImageKind.XZ.name else ImageKind.UNKNOWN.name) }
         val kind = ImageKind.valueOf(fileKind)
-        val scope = rememberCoroutineScope()
         val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
                 try {
@@ -294,7 +357,11 @@ class MainActivity : ComponentActivity() {
                 delay(2000)
             }
         }
-        LaunchedEffect(job) { keepScreenOn(job is JobState.Running) }
+        LaunchedEffect(job) {
+            keepScreenOn(job is JobState.Running)
+            // A finished job may have changed the drive (now Ventoy, now plain): look at it again.
+            if (job is JobState.Finished && demo == null) sticks.forget()
+        }
 
         val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
         val custom = distroId == ForgeService.CUSTOM_ID && fileUri != null
@@ -308,6 +375,7 @@ class MainActivity : ComponentActivity() {
         val stick = list.firstOrNull { it.key == stickKey }
 
         BackHandler(enabled = confirming && job is JobState.Idle) { confirming = false }
+        BackHandler(enabled = importing && !confirming && job is JobState.Idle) { importing = false }
 
         Box(Modifier.fillMaxSize().background(Forge.Slate).safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
             Column(Modifier.fillMaxSize()) {
@@ -319,12 +387,43 @@ class MainActivity : ComponentActivity() {
                 Gap(18)
                 when (val j = job) {
                     is JobState.Running -> Working(j, askStopFirst = demo == "stop")
-                    is JobState.Finished -> Result(j, (catalog + TOOLS).firstOrNull { it.name == j.distro }) {
-                        Jobs.reset()
-                        confirming = false
-                    }
-                    JobState.Idle -> if (confirming && distro != null && stick != null) {
-                        Confirm(distro, stick, needsInternet = !custom && distroId != ForgeService.FORMAT_ID, onBack = { confirming = false }) {
+                    is JobState.Finished -> Result(
+                        j, (catalog + TOOLS).firstOrNull { it.name == j.distro },
+                        onAgain = {
+                            Jobs.reset()
+                            confirming = false
+                            importing = false
+                            if (ForgeService.FLAG_IMPORT in j.flags && j.outcome == Outcome.OK) picked = emptyList()
+                        },
+                        onImport = {
+                            Jobs.reset()
+                            confirming = false
+                            if (ForgeService.FLAG_IMPORT in j.flags && j.outcome == Outcome.OK) picked = emptyList()
+                            hint = ""
+                            importing = true
+                        },
+                    )
+                    JobState.Idle -> if (importing && stick != null && !confirming) {
+                        VentoyFiles(
+                            stick, picked, hint, demo,
+                            onPick = { pickImages.launch(arrayOf("*/*")) },
+                            onUnpick = { p -> picked = picked - p },
+                            onBack = { importing = false },
+                            onCopy = {
+                                if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                                        this@MainActivity, Manifest.permission.POST_NOTIFICATIONS,
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                ForgeService.startImport(this@MainActivity, picked.map { Uri.parse(it.uri) }, stick.key, stick.label)
+                            },
+                        )
+                    } else if (confirming && distro != null && stick != null) {
+                        Confirm(
+                            distro, stick, needsInternet = !custom && distroId != ForgeService.FORMAT_ID,
+                            secureBoot = secureBoot, onSecureBoot = { secureBoot = it }, onBack = { confirming = false },
+                        ) {
                             if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                                     this@MainActivity, Manifest.permission.POST_NOTIFICATIONS,
                                 ) != PackageManager.PERMISSION_GRANTED
@@ -334,7 +433,7 @@ class MainActivity : ComponentActivity() {
                             if (custom) {
                                 ForgeService.startFile(this@MainActivity, Uri.parse(fileUri), fileName, stick.key, stick.label)
                             } else if (tool != null) {
-                                ForgeService.startTool(this@MainActivity, tool.id, tool.name, stick.key, stick.label)
+                                ForgeService.startTool(this@MainActivity, tool.id, tool.name, stick.key, stick.label, secureBoot)
                             } else {
                                 ForgeService.start(this@MainActivity, distro, stick.key, stick.label)
                             }
@@ -344,6 +443,11 @@ class MainActivity : ComponentActivity() {
                             catalog, distroId, fileName.takeIf { fileUri != null }, fileSize, kind, list, stickKey, hint,
                             onDistro = { distroId = it },
                             onPickFile = { pickFile.launch(ForgeService.PICK_TYPES) },
+                            onAddToVentoy = {
+                                hint = ""
+                                if (stick?.hasPermission == true) importing = true
+                                else stick?.let { s -> sticks.device(s.key)?.let { sticks.requestPermission(it) } }
+                            },
                             onStick = { s ->
                                 stickKey = s.key
                                 hint = ""
@@ -382,6 +486,7 @@ class MainActivity : ComponentActivity() {
         hint: String,
         onDistro: (String) -> Unit,
         onPickFile: () -> Unit,
+        onAddToVentoy: () -> Unit,
         onStick: (Stick) -> Unit,
         onCreate: () -> Unit,
     ) {
@@ -421,12 +526,25 @@ class MainActivity : ComponentActivity() {
             list.forEach { s ->
                 val sub = when {
                     !s.hasPermission -> "Tap to allow access"
-                    s.sizeBytes != null -> gb(s.sizeBytes)
+                    s.sizeBytes != null -> gb(s.sizeBytes) + if (s.ventoy) ", has Ventoy" else ""
                     else -> "Reading size"
                 }
                 Tile(s.label, sub, selected = s.key == stickKey, usb = true, modifier = Modifier.fillMaxWidth()) { onStick(s) }
             }
         }
+        // A Ventoy drive can take more images without being erased.
+        list.firstOrNull { it.key == stickKey && it.ventoy }?.let {
+            Gap(10)
+            Row(
+                Modifier.fillMaxWidth().background(Forge.Iron, RoundedCornerShape(14.dp)).padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Txt("This drive has Ventoy. Add OS images to it without erasing anything.", Forge.hint, Modifier.weight(1f))
+                Spacer(Modifier.width(10.dp))
+                QuietButton("Add images", onClick = onAddToVentoy)
+            }
+        }
+        Gap(10)
         if (hint.isNotEmpty()) {
             Txt(hint, Forge.hint.copy(color = Forge.Danger))
             Gap(10)
@@ -444,7 +562,15 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun ColumnScope.Confirm(distro: Distro, stick: Stick, needsInternet: Boolean, onBack: () -> Unit, onErase: () -> Unit) {
+    private fun ColumnScope.Confirm(
+        distro: Distro,
+        stick: Stick,
+        needsInternet: Boolean,
+        secureBoot: Boolean,
+        onSecureBoot: (Boolean) -> Unit,
+        onBack: () -> Unit,
+        onErase: () -> Unit,
+    ) {
         val resumed by resumeTick.collectAsState()
         var phone by remember { mutableStateOf(phoneState()) }
         // Battery and network change while the person reads; keep it current.
@@ -471,6 +597,28 @@ class MainActivity : ComponentActivity() {
         Tile(stick.label, stick.sizeBytes?.let { gb(it) } ?: "", selected = true, usb = true, modifier = Modifier.fillMaxWidth())
         Gap(16)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (distro.id == ForgeService.VENTOY_ID) {
+                Txt("Secure Boot support", Forge.brand)
+                Gap(8)
+                Row(horizontalArrangement = RowGap) {
+                    Tile("On", "Recommended. Enroll a key once", selected = secureBoot, subtitleLines = 2, modifier = Modifier.weight(1f)) {
+                        onSecureBoot(true)
+                    }
+                    Tile("Off", "Needs Secure Boot off in BIOS", selected = !secureBoot, subtitleLines = 2, modifier = Modifier.weight(1f)) {
+                        onSecureBoot(false)
+                    }
+                }
+                Gap(8)
+                Txt(
+                    if (secureBoot) {
+                        "Starts whether Secure Boot is on or off. On a handheld with Secure Boot on, the first start asks you to enroll Ventoy's key once."
+                    } else {
+                        "No key step, but the drive only starts once Secure Boot is turned off in the BIOS. The Steam Deck doesn't use Secure Boot, so either works there."
+                    },
+                    Forge.hint,
+                )
+                Gap(14)
+            }
             distro.warning?.let {
                 Banner(it)
                 Gap(14)
@@ -579,10 +727,17 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun ColumnScope.Result(j: JobState.Finished, distro: Distro?, onAgain: () -> Unit) {
+    private fun ColumnScope.Result(j: JobState.Finished, distro: Distro?, onAgain: () -> Unit, onImport: () -> Unit) {
         var showLog by remember { mutableStateOf(false) }
         val log by Jobs.log.collectAsState()
-        val steps = if (j.outcome == Outcome.OK) distro?.installSteps.orEmpty() else emptyList()
+        val imported = ForgeService.FLAG_IMPORT in j.flags
+        val ventoy = distro?.id == ForgeService.VENTOY_ID
+        val ok = j.outcome == Outcome.OK
+        val steps = when {
+            !ok || imported -> emptyList()
+            ventoy -> ventoySteps(ForgeService.FLAG_SB_OFF !in j.flags)
+            else -> distro?.installSteps.orEmpty()
+        }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             if (steps.isEmpty()) Gap(60)
             StatusMark(
@@ -595,48 +750,224 @@ class MainActivity : ComponentActivity() {
             Gap(16)
             Txt(
                 when (j.outcome) {
-                    Outcome.OK -> when (distro?.id) {
-                        ForgeService.FORMAT_ID -> "Drive formatted"
-                        ForgeService.VENTOY_ID -> "Ventoy is installed"
+                    Outcome.OK -> when {
+                        imported -> "Added to Ventoy"
+                        distro?.id == ForgeService.FORMAT_ID -> "Drive formatted"
+                        ventoy -> "Ventoy is installed"
                         else -> "Ready to boot"
                     }
                     Outcome.CANCELLED -> "Stopped"
-                    Outcome.ERROR -> "The drive wasn't finished"
+                    Outcome.ERROR -> if (imported) "The images weren't all added" else "The drive wasn't finished"
                 },
                 Forge.title,
             )
             Gap(8)
             Txt(
-                if (j.outcome == Outcome.OK && distro?.id == ForgeService.FORMAT_ID) {
-                    "${j.drive} is now one empty exFAT drive named USB DRIVE. Unplug it and plug it back in to use it for files."
-                } else if (j.outcome == Outcome.OK && distro?.id == ForgeService.VENTOY_ID) {
-                    "${j.drive} now has Ventoy ${j.message}."
-                } else if (j.outcome == Outcome.OK) {
-                    "${j.drive} now holds ${j.distro}. " + if (steps.isEmpty()) {
+                when {
+                    ok && imported -> "These are on ${j.drive} and will show in Ventoy's menu:"
+                    ok && distro?.id == ForgeService.FORMAT_ID ->
+                        "${j.drive} is now one empty exFAT drive named USB DRIVE. Unplug it and plug it back in to use it for files."
+                    ok && ventoy -> "${j.drive} now has Ventoy ${j.message}, " +
+                        (if (ForgeService.FLAG_SB_OFF in j.flags) "without" else "with") + " Secure Boot support."
+                    ok -> "${j.drive} now holds ${j.distro}. " + if (steps.isEmpty()) {
                         "Plug it into your handheld, open the boot menu and choose the USB drive."
                     } else {
                         "Plug it into your handheld and follow these steps."
                     }
-                } else {
-                    j.message
+                    else -> j.message
                 },
                 Forge.hint,
             )
-            if (steps.isNotEmpty()) InstallGuide(steps, ventoy = distro?.id == ForgeService.VENTOY_ID)
+            if (ok && imported) {
+                Gap(12)
+                j.message.lines().filter { it.isNotBlank() }.forEach {
+                    Gap(6)
+                    Txt(it, TextStyle(color = Forge.Bone, fontSize = 15.sp, lineHeight = 20.sp))
+                }
+                Gap(18)
+                Txt("Plug the drive into your handheld, start it from USB and pick one from Ventoy's menu.", Forge.hint)
+            }
+            if (steps.isNotEmpty()) InstallGuide(steps, ventoy = ventoy)
         }
         Gap(12)
         if (showLog) LogBox(log)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             QuietButton("Details") { showLog = !showLog }
-            MoltenButton(
-                when (j.outcome) {
-                    Outcome.OK -> "Make another"
-                    Outcome.CANCELLED -> "Start over"
-                    Outcome.ERROR -> "Try again"
-                },
-                modifier = Modifier.weight(1f),
-                onClick = onAgain,
-            )
+            if (ok && (ventoy || imported)) {
+                QuietButton("Done", onClick = onAgain)
+                MoltenButton(if (imported) "Add more" else "Add images", modifier = Modifier.weight(1f), onClick = onImport)
+            } else if (imported) {
+                MoltenButton("Back to the drive", modifier = Modifier.weight(1f), onClick = onImport)
+            } else {
+                MoltenButton(
+                    when (j.outcome) {
+                        Outcome.OK -> "Make another"
+                        Outcome.CANCELLED -> "Start over"
+                        Outcome.ERROR -> "Try again"
+                    },
+                    modifier = Modifier.weight(1f),
+                    onClick = onAgain,
+                )
+            }
+        }
+    }
+
+    /** What's on a Ventoy drive, and the images picked to add to it. */
+    @Composable
+    private fun ColumnScope.VentoyFiles(
+        stick: Stick,
+        picked: List<Picked>,
+        hint: String,
+        demo: String?,
+        onPick: () -> Unit,
+        onUnpick: (Picked) -> Unit,
+        onBack: () -> Unit,
+        onCopy: () -> Unit,
+    ) {
+        var info by remember { mutableStateOf<VentoyInfo?>(null) }
+        var error by remember { mutableStateOf("") }
+        var removeError by remember { mutableStateOf("") }
+        var reload by remember { mutableStateOf(0) }
+        var confirmRemove by remember { mutableStateOf<String?>(null) }
+        var busy by remember { mutableStateOf(false) }
+        val scope = rememberCoroutineScope()
+
+        fun <T> withVolume(op: (io.github.ravenor907.handheldforge.core.VentoyDrive, io.github.ravenor907.handheldforge.core.ExFatVolume, io.github.ravenor907.handheldforge.core.BlockDevice) -> T): T {
+            val d = sticks.device(stick.key) ?: throw java.io.IOException("The drive was unplugged.")
+            return sticks.open(d).use { s ->
+                val vd = io.github.ravenor907.handheldforge.core.VentoyDrive.detect(s.disk)
+                    ?: throw java.io.IOException("This drive doesn't have Ventoy on it.")
+                op(vd, vd.openData(s.disk), s.disk)
+            }
+        }
+
+        LaunchedEffect(stick.key, reload) {
+            if (demo != null) {
+                info = VentoyInfo("1.1.18", true, 21_400_000_000, 21_400_000_000, listOf("bazzite-deck-stable.iso" to 8_300_000_000))
+                return@LaunchedEffect
+            }
+            busy = true
+            try {
+                info = withContext(Dispatchers.IO) {
+                    withVolume { vd, vol, disk ->
+                        val efi = vd.readEfi(disk)
+                        VentoyInfo(
+                            io.github.ravenor907.handheldforge.core.Ventoy.versionOf(efi),
+                            io.github.ravenor907.handheldforge.core.Ventoy.secureBootEnabled(efi),
+                            vol.freeBytes, vol.largestFreeRun(),
+                            vol.files().sortedBy { it.name.lowercase() }.map { it.name to it.size },
+                        )
+                    }
+                }
+                error = ""
+            } catch (e: Exception) {
+                info = null
+                error = e.message ?: "Couldn't read the drive"
+            }
+            busy = false
+        }
+
+        Txt("Add images to Ventoy", Forge.title)
+        Gap(8)
+        Txt(
+            info?.let {
+                "${stick.label}: Ventoy ${it.version ?: ""}".trimEnd() + ", Secure Boot support " + (if (it.secureBoot) "on" else "off") +
+                    ". ${gb(it.free)} free."
+            } ?: if (error.isNotEmpty()) error else "Reading the drive...",
+            if (error.isNotEmpty() && info == null) Forge.hint.copy(color = Forge.Danger) else Forge.hint,
+        )
+        if (removeError.isNotEmpty()) {
+            Gap(6)
+            Txt(removeError, Forge.hint.copy(color = Forge.Danger))
+        }
+        Gap(14)
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            Txt("To add", Forge.brand)
+            if (picked.isEmpty()) {
+                Gap(8)
+                EmptySlot("Pick ISOs or disk images on this phone. Compressed ones are unpacked on the way in.")
+            }
+            picked.forEach { p ->
+                Gap(8)
+                val notes = buildList {
+                    add(p.kind.label)
+                    if (p.size > 0) add(gb(p.size))
+                    if (p.kind.compressed) add("unpacked onto the drive")
+                    if (!p.kind.writable) add("can't be unpacked here")
+                }
+                FileRow(p.name, notes.joinToString(", "), warn = p.kind.warning ?: if (!p.kind.writable) "Unpack it first, then pick the unpacked file." else null, action = "Remove") {
+                    onUnpick(p)
+                }
+            }
+            Gap(18)
+            Txt("On the drive", Forge.brand)
+            val files = info?.files.orEmpty()
+            if (info != null && files.isEmpty()) {
+                Gap(8)
+                Txt("Nothing yet.", Forge.hint)
+            }
+            files.forEach { (name, size) ->
+                Gap(8)
+                val asking = confirmRemove == name
+                FileRow(name, gb(size), warn = if (asking) "Tap Remove again to delete it from the drive." else null, action = if (asking) "Remove?" else "Remove") {
+                    if (!asking) {
+                        confirmRemove = name
+                    } else {
+                        confirmRemove = null
+                        removeError = ""
+                        busy = true
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) { withVolume { _, vol, _ -> vol.find(name)?.let { vol.delete(it) } } }
+                            } catch (e: Exception) {
+                                removeError = "Couldn't remove $name: ${e.message}"
+                            }
+                            reload++
+                        }
+                    }
+                }
+            }
+        }
+        val known = picked.filter { !it.kind.compressed }.sumOf { it.size }
+        val space = info?.let { if (known > it.free) "That's more than the ${gb(it.free)} free on the drive." else null }
+        (space ?: hint.takeIf { it.isNotEmpty() })?.let {
+            Gap(10)
+            Txt(it, Forge.hint.copy(color = Forge.Danger))
+        }
+        Gap(14)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            QuietButton("Back", onClick = onBack)
+            if (picked.isEmpty()) {
+                MoltenButton("Pick images", enabled = info != null && !busy, modifier = Modifier.weight(1f), onClick = onPick)
+            } else {
+                QuietButton("Pick more", enabled = !busy, onClick = onPick)
+                MoltenButton(
+                    if (picked.size == 1) "Copy to drive" else "Copy ${picked.size} to drive",
+                    enabled = info != null && !busy && space == null && picked.all { it.kind.writable },
+                    modifier = Modifier.weight(1f),
+                    onClick = onCopy,
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun FileRow(name: String, detail: String, warn: String?, action: String, onAction: () -> Unit) {
+        Row(
+            Modifier.fillMaxWidth().background(Forge.Iron, RoundedCornerShape(14.dp)).padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Txt(name, TextStyle(color = Forge.Bone, fontSize = 16.sp, fontWeight = FontWeight.SemiBold), maxLines = 2)
+                Gap(2)
+                Txt(detail, Forge.hint.copy(fontSize = 13.sp))
+                warn?.let {
+                    Gap(4)
+                    Txt(it, Forge.hint.copy(fontSize = 13.sp, color = Forge.MoltenA))
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            QuietButton(action, onClick = onAction)
         }
     }
 

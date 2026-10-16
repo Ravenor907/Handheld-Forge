@@ -27,6 +27,8 @@ data class Stick(
     val label: String,
     val hasPermission: Boolean,
     val sizeBytes: Long?,
+    /** The drive already has Ventoy on it (images can be added without erasing). */
+    val ventoy: Boolean = false,
 )
 
 /** Android's USB host API wired to the protocol code in core/. */
@@ -148,6 +150,7 @@ class OpenStick(val disk: ScsiDisk, private val transport: AndroidUsbTransport) 
 class UsbSticks(private val context: Context) {
     private val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private val sizes = HashMap<String, Long>()
+    private val ventoys = HashMap<String, Boolean>()
 
     fun devices(): List<UsbDevice> = manager.deviceList.values.filter { massStorage(it) != null }
 
@@ -165,14 +168,23 @@ class UsbSticks(private val context: Context) {
         val ok = hasPermission(d)
         var size = sizes[d.deviceName]
         if (ok && size == null && probe) {
-            size = try {
-                open(d).use { it.disk.sizeBytes }
+            try {
+                open(d).use {
+                    size = it.disk.sizeBytes
+                    ventoys[d.deviceName] = io.github.ravenor907.handheldforge.core.VentoyDrive.detect(it.disk) != null
+                }
             } catch (e: Exception) {
-                null
+                size = null
             }
-            if (size != null) sizes[d.deviceName] = size
+            size?.let { sizes[d.deviceName] = it }
         }
-        Stick(d.deviceName, label(d), ok, size)
+        Stick(d.deviceName, label(d), ok, size, ventoys[d.deviceName] == true)
+    }
+
+    /** Forget what was learned about the drives (after a job changed one), so the next list re-reads them. */
+    fun forget() {
+        sizes.clear()
+        ventoys.clear()
     }
 
     fun requestPermission(d: UsbDevice) {
