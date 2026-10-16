@@ -63,7 +63,8 @@ enum class ImageKind(val label: String, val compressed: Boolean = false) {
 
         /** Unpacks [kind] while it's read; uncompressed kinds pass straight through. */
         fun decoder(kind: ImageKind): (InputStream) -> InputStream = when (kind) {
-            BZIP2 -> { s -> org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream(s, true) }
+            // On every core at once: bzip2 is slow, and SteamOS's image is bzip2.
+            BZIP2 -> { s -> ParallelBzip2InputStream(s) }
             GZIP -> { s -> GZIPInputStream(s, 1 shl 16) }
             XZ -> { s -> org.tukaani.xz.XZInputStream(s) }
             ZIP -> { s -> firstImageInZip(s) }

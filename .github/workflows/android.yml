@@ -127,7 +127,7 @@ jobs:
           echo "VTTAR=$PWD/$tar" >> "$GITHUB_ENV"
           echo "VTDIR=$PWD/$(ls -d ventoy-*/ | head -1)" >> "$GITHUB_ENV"
           echo "Ventoy: $tar"
-      - name: Test ISOs for the importer (one plain, one .xz, one .zip)
+      - name: Test ISOs for the importer (one plain, one .xz, one .bz2, one .zip)
         run: |
           mkdir -p iso/boot/grub imports
           # Prints to the screen and to the serial port, so CI can tell it booted whatever the video mode.
@@ -136,8 +136,19 @@ jobs:
           grub-mkrescue -o forge-test.iso iso
           cp forge-test.iso imports/forge-test.iso
           xz -T0 -c forge-test.iso > imports/forge-packed.iso.xz
+          bzip2 -9 -c forge-test.iso > imports/forge-bz.iso.bz2
           cp forge-test.iso forge-zip.iso && zip -j imports/forge-zip.zip forge-zip.iso && rm forge-zip.iso
           ls -l imports
+      - name: Valve's real SteamOS image unpacks the same with the app's parallel bzip2 decoder
+        working-directory: android
+        run: |
+          curl -fsSL --retry 3 -o /tmp/steamos.img.bz2 https://steamdeck-images.steamos.cloud/recovery/steamdeck-repair-latest.img.bz2
+          ls -l /tmp/steamos.img.bz2
+          want=$(bzip2 -dc /tmp/steamos.img.bz2 | sha256sum | cut -d' ' -f1)
+          echo "bzip2 -dc: $want"
+          HF_BZ2_FILE=/tmp/steamos.img.bz2 HF_BZ2_SHA256="$want" ./gradlew --no-daemon :app:testDebugUnitTest --tests '*ParallelBzip2Test.realFileMatchesBzip2' --rerun-tasks 2>&1 | tail -5
+          test -s /tmp/bz2-result.txt && echo "::notice title=SteamOS image, parallel bzip2::$(cat /tmp/bz2-result.txt)" && grep -q "^match" /tmp/bz2-result.txt
+          rm -f /tmp/steamos.img.bz2
       - name: Make the app's drives (Format, Ventoy, Ventoy without Secure Boot, Ventoy with imported images, boot next)
         working-directory: android
         env:

@@ -75,7 +75,8 @@ object ImageWriter {
         }
         var done = 0L
         val raw = CountingStream(open().buffered(CHUNK))
-        decoding { decode(raw) }.use { input ->
+        // Unpacking runs ahead on other threads while the USB writes go on (bzip2 has its own).
+        decoding { ahead(decode(raw), raw) }.use { input ->
             while (true) {
                 if (cancel()) throw CancelledException()
                 var got = 0
@@ -125,6 +126,9 @@ object ImageWriter {
         log("Every byte on the drive matches the image")
     }
 
+    fun ahead(decoded: java.io.InputStream, raw: java.io.InputStream): java.io.InputStream =
+        if (decoded === raw || decoded is ParallelBzip2InputStream) decoded else PrefetchInputStream(decoded)
+
     /** Decoders report bad input as IOException or, for some malformed data, a RuntimeException. */
     private inline fun <T> decoding(block: () -> T): T = try {
         block()
@@ -137,7 +141,7 @@ object ImageWriter {
     private fun roundUp(n: Int, to: Int) = (n + to - 1) / to * to
 
     private class CountingStream(inner: java.io.InputStream) : java.io.FilterInputStream(inner) {
-        var count = 0L
+        @Volatile var count = 0L
         override fun read(): Int = super.read().also { if (it >= 0) count++ }
         override fun read(b: ByteArray, off: Int, len: Int): Int = super.read(b, off, len).also { if (it > 0) count += it }
     }

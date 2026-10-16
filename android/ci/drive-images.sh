@@ -7,7 +7,7 @@
 #   3. Secure Boot off: the EFI partition matches Ventoy2Disk.sh -I -S file for file (and an mtools
 #      edit of the release's image), is a clean FAT, and Secure Boot firmware behaves as expected.
 #   4. Importer: images the app added (plain, .xz, .zip) are intact, Ventoy's menu lists them, and
-#      the one unpacked from .xz boots from that menu.
+#      the one unpacked from .bz2 (first in the menu) boots from it.
 #   5. Boot next: with an image set to start on its own, Ventoy boots it with no key presses.
 # Expects: IMG (plain.img, ventoy.img, ventoy-nosb.img, ventoy-import.img, ventoy-bootnext.img), VTDIR (extracted
 # ventoy-x.y.z), SECTORS, and forge-test.iso plus imports/ from the workflow.
@@ -213,14 +213,14 @@ fsck_ok "${I}p1" "Importer"
 sudo mkdir -p /mnt/imp && mnt "${I}p1" /mnt/imp
 names=$(sudo ls /mnt/imp | tr '\n' ' ')
 echo "On the drive: $names"
-[ "$names" = "forge-packed.iso forge-test.iso forge-zip.iso " ] || err "Importer" "expected forge-packed.iso forge-test.iso forge-zip.iso, found: $names"
+[ "$names" = "forge-bz.iso forge-packed.iso forge-test.iso forge-zip.iso " ] || err "Importer" "expected forge-bz.iso forge-packed.iso forge-test.iso forge-zip.iso, found: $names"
 want=$(sha256sum forge-test.iso | cut -d' ' -f1)
-for f in forge-packed.iso forge-test.iso forge-zip.iso; do
+for f in forge-bz.iso forge-packed.iso forge-test.iso forge-zip.iso; do
   [ "$(sudo sha256sum "/mnt/imp/$f" | cut -d' ' -f1)" = "$want" ] || err "Importer" "$f doesn't match the original ISO"
 done
 sudo umount /mnt/imp
 sudo losetup -d "$I"
-echo "Importer: clean exFAT, the three images are byte-identical to the original ISO"
+echo "Importer: clean exFAT, the four images are byte-identical to the original ISO"
 
 # UEFI with Secure Boot enforced: Microsoft keys enrolled, SMM on.
 sbcode=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
@@ -249,7 +249,7 @@ print("Secure Boot off drive, plain UEFI: lit pixels", lit)
 if lit < 2000: print("::error title=Secure Boot off boot::blank screen"); sys.exit(1)
 PY
 
-echo "== Importer: Ventoy's menu, then boot the image that was unpacked from .xz"
+echo "== Importer: Ventoy's menu, then boot the image that was unpacked from .bz2"
 [ -f /tmp/vars.fd ] && cp "$vars" /tmp/vars.fd
 rm -f /tmp/qmon
 rm -f /tmp/serial-ventoy-import.log
@@ -260,7 +260,7 @@ sleep 75
 shot import-menu
 menu=$(ocr "$shots/import-menu.png")
 echo "::notice title=Importer menu (OCR)::$(echo "$menu" | cut -c1-400)"
-for n in packed test zip; do
+for n in bz packed test zip; do
   echo "$menu" | grep -q "forge.$n" || err "Importer menu" "forge-$n.iso isn't in Ventoy's menu (OCR: $menu)"
 done
 key ret; sleep 10; shot import-after-enter; key ret; sleep 45
@@ -271,7 +271,7 @@ kill $qpid || true; wait $qpid 2>/dev/null || true
 serial=$(tr -cd '[:print:]\n' < /tmp/serial-ventoy-import.log | tail -c 600)
 echo "::notice title=Importer serial console::$(echo "$serial" | tail -c 300 | tr '\n' ' ')"
 { echo "$booted" | grep -q "booted forge" || grep -q "Booted Forge test ISO" /tmp/serial-ventoy-import.log; } || err "Importer boot" "the imported ISO didn't boot from Ventoy's menu (OCR: $booted)"
-echo "Importer: Ventoy lists all three images and boots the one unpacked from .xz"
+echo "Importer: Ventoy lists all four images and boots the one unpacked from .bz2"
 
 echo "== Boot next: Ventoy starts the chosen image on its own"
 B=$(part_loop "$IMG/ventoy-bootnext.img")

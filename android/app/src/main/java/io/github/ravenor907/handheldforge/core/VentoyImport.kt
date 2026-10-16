@@ -109,7 +109,7 @@ object VentoyImport {
             try {
                 if (p.unpacks) {
                     log("Unpacking ${p.source.name} onto the drive as ${p.targetName}")
-                    PrefetchInputStream(ImageKind.decoder(p.kind)(raw.buffered(1 shl 16))).use { input ->
+                    ImageWriter.ahead(ImageKind.decoder(p.kind)(raw.buffered(1 shl 16)), raw).use { input ->
                         var lastLog = 0L
                         results[p.targetName] = vol.addStreaming(p.targetName, input, { written ->
                             stage(Stage.WRITE, before + minOf(raw.count, p.source.size), totalIn)
