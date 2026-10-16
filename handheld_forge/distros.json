@@ -3,6 +3,7 @@
   "boot_menu": [
     "ROG Ally, Ally X, ROG Xbox Ally and Xbox Ally X: with the handheld off and the drive plugged in, hold Volume Down and press Power. Choose the USB drive.",
     "Steam Deck: with it off and the drive plugged in, hold Volume Down and press Power, let go at the chime, then choose the USB drive.",
+    "Legion Go, Legion Go 2 and Legion Go S: with the handheld off and the drive plugged in, hold Volume Up and press Power, then choose Boot Menu and the USB drive.",
     "If the drive doesn't start, turn off Secure Boot in the BIOS. Bazzite starts either way."
   ],
   "distros": [

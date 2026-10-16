@@ -108,7 +108,8 @@ private fun ventoySteps(secureBoot: Boolean) = listOf(
     } else {
         "This drive was made without Secure Boot support, so turn Secure Boot off in the BIOS first."
     },
-    "Ventoy shows a menu of the images on the drive. Pick one to start it.",
+    "Ventoy shows a menu of the images on the drive. Pick one to start it. If the controls don't work in that menu, " +
+        "tap an image under Add images and Ventoy will start it on its own.",
 )
 
 /** A file picked to add to a Ventoy drive. */
@@ -520,7 +521,7 @@ class MainActivity : ComponentActivity() {
         ) { if (fileChosen || pickedName == null) onPickFile() else onDistro(ForgeService.CUSTOM_ID) }
         Gap(10)
         Row(horizontalArrangement = RowGap) {
-            Tile(VENTOY.name, "Multi-boot: copy ISOs on after", selected = distroId == VENTOY.id, subtitleLines = 2, modifier = Modifier.weight(1f)) {
+            Tile(VENTOY.name, "Multi-boot: many images, one drive", selected = distroId == VENTOY.id, subtitleLines = 2, modifier = Modifier.weight(1f)) {
                 onDistro(VENTOY.id)
             }
             Tile(FORMAT.name, "Empty exFAT drive for files", selected = distroId == FORMAT.id, subtitleLines = 2, modifier = Modifier.weight(1f)) {
@@ -597,7 +598,7 @@ class MainActivity : ComponentActivity() {
         Txt(
             when (distro.id) {
                 ForgeService.FORMAT_ID -> "Everything on it will be erased, leaving one empty exFAT drive named USB DRIVE that works on Windows, Mac, Linux and Android."
-                ForgeService.VENTOY_ID -> "Everything on it will be replaced with the latest Ventoy. Afterwards you copy ISO files onto it and choose one when you start from it."
+                ForgeService.VENTOY_ID -> "Everything on it will be replaced with the latest Ventoy. Afterwards add images with this app (or from a computer) and choose one when you start from it."
                 else -> "Everything on it will be replaced with ${distro.name}."
             },
             Forge.hint,
