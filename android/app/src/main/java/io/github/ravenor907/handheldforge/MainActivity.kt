@@ -988,7 +988,14 @@ class MainActivity : ComponentActivity() {
             }
         }
         val known = picked.filter { !it.kind.compressed }.sumOf { it.size }
-        val space = info?.let { if (known > it.free) "That's more than the ${gb(it.free)} free on the drive." else null }
+        val space = info?.let { i ->
+            val tooBig = picked.firstOrNull { !it.kind.compressed && it.size > i.largest }
+            when {
+                known > i.free -> "That's more than the ${gb(i.free)} free on the drive."
+                tooBig != null -> "${tooBig.name} needs ${gb(tooBig.size)} in one piece; the biggest free piece on the drive is ${gb(i.largest)}."
+                else -> null
+            }
+        }
         (space ?: hint.takeIf { it.isNotEmpty() })?.let {
             Gap(10)
             Txt(it, Forge.hint.copy(color = Forge.Danger))

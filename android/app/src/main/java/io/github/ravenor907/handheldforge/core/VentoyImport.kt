@@ -104,6 +104,13 @@ object VentoyImport {
                 "Not enough space: %.1f GB to add, %.1f GB free on the drive.".format(total / 1e9, freeAfterDeletes * vol.clusterBytes / 1e9),
             )
         }
+        vol.firstMisfit(plans.map { it.targetSize }, replacing)?.let { size ->
+            val p = plans.first { it.targetSize == size }
+            throw IOException(
+                "There's enough free space in total, but not in one piece for ${p.targetName} (%.1f GB). ".format(size / 1e9) +
+                    "Ventoy needs each image in one piece. Remove an image from the drive, or copy everything off, reinstall Ventoy and add them again.",
+            )
+        }
         for (old in replacing) {
             log("Replacing ${old.name} already on the drive")
             vol.delete(old)

@@ -416,3 +416,32 @@ class VentoyConfigTest {
         }
     }
 }
+
+class FragmentationTest {
+    @Test
+    fun refusesUpFrontWhenFreeSpaceIsInPieces() {
+        val d = FileDisk(Files.createTempFile("frag", ".img").toFile().apply { deleteOnExit() }, 64L * 2048)
+        ExFat.format(d, 2048, d.blockCount - 2048, "Ventoy", 64) // 32 KB clusters
+        val v = ExFatVolume.open(d, 2048)
+        val chunk = 4L * 1024 * 1024
+        // Fill with 4 MB files, then delete every other one: lots of free space, all in 4 MB pieces.
+        var i = 0
+        while (v.largestFreeRun() >= chunk) {
+            v.add("f$i.iso", chunk, ByteArrayInputStream(ByteArray(chunk.toInt())), { _, _ -> }, { false }); i++
+        }
+        v.files().filter { it.name.removePrefix("f").removeSuffix(".iso").toInt() % 2 == 0 }.forEach { v.delete(it) }
+        assertTrue(v.freeBytes > 3 * chunk)
+        assertEquals(null, v.firstMisfit(listOf(chunk, chunk)))
+        assertEquals(chunk * 2, v.firstMisfit(listOf(chunk, chunk * 2)))
+        val big = ByteArray((chunk * 2).toInt())
+        val plan = VentoyImport.Plan(VentoyImport.Source("big.iso", big.size.toLong()) { ByteArrayInputStream(big) }, ImageKind.DISK, ImageKind.DISK, "big.img", big.size.toLong())
+        val before = v.files().map { it.name }
+        try {
+            VentoyImport.run(v, listOf(plan), { _, _, _ -> }, {}, { false })
+            fail("should refuse")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!, e.message!!.contains("not in one piece"))
+        }
+        assertEquals(before, v.files().map { it.name }) // nothing written
+    }
+}

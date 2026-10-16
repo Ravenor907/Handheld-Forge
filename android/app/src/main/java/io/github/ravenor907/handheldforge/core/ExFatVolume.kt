@@ -307,6 +307,31 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         return null
     }
 
+    /**
+     * Whether files of these sizes, added in this order, each get one unbroken run (as [add]
+     * places them: first fit), after [removing] files are deleted. Returns the first size that
+     * wouldn't fit, or null if all fit. Changes nothing on the drive.
+     */
+    fun firstMisfit(sizes: List<Long>, removing: List<FileInfo> = emptyList()): Long? {
+        val saved = bitmap.copyOf()
+        try {
+            for (f in removing) {
+                if (f.firstCluster < FIRST) continue
+                if (f.contiguous) setBits(f.firstCluster, maxOf(1L, (f.size + clusterBytes - 1) / clusterBytes), false)
+                else chain(f.firstCluster, false, f.size).forEach { setBits(it, 1, false) }
+            }
+            for (size in sizes) {
+                if (size == 0L) continue
+                val n = (size + clusterBytes - 1) / clusterBytes
+                val at = findRun(n) ?: return size
+                setBits(at, n, true)
+            }
+            return null
+        } finally {
+            saved.copyInto(bitmap)
+        }
+    }
+
     /** Longest run of free space in bytes: the biggest file that can be added. */
     fun largestFreeRun(): Long {
         var best = 0L
