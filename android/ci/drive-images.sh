@@ -67,29 +67,30 @@ if bad:
     print("::error title=Ventoy differs from Ventoy2Disk.sh::" + "; ".join(bad)); sys.exit(1)
 print("Boot code, partition table and core.img identical to Ventoy2Disk.sh; EFI partition raw bytes", "identical" if same_raw else "differ (checking files)")
 PY
-# The EFI partition is a FAT16 filesystem: its files must be identical, and ours must be clean.
+# The EFI partition must be exactly ventoy.disk.img from the release (what Ventoy2Disk.sh means to write).
 P2=$(cat /tmp/p2)
-sudo mkdir -p /mnt/efi-ours /mnt/efi-ref
-sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) "$IMG/ventoy.img" /mnt/efi-ours
-sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) ref.img /mnt/efi-ref
-sudo diff -r /mnt/efi-ours /mnt/efi-ref || err "Ventoy EFI partition" "files differ from Ventoy2Disk.sh's"
-echo "EFI partition: $(sudo find /mnt/efi-ours -type f | wc -l) files, identical to Ventoy2Disk.sh's"
-sudo umount /mnt/efi-ours /mnt/efi-ref
-if [ "$(cat /tmp/p2same)" = 0 ]; then
-  python3 - "$IMG/ventoy.img" ref.img "$P2" "$VTDIR/ventoy/ventoy.disk.img.xz" <<'PY'
+python3 - "$IMG/ventoy.img" ref.img "$P2" "$VTDIR/ventoy/ventoy.disk.img.xz" <<'PY'
 import lzma, sys
 p2 = int(sys.argv[3])
 src = lzma.open(sys.argv[4]).read()
 def part(path):
     f = open(path, "rb"); f.seek(p2 * 512); return f.read(65536 * 512)
 o, r = part(sys.argv[1]), part(sys.argv[2])
-print("ours == ventoy.disk.img:", o == src, "| Ventoy2Disk.sh == ventoy.disk.img:", r == src)
+print("source", len(src), "bytes | ours == source:", o == src, "| Ventoy2Disk.sh == source:", r == src)
 if o != src:
-    print("::error title=Ventoy EFI::the app's EFI partition isn't an exact copy of ventoy.disk.img"); sys.exit(1)
-first = next(i for i in range(len(r)) if r[i] != src[i])
-print("::notice title=Ventoy compare::Ventoy2Disk.sh left the EFI partition short from byte %d (its dd read a pipe without iflag=fullblock); the app wrote the full ventoy.disk.img" % first)
+    first = next(i for i in range(len(o)) if o[i] != src[i])
+    print("::error title=Ventoy EFI::the app's EFI partition differs from ventoy.disk.img at byte %d" % first); sys.exit(1)
+if r != src:
+    first = next(i for i in range(len(r)) if r[i] != src[i])
+    zeros = all(x == 0 for x in r[first:])
+    print("::notice title=Ventoy compare::Ventoy2Disk.sh's EFI partition departs from ventoy.disk.img at byte %d of %d%s; the app's is an exact copy"
+          % (first, len(src), " (all zeros from there: a short write)" if zeros else ""))
 PY
-fi
+# And it's a clean FAT filesystem the firmware can read.
+sudo mkdir -p /mnt/efi-ours
+sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) "$IMG/ventoy.img" /mnt/efi-ours
+echo "EFI partition files: $(sudo find /mnt/efi-ours -type f | wc -l)"; sudo ls /mnt/efi-ours/EFI/BOOT
+sudo umount /mnt/efi-ours
 
 V=$(part_loop "$IMG/ventoy.img")
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$V"
