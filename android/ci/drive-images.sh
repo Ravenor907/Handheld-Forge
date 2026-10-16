@@ -199,9 +199,11 @@ fi
 sudo umount /mnt/sb-ours /mnt/sb-ref /mnt/sb-mtools
 # The Secure Boot-on drive kept shim and MokManager.
 sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) "$IMG/ventoy.img" /mnt/sb-ours
-for f in EFI/BOOT/grubx64_real.efi EFI/BOOT/MokManager.efi ENROLL_THIS_KEY_IN_MOKMANAGER.cer; do
+for f in EFI/BOOT/grubx64_real.efi ENROLL_THIS_KEY_IN_MOKMANAGER.cer; do
   sudo test -e "/mnt/sb-ours/$f" || err "Secure Boot on" "$f is missing"
 done
+sudo test -e /mnt/sb-ours/EFI/BOOT/mmx64.efi || sudo test -e /mnt/sb-ours/EFI/BOOT/MokManager.efi || err "Secure Boot on" "MokManager is missing"
+echo "::notice title=Secure Boot on, /EFI/BOOT::$(sudo ls /mnt/sb-ours/EFI/BOOT | tr '\n' ' ')"
 sudo umount /mnt/sb-ours
 echo "Secure Boot off: EFI files identical to Ventoy2Disk.sh -I -S and to the mtools edit; fsck.fat clean"
 
