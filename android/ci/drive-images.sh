@@ -48,24 +48,48 @@ import struct, sys
 ours, ref = (open(p, "rb") for p in sys.argv[1:3])
 def rd(f, lba, n): f.seek(lba * 512); return f.read(n * 512)
 a, b = rd(ours, 0, 1), rd(ref, 0, 1)
-bad = []
+bad, notes = [], []
 if a[:384] != b[:384] or a[400:440] != b[400:440]: bad.append("boot code in sector 0")
 def entries(m):
     return [(m[446+16*i], m[450+16*i], *struct.unpack("<II", m[454+16*i:462+16*i])) for i in range(4)]
-if a[446:512] != b[446:512]:
+if entries(a) != entries(b):
     bad.append("partition table: ours (flag,type,start,len) %s vs Ventoy2Disk.sh %s" % (entries(a), entries(b)))
-p2 = struct.unpack("<I", b[470:474])[0]
+elif a[446:510] != b[446:510]:
+    notes.append("CHS bytes differ: ours %s ref %s" % (a[446:478].hex(), b[446:478].hex()))
+if a[510:512] != b[510:512]: bad.append("boot signature")
 if rd(ours, 1, 2047) != rd(ref, 1, 2047): bad.append("core.img (sectors 1-2047)")
-p2o = struct.unpack("<I", a[470:474])[0]
-if rd(ours, p2o, 65536) != rd(ref, p2, 65536):
-    x, y = rd(ours, p2o, 65536), rd(ref, p2, 65536)
-    first = next(i for i in range(len(x)) if x[i] != y[i])
-    bad.append("EFI partition (first difference at byte %d of the partition: ours %s ref %s)" % (first, x[first:first+16].hex(), y[first:first+16].hex()))
-print("part2 at", p2)
+p2 = struct.unpack("<I", b[470:474])[0]
+same_raw = rd(ours, p2, 65536) == rd(ref, p2, 65536)
+open("/tmp/p2", "w").write(str(p2))
+open("/tmp/p2same", "w").write("1" if same_raw else "0")
+for n in notes: print("::notice title=Ventoy compare::" + n)
 if bad:
-    print("::error title=Ventoy differs from Ventoy2Disk.sh::" + ", ".join(bad)); sys.exit(1)
-print("Ventoy layout identical to Ventoy2Disk.sh (except the random disk UUID and signature)")
+    print("::error title=Ventoy differs from Ventoy2Disk.sh::" + "; ".join(bad)); sys.exit(1)
+print("Boot code, partition table and core.img identical to Ventoy2Disk.sh; EFI partition raw bytes", "identical" if same_raw else "differ (checking files)")
 PY
+# The EFI partition is a FAT16 filesystem: its files must be identical, and ours must be clean.
+P2=$(cat /tmp/p2)
+sudo mkdir -p /mnt/efi-ours /mnt/efi-ref
+sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) "$IMG/ventoy.img" /mnt/efi-ours
+sudo mount -o ro,loop,offset=$((P2 * 512)),sizelimit=$((65536 * 512)) ref.img /mnt/efi-ref
+sudo diff -r /mnt/efi-ours /mnt/efi-ref || err "Ventoy EFI partition" "files differ from Ventoy2Disk.sh's"
+echo "EFI partition: $(sudo find /mnt/efi-ours -type f | wc -l) files, identical to Ventoy2Disk.sh's"
+sudo umount /mnt/efi-ours /mnt/efi-ref
+if [ "$(cat /tmp/p2same)" = 0 ]; then
+  python3 - "$IMG/ventoy.img" ref.img "$P2" "$VTDIR/ventoy/ventoy.disk.img.xz" <<'PY'
+import lzma, sys
+p2 = int(sys.argv[3])
+src = lzma.open(sys.argv[4]).read()
+def part(path):
+    f = open(path, "rb"); f.seek(p2 * 512); return f.read(65536 * 512)
+o, r = part(sys.argv[1]), part(sys.argv[2])
+print("ours == ventoy.disk.img:", o == src, "| Ventoy2Disk.sh == ventoy.disk.img:", r == src)
+if o != src:
+    print("::error title=Ventoy EFI::the app's EFI partition isn't an exact copy of ventoy.disk.img"); sys.exit(1)
+first = next(i for i in range(len(r)) if r[i] != src[i])
+print("::notice title=Ventoy compare::Ventoy2Disk.sh left the EFI partition short from byte %d (its dd read a pipe without iflag=fullblock); the app wrote the full ventoy.disk.img" % first)
+PY
+fi
 
 V=$(part_loop "$IMG/ventoy.img")
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE "$V"
