@@ -116,10 +116,20 @@ boot() { # image, name, extra qemu args...
 sudo chmod a+r "$IMG/ventoy.img" ref.img
 boot "$IMG/ventoy.img" ventoy-app-bios
 boot ref.img ventoy-ref-bios
-OVMF=$(ls /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
-cp "$OVMF" /tmp/ovmf.fd
-boot "$IMG/ventoy.img" ventoy-app-uefi -bios /tmp/ovmf.fd
-boot ref.img ventoy-ref-uefi -bios /tmp/ovmf.fd
+# UEFI firmware: a single OVMF.fd if the distro ships one, else the split CODE/VARS pair.
+uefi=()
+if [ -f /usr/share/ovmf/OVMF.fd ]; then
+  cp /usr/share/ovmf/OVMF.fd /tmp/ovmf.fd; uefi=(-bios /tmp/ovmf.fd)
+else
+  code=$(find /usr/share/OVMF -name 'OVMF_CODE*.fd' ! -name '*secboot*' ! -name '*ms*' | sort | head -1)
+  vars=$(find /usr/share/OVMF -name 'OVMF_VARS*.fd' ! -name '*ms*' | sort | head -1)
+  cp "$vars" /tmp/vars.fd
+  uefi=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=/tmp/vars.fd")
+fi
+echo "UEFI firmware: ${uefi[*]}"
+boot "$IMG/ventoy.img" ventoy-app-uefi "${uefi[@]}"
+[ -f /tmp/vars.fd ] && cp "$vars" /tmp/vars.fd
+boot ref.img ventoy-ref-uefi "${uefi[@]}"
 
 # The app's drive and Ventoy's own should look the same at boot.
 python3 - "$shots" <<'PY'
