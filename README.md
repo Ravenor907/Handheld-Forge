@@ -108,6 +108,8 @@ There's also an Android app in [`android/`](android/). It makes the same boot dr
 - **CachyOS Handheld**: the built-in controls don't work in CachyOS's installer on ROG Ally handhelds (they do in Bazzite's and SteamOS's), so the app warns before erasing and walks you through it on the touchscreen, starting with setting the display scale to 150%. Both apps write the ISO byte for byte, which is how CachyOS expects it (the desktop app asks for your password for that). The checksum CachyOS publishes is checked; its GPG signature isn't yet.
 - **SteamOS**: both apps write Valve's Steam Deck recovery image, a bzip2-compressed disk image that's decompressed on the fly while writing. Valve publishes no checksum for it, so a damaged download is caught by bzip2's own block checksums instead, and the drive is still read back in full. A new image is downloaded when the server's file size or version tag changes.
 
+- **Your own file.** Tap **Your own file** to write any `.iso`, `.img` or `.raw` from the phone's storage, including `.img.bz2` and `.img.gz` (unpacked while writing). Handy when a new system comes out before it's listed here. It's written byte for byte and read back, but there's no publisher checksum to check it against.
+
 It reads the same `handheld_forge/distros.json` and Bazzite key as the desktop app, so adding an ISO-based system adds it to both.
 
 ## Command line

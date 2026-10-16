@@ -44,8 +44,20 @@ object ImageWriter {
         stage: StageFn,
         log: LogFn,
         cancel: () -> Boolean,
+    ) = writeStream({ file.inputStream() }, file.length(), decode, dev, expectedSha256, stage, log, cancel)
+
+    /** Same, reading from [open] (for example a file the person picked); [rawSize] drives progress. */
+    fun writeStream(
+        open: () -> java.io.InputStream,
+        rawSize: Long,
+        decode: (java.io.InputStream) -> java.io.InputStream,
+        dev: BlockDevice,
+        expectedSha256: String?,
+        stage: StageFn,
+        log: LogFn,
+        cancel: () -> Boolean,
     ) {
-        val fileSize = file.length()
+        val fileSize = rawSize
         val bs = dev.blockSize
         require(CHUNK % bs == 0)
         val buf = ByteArray(CHUNK)
@@ -60,7 +72,7 @@ object ImageWriter {
         log("Writing ${dev.name}")
         if (dev is ScsiDisk) log("USB transfers of ${dev.transferSize / 1024} KB")
         var done = 0L
-        val raw = CountingStream(file.inputStream().buffered(CHUNK))
+        val raw = CountingStream(open().buffered(CHUNK))
         decoding { decode(raw) }.use { input ->
             while (true) {
                 if (cancel()) throw CancelledException()

@@ -27,6 +27,8 @@ sealed interface JobState {
         val timeLeft: String = "",
         /** SystemClock.elapsedRealtime() when the current stage began, for the running timer. */
         val stageStartMs: Long = SystemClock.elapsedRealtime(),
+        /** Writing a file from the phone: no download or verify steps. */
+        val local: Boolean = false,
     ) : JobState
 
     data class Finished(val outcome: Outcome, val message: String, val distro: String, val drive: String) : JobState
@@ -67,13 +69,13 @@ object Jobs {
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
     private var tracker = Progress { SystemClock.elapsedRealtime() }
 
-    fun begin(distro: String, drive: String) {
+    fun begin(distro: String, drive: String, local: Boolean = false) {
         cancelRequested = false
         cancelReason = null
         leftDuringJob = !appVisible
         _log.value = emptyList()
-        tracker = Progress { SystemClock.elapsedRealtime() }
-        _state.value = JobState.Running(distro, drive)
+        tracker = Progress(if (local) Progress.LOCAL_WEIGHTS else Progress.WEIGHTS) { SystemClock.elapsedRealtime() }
+        _state.value = JobState.Running(distro, drive, stage = if (local) Stage.WRITE else Stage.LOOKUP, local = local)
     }
 
     fun progress(stage: Stage, done: Long, total: Long) = _state.update {

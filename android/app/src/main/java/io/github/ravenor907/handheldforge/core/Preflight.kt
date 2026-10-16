@@ -23,7 +23,7 @@ data class Check(val ok: Boolean, val required: Boolean, val title: String, val 
 object Preflight {
     const val MIN_BATTERY = 30
 
-    fun checks(p: PhoneState): List<Check> = listOf(
+    fun checks(p: PhoneState, download: Boolean = true): List<Check> = listOfNotNull(
         Check(
             ok = p.charging || p.batteryPercent == null || p.batteryPercent >= MIN_BATTERY,
             required = true,
@@ -35,13 +35,13 @@ object Preflight {
                     if ((p.batteryPercent ?: 100) >= MIN_BATTERY) "charging is still a good idea." else "charge it first."
             },
         ),
-        Check(
+        if (!download) null else Check(
             ok = p.online,
             required = true,
             title = "Connected to the internet",
             detail = if (p.online) "Needed to download the latest release" else "Connect to Wi-Fi first",
         ),
-        Check(
+        if (!download) null else Check(
             ok = p.unmetered,
             required = false,
             title = "On Wi-Fi",
@@ -60,8 +60,8 @@ object Preflight {
         ),
     )
 
-    /** Every required check passes and the person agreed to leave the phone alone. */
-    fun canStart(checks: List<Check>, acknowledged: Boolean) = acknowledged && checks.all { it.ok || !it.required }
+    /** Every required check passes. */
+    fun canStart(checks: List<Check>, acknowledged: Boolean = true) = acknowledged && checks.all { it.ok || !it.required }
 
     /**
      * Turns a failure into advice. Network errors right after the app went to the

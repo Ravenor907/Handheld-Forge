@@ -1,5 +1,8 @@
 package io.github.ravenor907.handheldforge
 
+import android.net.Uri
+import android.provider.OpenableColumns
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -45,7 +48,8 @@ class ForgeService : Service() {
 
         ensureChannel()
         goForeground()
-        worker = Thread({ run(distroId, stickKey) }, "forge").also { it.start() }
+        val file = intent.getStringExtra(EXTRA_URI)?.let { Uri.parse(it) }
+        worker = Thread({ if (file != null) runFile(file, stickKey) else run(distroId, stickKey) }, "forge").also { it.start() }
         return START_NOT_STICKY
     }
 
@@ -71,6 +75,50 @@ class ForgeService : Service() {
     /** Android 15 calls this when a data sync service hits its daily limit; stop cleanly. */
     override fun onTimeout(startId: Int, fgsType: Int) {
         Jobs.cancel("Android stopped the job because it ran too long in the background. Keep the app open and try again.")
+    }
+
+    /** Writes a file the person picked (an ISO or disk image), byte for byte, then reads it back. */
+    private fun runFile(uri: Uri, stickKey: String) {
+        val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:write")
+        wake.acquire(4 * 60 * 60 * 1000L)
+        try {
+            val (name, size) = describeFile(this, uri)
+            if (size <= 0) throw IOException("Couldn't read the size of $name. Copy it to the phone's storage and try again.")
+            val decode = decoderFor(name)
+            val sticks = UsbSticks(this)
+            val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
+            val stage = { st: Stage, d: Long, t: Long ->
+                Jobs.progress(st, d, t)
+                maybeNotify(st, d, t)
+            }
+            Jobs.log("Writing $name (%.1f GB)".format(size / 1e9))
+            sticks.open(device).use { s ->
+                if (decode == null && s.disk.sizeBytes < size) throw IOException("This drive is too small for $name.")
+                try {
+                    ImageWriter.writeStream(
+                        { contentResolver.openInputStream(uri) ?: throw IOException("Couldn't open $name") },
+                        size, decode ?: { it }, s.disk, null, stage, Jobs::log, { Jobs.cancelRequested },
+                    )
+                } catch (e: CorruptImageException) {
+                    throw IOException("$name is damaged or isn't a compressed disk image. Download it again.")
+                }
+            }
+            Jobs.finish(Outcome.OK, "")
+            done("$name is on the drive")
+        } catch (e: CancelledException) {
+            Jobs.finish(Outcome.CANCELLED, listOfNotNull(Jobs.cancelReason, "The drive is unfinished, so write it again before booting from it.").joinToString(" "))
+            done("Stopped")
+        } catch (e: Exception) {
+            Jobs.log("${e.javaClass.simpleName}: ${e.message}")
+            Jobs.finish(Outcome.ERROR, e.message ?: e.javaClass.simpleName)
+            done("The drive wasn't finished")
+        } finally {
+            if (wake.isHeld) wake.release()
+            worker = null
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            stopSelf()
+        }
     }
 
     private fun run(distroId: String, stickKey: String) {
@@ -199,7 +247,7 @@ class ForgeService : Service() {
         // The same overall percentage and step as the app's screen.
         val job = Jobs.state.value as? JobState.Running ?: return
         val pct = (job.fraction * 100).toInt().coerceIn(0, 100)
-        val text = "$pct%  " + Progress.describe(s, d, t, 0, job.distro).first
+        val text = "$pct%  " + Progress.describe(s, d, t, 0, job.distro, local = job.local).first
         getSystemService(NotificationManager::class.java).notify(NOTIFY_ID, notification(text, pct.toLong(), 100))
     }
 
@@ -217,6 +265,44 @@ class ForgeService : Service() {
     companion object {
         const val EXTRA_DISTRO = "distro"
         const val EXTRA_STICK = "stick"
+        const val EXTRA_URI = "uri"
+        const val CUSTOM_ID = "custom-file"
+
+        /** File types the picker offers. Compressed images are unpacked while they're written. */
+        val PICK_TYPES = arrayOf(
+            "application/x-iso9660-image", "application/octet-stream", "application/x-raw-disk-image",
+            "application/x-bzip2", "application/gzip", "application/x-gzip", "application/x-cd-image",
+        )
+
+        /** null for an uncompressed image, else a decoder for .bz2 / .gz. */
+        fun decoderFor(name: String): ((java.io.InputStream) -> java.io.InputStream)? = when {
+            name.endsWith(".bz2", true) -> { s -> BZip2CompressorInputStream(s, true) }
+            name.endsWith(".gz", true) -> { s -> java.util.zip.GZIPInputStream(s, 1 shl 16) }
+            else -> null
+        }
+
+        /** (display name, size in bytes) of a picked file. */
+        fun describeFile(context: Context, uri: Uri): Pair<String, Long> {
+            var name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+            var size = -1L
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    c.getString(0)?.let { name = it }
+                    if (!c.isNull(1)) size = c.getLong(1)
+                }
+            }
+            return name to size
+        }
+
+        fun startFile(context: Context, uri: Uri, name: String, stickKey: String, stickLabel: String) {
+            Jobs.begin(name, stickLabel, local = true)
+            val i = Intent(context, ForgeService::class.java)
+                .putExtra(EXTRA_DISTRO, CUSTOM_ID)
+                .putExtra(EXTRA_STICK, stickKey)
+                .putExtra(EXTRA_URI, uri.toString())
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            ContextCompat.startForegroundService(context, i)
+        }
         private const val CHANNEL = "forge"
         private const val NOTIFY_ID = 1
 

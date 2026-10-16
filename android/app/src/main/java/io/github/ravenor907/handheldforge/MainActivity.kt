@@ -61,7 +61,6 @@ import io.github.ravenor907.handheldforge.core.PhoneState
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Stage
-import io.github.ravenor907.handheldforge.ui.AckBox
 import io.github.ravenor907.handheldforge.ui.Banner
 import io.github.ravenor907.handheldforge.ui.CheckRow
 import io.github.ravenor907.handheldforge.ui.EmptySlot
@@ -212,10 +211,29 @@ class MainActivity : ComponentActivity() {
         val tick by permissionTick.collectAsState()
         // The confirm demo shows CachyOS so its handheld warning is in the screenshot.
         val first = if (demo == "confirm") CACHY else catalog.firstOrNull { it.enabled }?.id
-        var distroId by rememberSaveable { mutableStateOf(first) }
+        var distroId by rememberSaveable { mutableStateOf(if (demo == "file") ForgeService.CUSTOM_ID else first) }
         var stickKey by rememberSaveable { mutableStateOf(if (demo != null && demo != "empty") "demo1" else null) }
         var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ready") }
         var hint by remember { mutableStateOf("") }
+        // A file the person picked to write instead of a listed system.
+        var fileUri by rememberSaveable { mutableStateOf<String?>(if (demo == "file") "content://demo/new-os.img.bz2" else null) }
+        var fileName by rememberSaveable { mutableStateOf(if (demo == "file") "new-os.img.bz2" else "") }
+        var fileSize by rememberSaveable { mutableStateOf(if (demo == "file") 3_400_000_000L else -1L) }
+        val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: Exception) {
+                    // Not every file provider offers lasting access; this session's access is enough.
+                }
+                val (n, size) = ForgeService.describeFile(this@MainActivity, uri)
+                fileUri = uri.toString()
+                fileName = n
+                fileSize = size
+                distroId = ForgeService.CUSTOM_ID
+                hint = ""
+            }
+        }
         var list by remember { mutableStateOf(if (demo != null && demo != "empty") demoSticks else emptyList()) }
 
         // Watch for sticks being plugged in or pulled out while choosing.
@@ -230,7 +248,13 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(job) { keepScreenOn(job is JobState.Running) }
 
         val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-        val distro = catalog.firstOrNull { it.id == distroId }
+        val custom = distroId == ForgeService.CUSTOM_ID && fileUri != null
+        // A picked file runs as a one-off "system" named after the file.
+        val distro = if (custom) {
+            Distro(ForgeService.CUSTOM_ID, fileName, "Your file", true, 1, null, emptyList())
+        } else {
+            catalog.firstOrNull { it.id == distroId }
+        }
         val stick = list.firstOrNull { it.key == stickKey }
 
         BackHandler(enabled = confirming && job is JobState.Idle) { confirming = false }
@@ -250,19 +274,24 @@ class MainActivity : ComponentActivity() {
                         confirming = false
                     }
                     JobState.Idle -> if (confirming && distro != null && stick != null) {
-                        Confirm(distro, stick, ready = demo == "confirm-ready", onBack = { confirming = false }) {
+                        Confirm(distro, stick, custom, onBack = { confirming = false }) {
                             if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                                     this@MainActivity, Manifest.permission.POST_NOTIFICATIONS,
                                 ) != PackageManager.PERMISSION_GRANTED
                             ) {
                                 notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                             }
-                            ForgeService.start(this@MainActivity, distro, stick.key, stick.label)
+                            if (custom) {
+                                ForgeService.startFile(this@MainActivity, Uri.parse(fileUri), fileName, stick.key, stick.label)
+                            } else {
+                                ForgeService.start(this@MainActivity, distro, stick.key, stick.label)
+                            }
                         }
                     } else {
                         Choose(
-                            catalog, distroId, list, stickKey, hint,
+                            catalog, distroId, fileName.takeIf { fileUri != null }, fileSize, list, stickKey, hint,
                             onDistro = { distroId = it },
+                            onPickFile = { pickFile.launch(ForgeService.PICK_TYPES) },
                             onStick = { s ->
                                 stickKey = s.key
                                 hint = ""
@@ -273,8 +302,10 @@ class MainActivity : ComponentActivity() {
                                 when {
                                     distro == null || stick == null -> {}
                                     !stick.hasPermission -> sticks.device(stick.key)?.let { sticks.requestPermission(it) }
-                                    size != null && size < distro.minDriveBytes ->
+                                    !custom && size != null && size < distro.minDriveBytes ->
                                         hint = "That drive is too small. ${distro.name} needs ${distro.minDriveGb} GB or more."
+                                    custom && size != null && ForgeService.decoderFor(fileName) == null && fileSize > size ->
+                                        hint = "That drive is too small for $fileName."
                                     else -> confirming = true
                                 }
                             },
@@ -289,14 +320,18 @@ class MainActivity : ComponentActivity() {
     private fun ColumnScope.Choose(
         catalog: List<Distro>,
         distroId: String?,
+        pickedName: String?,
+        pickedSize: Long,
         list: List<Stick>,
         stickKey: String?,
         hint: String,
         onDistro: (String) -> Unit,
+        onPickFile: () -> Unit,
         onStick: (Stick) -> Unit,
         onCreate: () -> Unit,
     ) {
         Txt("Pick a system and a USB drive.", Forge.title)
+        val fileChosen = distroId == ForgeService.CUSTOM_ID && pickedName != null
         Gap(18)
         Row(horizontalArrangement = RowGap) {
             catalog.forEach { d ->
@@ -306,6 +341,14 @@ class MainActivity : ComponentActivity() {
                 ) { onDistro(d.id) }
             }
         }
+        Gap(10)
+        // Anything else: an ISO or disk image already on the phone, for systems not listed here yet.
+        Tile(
+            pickedName ?: "Your own file",
+            if (pickedName == null) "Pick an ISO or disk image on this phone"
+            else if (pickedSize > 0) "${gb(pickedSize)}, tap to pick another" else "Tap to pick another",
+            selected = fileChosen, modifier = Modifier.fillMaxWidth(),
+        ) { if (fileChosen || pickedName == null) onPickFile() else onDistro(ForgeService.CUSTOM_ID) }
         Gap(14)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = RowGap) {
             if (list.isEmpty()) {
@@ -324,23 +367,23 @@ class MainActivity : ComponentActivity() {
             Txt(hint, Forge.hint.copy(color = Forge.Danger))
             Gap(10)
         }
-        val ready = catalog.any { it.id == distroId && it.enabled } && list.any { it.key == stickKey }
-        MoltenButton("Create boot drive", enabled = ready, modifier = Modifier.fillMaxWidth(), onClick = onCreate)
+        val ready = (fileChosen || catalog.any { it.id == distroId && it.enabled }) && list.any { it.key == stickKey }
+        MoltenButton(if (fileChosen) "Write to drive" else "Create boot drive", enabled = ready, modifier = Modifier.fillMaxWidth(), onClick = onCreate)
     }
 
     @Composable
-    private fun ColumnScope.Confirm(distro: Distro, stick: Stick, ready: Boolean, onBack: () -> Unit, onErase: () -> Unit) {
+    private fun ColumnScope.Confirm(distro: Distro, stick: Stick, custom: Boolean, onBack: () -> Unit, onErase: () -> Unit) {
         val resumed by resumeTick.collectAsState()
         var phone by remember { mutableStateOf(phoneState()) }
-        var agreed by rememberSaveable { mutableStateOf(ready) }
-        // Battery and network change while the person reads; keep the list current.
+        // Battery and network change while the person reads; keep it current.
         LaunchedEffect(resumed) {
             while (true) {
                 phone = phoneState()
                 delay(2000)
             }
         }
-        val checks = Preflight.checks(phone)
+        val checks = Preflight.checks(phone, download = !custom)
+        val problems = checks.filter { !it.ok }
 
         Txt("Erase this drive?", Forge.title)
         Gap(8)
@@ -353,23 +396,16 @@ class MainActivity : ComponentActivity() {
                 Banner(it)
                 Gap(14)
             }
-            Txt("Before you start", Forge.brand)
-            Gap(4)
-            checks.forEach { c ->
+            // Only what needs attention; nothing at all when the phone is ready.
+            problems.forEach { c ->
                 CheckRow(c.title, c.detail, c.ok, c.required, onClick = c.fix?.let { f -> { fix(f) } })
             }
-            Gap(12)
-            AckBox(
-                "I'll leave the phone alone until it's done: this app stays open, the drive stays plugged in, " +
-                    "and I won't switch apps or lock the phone. This can take 30 minutes or more.",
-                agreed,
-            ) { agreed = it }
         }
         Gap(16)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             QuietButton("Go back", onClick = onBack)
             MoltenButton(
-                "Erase and create", enabled = Preflight.canStart(checks, agreed), modifier = Modifier.weight(1f), onClick = onErase,
+                "Erase and write", enabled = Preflight.canStart(checks), modifier = Modifier.weight(1f), onClick = onErase,
             )
         }
     }
@@ -396,7 +432,7 @@ class MainActivity : ComponentActivity() {
         // While the stop question is showing, back just dismisses it.
         BackHandler(enabled = askStop) { askStop = false }
 
-        Txt("Creating ${j.distro} on ${j.drive}", Forge.title)
+        Txt(if (j.local) "Writing ${j.distro} to ${j.drive}" else "Creating ${j.distro} on ${j.drive}", Forge.title)
         Gap(12)
         Banner(
             if (backWarned) {
@@ -411,7 +447,7 @@ class MainActivity : ComponentActivity() {
         Txt("${(j.fraction * 100).toInt().coerceIn(0, 100)}%", Forge.big)
         HeatBar(overall, active = true)
         Gap(12)
-        val (headline, detail) = Progress.describe(j.stage, j.done, j.total, now - j.stageStartMs, j.distro, j.timeLeft)
+        val (headline, detail) = Progress.describe(j.stage, j.done, j.total, now - j.stageStartMs, j.distro, j.timeLeft, j.local)
         Txt(headline, Forge.status)
         Gap(4)
         Txt(detail, Forge.hint)
@@ -421,7 +457,8 @@ class MainActivity : ComponentActivity() {
             Txt(it.substringAfter("  "), Forge.hint, maxLines = 2)
         }
         Spacer(Modifier.weight(1f))
-        StepTrack(STEPS, step, failed = false)
+        val first = Progress.firstStep(j.local)
+        StepTrack(STEPS.drop(first), step - first, failed = false)
         Gap(18)
         if (askStop && !j.stopping) {
             // Stopping mid-write leaves the drive unbootable, so make it a deliberate second tap.

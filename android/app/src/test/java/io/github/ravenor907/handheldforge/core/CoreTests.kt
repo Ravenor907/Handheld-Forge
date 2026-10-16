@@ -561,3 +561,37 @@ class ProgressTest {
         assertFalse(Progress.describe(Stage.LOOKUP, 0, 0, 2_000, "Bazzite").second.contains("("))
     }
 }
+
+class CustomFileTest {
+    @Test
+    fun writesFromAStreamWithGzip() {
+        val f = FakeUsbDrive(blocks = 32768)
+        val d = ScsiDisk(BulkOnly(f)).init()
+        val data = kotlin.random.Random.nextBytes(3 * 1024 * 1024 + 77)
+        val gz = java.io.ByteArrayOutputStream().also { o -> java.util.zip.GZIPOutputStream(o).use { it.write(data) } }.toByteArray()
+        ImageWriter.writeStream(
+            { java.io.ByteArrayInputStream(gz) }, gz.size.toLong(), { java.util.zip.GZIPInputStream(it) },
+            d, null, { _, _, _ -> }, {}, { false },
+        )
+        assertArrayEquals(data, f.disk.copyOfRange(0, data.size))
+    }
+
+    @Test
+    fun localJobProgressStartsAtWrite() {
+        val p = Progress(Progress.LOCAL_WEIGHTS) { 0L }
+        p.update(Stage.WRITE, 0, 100)
+        assertEquals(0, p.percent)
+        p.update(Stage.WRITE, 50, 100)
+        assertEquals(40, p.percent)
+        p.update(Stage.CHECK, 100, 100)
+        assertEquals(100, p.percent)
+        assertEquals("Step 1 of 2: Writing to the drive", Progress.describe(Stage.WRITE, 1, 2, 0, "x.img", local = true).first)
+    }
+
+    @Test
+    fun noInternetNeededForALocalFile() {
+        val offline = PhoneState(80, charging = false, online = false, unmetered = false, backgroundAllowed = true)
+        assertFalse(Preflight.canStart(Preflight.checks(offline)))
+        assertTrue(Preflight.canStart(Preflight.checks(offline, download = false)))
+    }
+}
