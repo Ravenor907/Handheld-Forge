@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E501  (mostly inline HTML and SVG)
 """Renders the README graphics (docs/assets/*.png) from HTML, in the app's own colors and type.
 
 Needs Playwright with Chromium and the Inter font. Screenshots of the app come from CI's
