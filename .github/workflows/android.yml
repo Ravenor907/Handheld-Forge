@@ -67,6 +67,7 @@ jobs:
           PLAY_UPLOAD_KEY_B64: ${{ secrets.PLAY_UPLOAD_KEY_B64 }}
           PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
         run: |
+          set -o pipefail
           if [ -n "$PLAY_UPLOAD_KEY_B64" ]; then
             echo "$PLAY_UPLOAD_KEY_B64" | base64 -d > "$RUNNER_TEMP/upload.p12"
             export HF_KEYSTORE_FILE="$RUNNER_TEMP/upload.p12" HF_KEYSTORE_PASSWORD="$PLAY_UPLOAD_KEY_PASSWORD" HF_KEY_ALIAS=upload
@@ -78,9 +79,11 @@ jobs:
           rm -f "$RUNNER_TEMP/upload.p12"
           aab=app/build/outputs/bundle/release/app-release.aab
           curl -fsSL -o "$RUNNER_TEMP/bundletool.jar" https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar
-          java -jar "$RUNNER_TEMP/bundletool.jar" validate --bundle="$aab" | head -20
-          keytool -printcert -jarfile "$aab" | grep -E "Owner|SHA256:" | head -3
-          java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle="$aab" | grep -oE 'targetSdkVersion="[0-9]+"|versionCode="[0-9]+"|uses-permission[^/]*' | sort -u
+          java -jar "$RUNNER_TEMP/bundletool.jar" validate --bundle="$aab" > "$RUNNER_TEMP/validate.txt"
+          signer=$(keytool -printcert -jarfile "$aab" | grep -m1 "Owner" || true)
+          facts=$(java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle="$aab" \
+            | grep -oE 'targetSdkVersion="[0-9]+"|versionCode="[0-9]+"|permission.name="[A-Za-z_.]+"' | sort -u | tr '\n' ' ')
+          echo "::notice title=Play bundle::validated; $signer; $facts"
           # Only a bundle signed with the real upload key is worth keeping.
           [ -n "$PLAY_UPLOAD_KEY_B64" ] || rm -f "$aab"
       - uses: actions/upload-artifact@v4
