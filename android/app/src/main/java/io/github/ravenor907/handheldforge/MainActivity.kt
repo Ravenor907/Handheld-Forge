@@ -214,10 +214,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun fix(f: Fix) = when (f) {
+        // The app's own settings page (Battery > Unrestricted). Google Play only allows the one-tap
+        // prompt for a few kinds of apps, and the foreground service already covers the job itself.
         Fix.BACKGROUND -> try {
-            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         } catch (e: Exception) {
-            // Some phones hide the one-tap prompt; the full list still works.
             try {
                 startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             } catch (_: Exception) {

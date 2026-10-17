@@ -44,14 +44,14 @@ val keyAliasName = System.getenv("HF_KEY_ALIAS") ?: "handheld-forge"
 
 android {
     namespace = "io.github.ravenor907.handheldforge"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "io.github.ravenor907.handheldforge"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 91
-        versionName = "0.9.1"
+        targetSdk = 36
+        versionCode = 92
+        versionName = "0.9.2"
     }
 
     signingConfigs {

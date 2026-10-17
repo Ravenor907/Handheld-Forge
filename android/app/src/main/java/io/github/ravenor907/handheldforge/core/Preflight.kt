@@ -54,7 +54,7 @@ object Preflight {
             detail = if (p.backgroundAllowed) {
                 "Android won't pause the job"
             } else {
-                "Android may pause the job if you leave the app. Tap to allow."
+                "Android may pause the job if you leave the app. Tap, then set Battery to Unrestricted."
             },
             fix = if (p.backgroundAllowed) null else Fix.BACKGROUND,
         ),
