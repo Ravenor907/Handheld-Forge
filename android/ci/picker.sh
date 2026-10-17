@@ -25,6 +25,7 @@ adb shell content call --method scan_volume --uri content://media --arg external
 pick() {
   name="$1"; expect="$2"; shot="$3"
   for i in $(seq 1 12); do
+    dismiss_anr
     if $UI tap "$name" >/dev/null; then picked=1; break; fi
     # Not visible yet: open the picker's list of places and go to Downloads.
     $UI tap "Downloads" >/dev/null || $UI tap "Show roots" "Open navigation drawer" >/dev/null
@@ -38,10 +39,20 @@ pick() {
   echo "picked $name -> $expect"
 }
 
+# A busy emulator sometimes shows "<system app> isn't responding" over everything: wait it out.
+dismiss_anr() {
+  for i in 1 2 3; do
+    $UI has "t responding" >/dev/null 2>&1 || return 0
+    echo "Dismissing a system 'isn't responding' dialog"
+    $UI tap "Wait" >/dev/null || adb shell input keyevent KEYCODE_BACK
+    sleep 2
+  done
+}
 adb shell am force-stop $PKG
 adb shell am start -W -n $PKG/.MainActivity >/dev/null
 sleep 4
-$UI has "Your own file" || fail "no 'Your own file' tile"
+dismiss_anr
+$UI has "Your own file" || { sleep 5; dismiss_anr; $UI has "Your own file"; } || fail "no 'Your own file' tile"
 adb exec-out screencap -p > screens/picker-0-start.png
 
 $UI tap "Your own file" >/dev/null || fail "couldn't tap 'Your own file'"
