@@ -82,7 +82,7 @@ jobs:
           java -jar "$RUNNER_TEMP/bundletool.jar" validate --bundle="$aab" > "$RUNNER_TEMP/validate.txt"
           signer=$(keytool -printcert -jarfile "$aab" | grep -m1 "Owner" || true)
           facts=$(java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle="$aab" \
-            | grep -oE 'targetSdkVersion="[0-9]+"|versionCode="[0-9]+"|permission.name="[A-Za-z_.]+"' | sort -u | tr '\n' ' ')
+            | grep -oE 'targetSdkVersion="[0-9]+"|versionCode="[0-9]+"|uses-permission android:name="[A-Za-z_.]+"' | sort -u | tr '\n' ' ')
           echo "::notice title=Play bundle::validated; $signer; $facts"
           # Only a bundle signed with the real upload key is worth keeping.
           [ -n "$PLAY_UPLOAD_KEY_B64" ] || rm -f "$aab"
