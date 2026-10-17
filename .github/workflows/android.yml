@@ -100,8 +100,6 @@ jobs:
     # Twice: Android 14, and Android 16 (the API level the app targets).
     needs: build
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -129,16 +127,6 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: android/ci/screens.sh && android/ci/picker.sh
-      - name: Share screenshots for review (TEMPORARY, feature branch only)
-        if: always() && github.ref == 'refs/heads/android-play-store'
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd screens
-          git init -q -b review-screens-${{ matrix.api }}
-          git -c user.name=ci -c user.email=ci@localhost add .
-          git -c user.name=ci -c user.email=ci@localhost commit -qm screens
-          git push -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" review-screens-${{ matrix.api }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
