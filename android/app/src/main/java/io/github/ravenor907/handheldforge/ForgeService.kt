@@ -295,6 +295,12 @@ class ForgeService : Service() {
                             img.file, { BZip2CompressorInputStream(it, true) },
                             s.disk, null, stage, Jobs::log, cancel,
                         )
+                    } else if (distro.format == "raw-gz") {
+                        // Same idea: gzip's CRC and length check catch a damaged download.
+                        ImageWriter.writeStream(
+                            img.file, ImageKind.decoder(ImageKind.GZIP),
+                            s.disk, null, stage, Jobs::log, cancel,
+                        )
                     } else {
                         ImageWriter.write(img.file, s.disk, img.sha256, stage, Jobs::log, cancel)
                     }
@@ -476,7 +482,11 @@ class ForgeService : Service() {
 
         private fun catalogText(context: Context) = context.assets.open("distros.json").bufferedReader().use { it.readText() }
 
-        fun catalog(context: Context): List<Distro> = Catalog.parse(catalogText(context))
+        /** The regular systems, then any experimental ones (hidden until unlocked; see [Labs]). */
+        fun catalog(context: Context): List<Distro> {
+            val main = Catalog.parse(catalogText(context))
+            return main + Labs.catalog(context, main.map { it.id }.toSet())
+        }
 
         fun bootMenu(context: Context): List<String> = Catalog.bootMenu(catalogText(context))
 

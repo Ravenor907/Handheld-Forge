@@ -74,6 +74,31 @@ class CatalogTest {
     }
 
     @Test
+    fun labsCatalogIsSeparateAndHidden() {
+        val main = Catalog.parse(repoFile("handheld_forge/distros.json").readText())
+        assertTrue(main.none { it.hidden || it.id == "batocera" })
+        val labs = io.github.ravenor907.handheldforge.Labs.parse(
+            repoFile("android/app/src/main/assets/labs.json").readText(), main.map { it.id }.toSet(),
+        )
+        assertEquals(listOf("batocera"), labs.map { it.id })
+        val bat = labs.single()
+        assertTrue(bat.enabled && bat.hidden)
+        assertEquals("raw-gz", bat.format)
+        assertEquals(32, bat.minDriveGb)
+        assertTrue(bat.warning!!.startsWith("Experimental"))
+        assertTrue(bat.installSteps.size >= 2)
+        assertTrue((bat.warning + bat.installSteps.joinToString()).none { it == '\u2014' })
+        bat.images.forEach {
+            assertTrue(it.filename, it.filename.matches(Regex("batocera-zen3-x86-64-v3-[\\d.]+-\\d{8}\\.img\\.gz")))
+            assertEquals(null, it.checksumUrl)
+        }
+        // A labs entry can never replace a regular system.
+        assertTrue(io.github.ravenor907.handheldforge.Labs.parse(
+            repoFile("android/app/src/main/assets/labs.json").readText(), setOf("batocera"),
+        ).isEmpty())
+    }
+
+    @Test
     fun rejectsUnknownFormat() {
         val bad = """{"schema":1,"distros":[{"id":"x","name":"X","enabled":true,"format":"raw-xz",
             "images":[{"label":"a","iso_url":"https://e/x.img.xz","checksum_url":null}]}]}"""

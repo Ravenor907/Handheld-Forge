@@ -29,6 +29,7 @@ import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -150,6 +151,23 @@ class MainActivity : ComponentActivity() {
     private var demoPhone: PhoneState? = null
     private var bootMenu: List<String> = emptyList()
 
+    /** Experimental systems (hidden in the catalog) show only after tapping the version number 10 times. */
+    private val labs = MutableStateFlow(false)
+    private var versionTaps = 0
+    private var lastVersionTap = 0L
+
+    private fun tapVersion() {
+        val now = SystemClock.elapsedRealtime()
+        versionTaps = if (now - lastVersionTap < 1500) versionTaps + 1 else 1
+        lastVersionTap = now
+        if (versionTaps < Labs.TAPS) return
+        versionTaps = 0
+        val on = !labs.value
+        labs.value = on
+        Labs.setOn(this, on)
+        Toast.makeText(this, if (on) "Experimental options on" else "Experimental options off", Toast.LENGTH_SHORT).show()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Always light system-bar icons: the app is dark regardless of the phone's theme.
@@ -161,6 +179,7 @@ class MainActivity : ComponentActivity() {
         bootMenu = ForgeService.bootMenu(this)
         val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         val demo = if (debuggable) intent.getStringExtra("demo") else null
+        labs.value = Labs.isOn(this) || demo == "labs" || demo == "confirm-labs"
         if (demo != null) startDemo(demo, catalog)
         setContent { App(catalog, demo) }
     }
@@ -273,18 +292,21 @@ class MainActivity : ComponentActivity() {
         val job by Jobs.state.collectAsState()
         val tick by permissionTick.collectAsState()
         // The confirm demo shows CachyOS so its handheld warning is in the screenshot.
-        val first = if (demo == "confirm") CACHY else catalog.firstOrNull { it.enabled }?.id
+        val first = if (demo == "confirm") CACHY else catalog.firstOrNull { it.enabled && !it.hidden }?.id
+        val labsOn by labs.collectAsState()
+        val shown = catalog.filter { !it.hidden || labsOn }
         var distroId by rememberSaveable {
             mutableStateOf(
                 when (demo) {
                     "file" -> ForgeService.CUSTOM_ID
                     "ventoy", "confirm-ventoy" -> ForgeService.VENTOY_ID
+                    "labs", "confirm-labs" -> "batocera"
                     else -> first
                 },
             )
         }
         var stickKey by rememberSaveable { mutableStateOf(if (demo != null && demo != "empty") "demo1" else null) }
-        var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ventoy") }
+        var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ventoy" || demo == "confirm-labs") }
         var hint by remember { mutableStateOf("") }
         val scope = rememberCoroutineScope()
         var importing by rememberSaveable { mutableStateOf(demo == "import") }
@@ -374,6 +396,14 @@ class MainActivity : ComponentActivity() {
             if (job is JobState.Finished && demo == null) sticks.forget()
         }
 
+        // Hiding experimental options again shouldn't leave one of them picked.
+        LaunchedEffect(labsOn) {
+            if (!labsOn && catalog.any { it.id == distroId && it.hidden }) {
+                distroId = first
+                confirming = false
+            }
+        }
+
         val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
         val custom = distroId == ForgeService.CUSTOM_ID && fileUri != null
         val tool = TOOLS.firstOrNull { it.id == distroId }
@@ -393,7 +423,11 @@ class MainActivity : ComponentActivity() {
                 Row(Modifier.fillMaxWidth()) {
                     Txt("Handheld Forge", Forge.brand)
                     Spacer(Modifier.weight(1f))
-                    Txt("v${BuildConfigCompat.versionName(this@MainActivity)}", Forge.brand)
+                    val taps = remember { MutableInteractionSource() }
+                    Txt(
+                        "v${BuildConfigCompat.versionName(this@MainActivity)}", Forge.brand,
+                        Modifier.clickable(interactionSource = taps, indication = null) { tapVersion() },
+                    )
                 }
                 Gap(18)
                 when (val j = job) {
@@ -451,7 +485,7 @@ class MainActivity : ComponentActivity() {
                         }
                     } else {
                         Choose(
-                            catalog, distroId, fileName.takeIf { fileUri != null }, fileSize, kind, list, stickKey, hint,
+                            shown, distroId, fileName.takeIf { fileUri != null }, fileSize, kind, list, stickKey, hint,
                             onDistro = { distroId = it },
                             onPickFile = { pickFile.launch(ForgeService.PICK_TYPES) },
                             onAddToVentoy = {
@@ -505,12 +539,20 @@ class MainActivity : ComponentActivity() {
         val fileChosen = distroId == ForgeService.CUSTOM_ID && pickedName != null
         Gap(18)
         Row(horizontalArrangement = RowGap) {
-            catalog.forEach { d ->
+            catalog.filter { !it.hidden }.forEach { d ->
                 Tile(
                     d.name, d.edition, selected = d.id == distroId, enabled = d.enabled,
                     tag = if (d.enabled) "" else "Soon", subtitleLines = 2, modifier = Modifier.weight(1f),
                 ) { onDistro(d.id) }
             }
+        }
+        // Experimental systems, once unlocked: a full-width row each, tagged so they read as such.
+        catalog.filter { it.hidden }.forEach { d ->
+            Gap(10)
+            Tile(
+                d.name, d.edition, selected = d.id == distroId, enabled = d.enabled,
+                tag = "Labs", modifier = Modifier.fillMaxWidth(),
+            ) { onDistro(d.id) }
         }
         Gap(10)
         // Anything else: an ISO or disk image already on the phone, for systems not listed here yet.

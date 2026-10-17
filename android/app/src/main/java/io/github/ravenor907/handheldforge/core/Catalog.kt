@@ -21,12 +21,17 @@ data class Distro(
     /** Path of the public key inside the catalog, e.g. "keys/bazzite-cosign.pub". */
     val publicKey: String?,
     val images: List<ImageSource>,
-    /** "iso" (written as-is) or "raw-bz2" (bzip2-compressed disk image, decompressed while writing). */
+    /**
+     * "iso" (written as-is), "raw-bz2" or "raw-gz" (a compressed disk image, decompressed
+     * while writing).
+     */
     val format: String = "iso",
     /** What to do after booting the drive, shown on the "Ready to boot" screen. */
     val installSteps: List<String> = emptyList(),
     /** Shown before erasing, e.g. a known problem on some handhelds. */
     val warning: String? = null,
+    /** Only listed once experimental options are unlocked (tap the version number). */
+    val hidden: Boolean = false,
 ) {
     val minDriveBytes: Long get() = (minDriveGb * 1_000_000_000L * 0.93).toLong()
 }
@@ -34,6 +39,8 @@ data class Distro(
 class CatalogException(msg: String) : Exception(msg)
 
 object Catalog {
+    val FORMATS = setOf("iso", "raw-bz2", "raw-gz")
+
     @Suppress("UNCHECKED_CAST")
     private fun root(text: String): Map<String, Any?> {
         val root = Json.parse(text) as? Map<String, Any?> ?: throw CatalogException("catalog is not an object")
@@ -71,7 +78,7 @@ object Catalog {
             }
             val enabled = raw["enabled"] == true
             val format = raw["format"] as? String ?: "iso"
-            if (format !in setOf("iso", "raw-bz2")) throw CatalogException("$id: unknown format $format")
+            if (format !in FORMATS) throw CatalogException("$id: unknown format $format")
             if (enabled && images.isEmpty()) throw CatalogException("$id: enabled but has no images")
             Distro(
                 id = id,
@@ -84,6 +91,7 @@ object Catalog {
                 format = format,
                 installSteps = raw["install_steps"] as? List<String> ?: emptyList(),
                 warning = raw["warning"] as String?,
+                hidden = raw["hidden"] == true,
             )
         }
     }

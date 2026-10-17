@@ -13,7 +13,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-CATALOG = Path(__file__).resolve().parent.parent / "handheld_forge" / "distros.json"
+ROOT = Path(__file__).resolve().parent.parent
+CATALOG = ROOT / "handheld_forge" / "distros.json"
+# The Android app's experimental systems, kept out of the shared catalog.
+LABS = ROOT / "android" / "app" / "src" / "main" / "assets" / "labs.json"
 
 
 def status(url: str) -> str:
@@ -37,7 +40,10 @@ def status(url: str) -> str:
 
 def main() -> int:
     failed = []
-    for d in json.loads(CATALOG.read_text())["distros"]:
+    distros = json.loads(CATALOG.read_text())["distros"]
+    if LABS.exists():
+        distros += json.loads(LABS.read_text())["distros"]
+    for d in distros:
         if not d.get("enabled"):
             continue
         working = False
@@ -53,7 +59,7 @@ def main() -> int:
             working = working or ok
         if not working:
             failed.append(d["id"])
-            msg = f"{d['id']} has no working download. Update handheld_forge/distros.json."
+            msg = f"{d['id']} has no working download. Update its download link."
             print(f"::error title=Catalog::{msg}")
     return 1 if failed else 0
 
