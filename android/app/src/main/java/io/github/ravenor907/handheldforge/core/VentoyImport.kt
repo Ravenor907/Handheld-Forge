@@ -74,7 +74,7 @@ object VentoyImport {
      * unpacking and writing running at the same time. Progress: Stage.WRITE over the bytes read
      * from the phone, then Stage.CHECK over the bytes read back. Returns the names added, in order.
      */
-    fun run(vol: ExFatVolume, picked: List<Plan>, stage: StageFn, log: LogFn, cancel: () -> Boolean): List<String> {
+    fun run(vol: ExFatVolume, picked: List<Plan>, stage: StageFn, log: LogFn, cancel: () -> Boolean, verify: Boolean = true): List<String> {
         val plans = unique(picked)
         val known = plans.filter { it.targetSize >= 0 }
         val knownBytes = known.sumOf { it.targetSize }
@@ -105,6 +105,7 @@ object VentoyImport {
         stage(Stage.WRITE, 0, totalIn)
         for (p in order) {
             val before = doneIn
+            val started = System.nanoTime()
             val raw = Counting(p.source.open())
             try {
                 if (p.unpacks) {
@@ -146,9 +147,17 @@ object VentoyImport {
                 raw.close()
             }
             doneIn += p.source.size
+            val took = System.nanoTime() - started
+            val bytes = results[p.targetName]?.first ?: 0L
+            log("${p.targetName}: %.2f GB in %s (%s)".format(bytes / 1e9, ImageWriter.Timer.clock(took), ImageWriter.Timer.rate(bytes, took)))
             stage(Stage.WRITE, doneIn, totalIn)
         }
         val totalOut = results.values.sumOf { it.first }
+        if (!verify) {
+            log("Skipped reading the images back (Labs setting)")
+            stage(Stage.CHECK, totalOut, totalOut)
+            return plans.map { it.targetName }
+        }
         var checked = 0L
         stage(Stage.CHECK, 0, totalOut)
         for (p in plans) {

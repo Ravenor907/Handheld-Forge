@@ -143,7 +143,12 @@ class AndroidUsbTransport(
     }
 }
 
-class OpenStick(val disk: ScsiDisk, private val transport: AndroidUsbTransport) : Closeable {
+class OpenStick(
+    val disk: ScsiDisk,
+    private val transport: AndroidUsbTransport,
+    /** The USB speed the drive is connected at, from its bulk endpoint's packet size. */
+    val link: String = "unknown speed",
+) : Closeable {
     override fun close() = transport.close()
 }
 
@@ -219,7 +224,7 @@ class UsbSticks(private val context: Context) {
         }
         val t = AndroidUsbTransport(conn, intf, inEp, outEp)
         return try {
-            OpenStick(ScsiDisk(BulkOnly(t)).init(), t)
+            OpenStick(ScsiDisk(BulkOnly(t)).init(), t, linkSpeed(outEp.maxPacketSize))
         } catch (e: Exception) {
             t.close()
             throw e
@@ -227,6 +232,13 @@ class UsbSticks(private val context: Context) {
     }
 
     companion object {
+        /** Bulk packets are 1024 bytes at USB 3 speeds, 512 at USB 2 (480 Mbit/s), 64 at USB 1. */
+        fun linkSpeed(maxPacket: Int): String = when {
+            maxPacket >= 1024 -> "USB 3 speed"
+            maxPacket >= 512 -> "USB 2 speed (480 Mbit/s, about 40 MB/s at best)"
+            else -> "USB 1 speed (very slow; try another port or adapter)"
+        }
+
         const val ACTION_PERMISSION = "io.github.ravenor907.handheldforge.USB_PERMISSION"
 
         fun massStorage(d: UsbDevice): UsbInterface? = (0 until d.interfaceCount).map { d.getInterface(it) }

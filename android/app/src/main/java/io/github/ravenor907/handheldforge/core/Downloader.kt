@@ -19,6 +19,11 @@ data class PreparedImage(
     val source: ImageSource,
     val signatureVerified: Boolean,
     val fromCache: Boolean,
+    /**
+     * Set when the image is written while it downloads (Labs): read it through [LiveDownload.open]
+     * instead of [file], then call [LiveDownload.finish] to check it.
+     */
+    val live: LiveDownload? = null,
 )
 
 /**
@@ -91,7 +96,7 @@ class Downloader(
         throw DownloadException("Couldn't reach the ${distro.name} download server. Check your connection.")
     }
 
-    fun prepare(distro: Distro, stage: StageFn, log: LogFn, cancel: () -> Boolean): PreparedImage {
+    fun prepare(distro: Distro, stage: StageFn, log: LogFn, cancel: () -> Boolean, stream: Boolean = false): PreparedImage {
         stage(Stage.LOOKUP, 0, 0)
         val (img, meta) = resolveMeta(distro, log)
         val remote = meta.first
@@ -148,6 +153,18 @@ class Downloader(
                 "Not enough space. Free up %.1f GB on this phone and try again."
                     .format((need + 200L * 1024 * 1024 - free) / 1e9),
             )
+        }
+
+        if (stream && remote > 0) {
+            log("Downloading ${img.isoUrl} and writing it at the same time (Labs)")
+            val live = LiveDownload({ range -> open(img.isoUrl, range = range) }, part, remote, expected, checksummed, signature, key, cancel) { done ->
+                stamp.delete()
+                iso.delete()
+                if (!part.renameTo(iso)) throw IOException("Could not finalize the download")
+                partStamp.delete()
+                stamp.writeText(expected + if (done) "\nsigned" else "")
+            }
+            return PreparedImage(part, expected, img, false, fromCache = false, live = live)
         }
 
         log("Downloading ${img.isoUrl}")
@@ -239,6 +256,152 @@ class Downloader(
 }
 
 private const val MAX_STALLED_TRIES = 8
+
+/**
+ * A download read while it arrives: whatever's already in [part] first, then the rest from the
+ * server, saved to [part] as it goes (so it resumes and is kept for next time) and hashed on the
+ * way through. Dropped connections are retried from where they stopped, like a normal download.
+ */
+class LiveDownload internal constructor(
+    /** Opens the image's URL from a byte offset. */
+    private val connector: (Long) -> HttpURLConnection,
+    private val part: File,
+    val total: Long,
+    private val expected: String,
+    private val checksummed: Boolean,
+    signature: String?,
+    key: java.security.PublicKey?,
+    private val cancel: () -> Boolean,
+    private val keep: (signed: Boolean) -> Unit,
+) {
+    private val verifier = Verify.Running(signature, key)
+    private var stream: Stream? = null
+
+    /** The image bytes, from the start. Only one stream per download. */
+    fun open(): java.io.InputStream {
+        check(stream == null) { "already open" }
+        return Stream().also { stream = it }
+    }
+
+    /**
+     * Reads whatever the writer didn't need, then checks size, checksum and signature. Keeps
+     * the download as a verified copy, or deletes it and throws if it doesn't check out.
+     */
+    fun finish(log: LogFn) {
+        val s = stream ?: throw IllegalStateException("never opened")
+        val buf = ByteArray(1 shl 20)
+        while (s.read(buf) >= 0) Unit
+        s.close()
+        val (hex, signed) = try {
+            verifier.finish()
+        } catch (e: VerificationException) {
+            part.delete()
+            throw e
+        }
+        val ok = s.position == total && (!checksummed || hex == expected)
+        if (!ok) {
+            part.delete()
+            throw VerificationException(
+                "The download didn't match the publisher's checksum, so the drive can't be trusted. It was deleted; create the drive again.",
+            )
+        }
+        log(
+            when {
+                signed -> "Checksum and signature verified (after writing)"
+                checksummed -> "Checksum verified (after writing)"
+                else -> "Download complete"
+            },
+        )
+        keep(signed)
+    }
+
+    private inner class Stream : java.io.InputStream() {
+        var position = 0L
+            private set
+        private val local = if (part.exists()) part.length().coerceAtMost(total) else 0L
+        private val localIn = if (local > 0) part.inputStream() else null
+        private var out: FileOutputStream? = null
+        private var conn: HttpURLConnection? = null
+        private var net: java.io.InputStream? = null
+        private var stalled = 0
+
+        override fun read(): Int {
+            val one = ByteArray(1)
+            return if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xFF
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            if (position < local) {
+                val n = localIn!!.read(b, off, minOf(len.toLong(), local - position).toInt())
+                if (n > 0) {
+                    verifier.update(b, off, n)
+                    position += n
+                    return n
+                }
+                throw IOException("The partial download changed while it was being read")
+            }
+            if (position >= total) return -1
+            while (true) {
+                if (cancel()) throw CancelledException()
+                try {
+                    val input = net ?: connect()
+                    val n = input.read(b, off, minOf(len.toLong(), total - position).toInt())
+                    if (n < 0) throw IOException("Connection closed early")
+                    (out ?: FileOutputStream(part, true).also { out = it }).write(b, off, n)
+                    verifier.update(b, off, n)
+                    position += n
+                    stalled = 0
+                    return n
+                } catch (e: IOException) {
+                    if (e is HttpStatus && e.code in 400..499 && e.code != 408 && e.code != 429) throw e
+                    disconnect()
+                    if (++stalled > MAX_STALLED_TRIES) throw e
+                    val until = System.nanoTime() + minOf(2_000L * stalled, 15_000L) * 1_000_000
+                    while (System.nanoTime() < until) {
+                        if (cancel()) throw CancelledException()
+                        Thread.sleep(250)
+                    }
+                }
+            }
+        }
+
+        private fun connect(): java.io.InputStream {
+            val c = connector(position)
+            val code = c.responseCode
+            if (code !in 200..299) {
+                c.disconnect()
+                throw HttpStatus(code)
+            }
+            val input = c.inputStream.buffered(1 shl 20)
+            if (position > 0 && code != 206) {
+                // The server ignored the range: skip what we already have.
+                var skip = position
+                while (skip > 0) {
+                    val k = input.skip(skip)
+                    if (k <= 0) throw IOException("Connection closed early")
+                    skip -= k
+                }
+            }
+            conn = c
+            net = input
+            return input
+        }
+
+        private fun disconnect() {
+            runCatching { net?.close() }
+            runCatching { conn?.disconnect() }
+            net = null
+            conn = null
+        }
+
+        override fun close() {
+            disconnect()
+            runCatching { out?.close() }
+            runCatching { localIn?.close() }
+        }
+    }
+}
 
 class HttpStatus(val code: Int) : IOException("HTTP $code")
 

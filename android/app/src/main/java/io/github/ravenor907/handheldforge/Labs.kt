@@ -31,4 +31,23 @@ object Labs {
     fun setOn(context: Context, on: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(PREF_ON, on).apply()
     }
+
+    private const val PREF_STREAM = "labs.stream"
+    private const val PREF_SKIP_CHECK = "labs.skipCheck"
+
+    private fun pref(context: Context, key: String) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(key, false)
+
+    private fun setPref(context: Context, key: String, on: Boolean) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(key, on).apply()
+
+    /** Labs setting: write the image while it downloads. Only counts while Labs is on. */
+    fun streamWrite(context: Context) = isOn(context) && pref(context, PREF_STREAM)
+    fun streamWriteSetting(context: Context) = pref(context, PREF_STREAM)
+    fun setStreamWrite(context: Context, on: Boolean) = setPref(context, PREF_STREAM, on)
+
+    /** Labs setting: don't read the drive back after writing. Only counts while Labs is on. */
+    fun skipCheck(context: Context) = isOn(context) && pref(context, PREF_SKIP_CHECK)
+    fun skipCheckSetting(context: Context) = pref(context, PREF_SKIP_CHECK)
+    fun setSkipCheck(context: Context, on: Boolean) = setPref(context, PREF_SKIP_CHECK, on)
 }

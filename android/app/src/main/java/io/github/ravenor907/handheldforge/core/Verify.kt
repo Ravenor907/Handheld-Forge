@@ -40,6 +40,39 @@ object Verify {
         return KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(der))
     }
 
+    /** Hash and signature check fed piece by piece, for data that's never all in one file at once. */
+    class Running(private val signatureB64: String?, key: PublicKey?) {
+        private val md = MessageDigest.getInstance("SHA-256")
+        private val sig = if (signatureB64 != null && key != null) {
+            Signature.getInstance("SHA256withECDSA").apply { initVerify(key) }
+        } else {
+            null
+        }
+
+        fun update(b: ByteArray, off: Int, len: Int) {
+            md.update(b, off, len)
+            sig?.update(b, off, len)
+        }
+
+        /** The SHA-256 hex, and whether a signature was checked. Throws if the signature is wrong. */
+        fun finish(): Pair<String, Boolean> {
+            val hex = md.digest().toHex()
+            if (sig == null) return hex to false
+            val raw = try {
+                Base64.getDecoder().decode(signatureB64!!.trim())
+            } catch (e: IllegalArgumentException) {
+                throw VerificationException("Signature file is not valid base64")
+            }
+            val ok = try {
+                sig.verify(raw)
+            } catch (e: java.security.SignatureException) {
+                false
+            }
+            if (!ok) throw VerificationException("Signature does NOT match the pinned key. Refusing this image.")
+            return hex to true
+        }
+    }
+
     /**
      * Hash the file and, when a signature is given, check it in the same pass
      * (cosign blob signatures are DER ECDSA over SHA-256 of the file).
@@ -52,12 +85,7 @@ object Verify {
         cancel: () -> Boolean = { false },
         progress: (Long, Long) -> Unit = { _, _ -> },
     ): Pair<String, Boolean> {
-        val md = MessageDigest.getInstance("SHA-256")
-        val sig = if (signatureB64 != null && key != null) {
-            Signature.getInstance("SHA256withECDSA").apply { initVerify(key) }
-        } else {
-            null
-        }
+        val v = Running(signatureB64, key)
         val total = file.length()
         var done = 0L
         val buf = ByteArray(4 shl 20)
@@ -66,29 +94,12 @@ object Verify {
                 if (cancel()) throw CancelledException()
                 val n = input.read(buf)
                 if (n < 0) break
-                md.update(buf, 0, n)
-                sig?.update(buf, 0, n)
+                v.update(buf, 0, n)
                 done += n
                 progress(done, total)
             }
         }
-        val hex = md.digest().toHex()
-        var signed = false
-        if (sig != null) {
-            val raw = try {
-                Base64.getDecoder().decode(signatureB64!!.trim())
-            } catch (e: IllegalArgumentException) {
-                throw VerificationException("Signature file is not valid base64")
-            }
-            val ok = try {
-                sig.verify(raw)
-            } catch (e: java.security.SignatureException) {
-                false
-            }
-            if (!ok) throw VerificationException("Signature does NOT match the pinned key. Refusing this image.")
-            signed = true
-        }
-        return hex to signed
+        return v.finish()
     }
 }
 

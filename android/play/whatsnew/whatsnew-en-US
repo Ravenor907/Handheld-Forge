@@ -1,1 +1,3 @@
-Small improvements under the hood.
+• SteamOS writes much faster: its image now unpacks on every core while the drive writes (it was stuck on one core)
+• The log shows the USB speed the drive is connected at, and whether the drive or unpacking is the slow part
+• Labs (tap the version number 10 times): test a drive's real speed and capacity, check a drive against its image, write while downloading, skip the read-back check

@@ -44,7 +44,8 @@ object ImageWriter {
         stage: StageFn,
         log: LogFn,
         cancel: () -> Boolean,
-    ) = writeStream({ file.inputStream() }, file.length(), decode, dev, expectedSha256, stage, log, cancel)
+        verify: Boolean = true,
+    ) = writeStream({ file.inputStream() }, file.length(), decode, dev, expectedSha256, stage, log, cancel, verify)
 
     /** Same, reading from [open] (for example a file the person picked); [rawSize] drives progress. */
     fun writeStream(
@@ -56,7 +57,9 @@ object ImageWriter {
         stage: StageFn,
         log: LogFn,
         cancel: () -> Boolean,
-    ) {
+        /** Read the drive back and compare (off only by the Labs setting). */
+        verify: Boolean = true,
+    ): Long {
         val fileSize = rawSize
         val bs = dev.blockSize
         require(CHUNK % bs == 0)
@@ -75,15 +78,18 @@ object ImageWriter {
         }
         var done = 0L
         val raw = CountingStream(open().buffered(CHUNK))
+        val timer = Timer()
         // Unpacking runs ahead on other threads while the USB writes go on (bzip2 has its own).
         decoding { ahead(decode(raw), raw) }.use { input ->
             while (true) {
                 if (cancel()) throw CancelledException()
                 var got = 0
-                while (got < CHUNK) {
-                    val n = decoding { input.read(buf, got, CHUNK - got) }
-                    if (n < 0) break
-                    got += n
+                timer.reading {
+                    while (got < CHUNK) {
+                        val n = decoding { input.read(buf, got, CHUNK - got) }
+                        if (n < 0) break
+                        got += n
+                    }
                 }
                 if (got == 0) break
                 md.update(buf, 0, got)
@@ -92,7 +98,7 @@ object ImageWriter {
                 if (done / bs + padded / bs > dev.blockCount) {
                     throw WriteException("This drive is too small for the image.")
                 }
-                dev.write(done / bs, padded / bs, buf)
+                timer.writing { dev.write(done / bs, padded / bs, buf) }
                 done += got
                 stage(Stage.WRITE, raw.count, fileSize)
                 if (got < CHUNK) break
@@ -104,9 +110,16 @@ object ImageWriter {
             throw WriteException("The image changed while it was being written. Try again.")
         }
         stage(Stage.WRITE, fileSize, fileSize)
-        dev.sync()
+        timer.writing { dev.sync() }
+        log(timer.summary(size))
+        if (!verify) {
+            log("Skipped reading the drive back (Labs setting)")
+            stage(Stage.CHECK, size, size)
+            return size
+        }
 
         log("Reading the drive back to confirm")
+        val readStart = System.nanoTime()
         val check = MessageDigest.getInstance("SHA-256")
         var read = 0L
         while (read < size) {
@@ -123,7 +136,95 @@ object ImageWriter {
                 "The drive didn't store the image correctly. It may be failing or counterfeit. Try another drive.",
             )
         }
-        log("Every byte on the drive matches the image")
+        log("Every byte on the drive matches the image (read back at ${Timer.rate(size, System.nanoTime() - readStart)})")
+        return size
+    }
+
+    /**
+     * Compares a drive with an image without writing anything: the image as [decode] produces it
+     * against the drive's first bytes. Returns null if they match, or the byte offset where they
+     * first differ.
+     */
+    fun compare(
+        open: () -> java.io.InputStream,
+        rawSize: Long,
+        decode: (java.io.InputStream) -> java.io.InputStream,
+        dev: BlockDevice,
+        stage: StageFn,
+        log: LogFn,
+        cancel: () -> Boolean,
+    ): Long? {
+        val bs = dev.blockSize
+        val img = ByteArray(CHUNK)
+        val disk = ByteArray(CHUNK)
+        var at = 0L
+        val raw = CountingStream(open().buffered(CHUNK))
+        val start = System.nanoTime()
+        decoding { ahead(decode(raw), raw) }.use { input ->
+            while (true) {
+                if (cancel()) throw CancelledException()
+                var got = 0
+                while (got < CHUNK) {
+                    val n = decoding { input.read(img, got, CHUNK - got) }
+                    if (n < 0) break
+                    got += n
+                }
+                if (got == 0) break
+                if (at + got > dev.sizeBytes) return dev.sizeBytes.also { log("The image is bigger than the drive") }
+                val padded = roundUp(got, bs)
+                dev.read(at / bs, padded / bs, disk)
+                for (i in 0 until got) {
+                    if (img[i] != disk[i]) return (at + i).also { log("First difference at byte ${at + i}") }
+                }
+                at += got
+                stage(Stage.CHECK, raw.count, rawSize)
+                if (got < CHUNK) break
+            }
+        }
+        log("All %.2f GB match the image (read at %s)".format(at / 1e9, Timer.rate(at, System.nanoTime() - start)))
+        return null
+    }
+
+    /** Where the writing time went: waiting for the image (download or unpacking) or for the drive. */
+    class Timer {
+        private var readNs = 0L
+        private var writeNs = 0L
+        private val start = System.nanoTime()
+
+        fun <T> reading(block: () -> T): T = timed(true, block)
+        fun <T> writing(block: () -> T): T = timed(false, block)
+
+        private fun <T> timed(read: Boolean, block: () -> T): T {
+            val t = System.nanoTime()
+            try {
+                return block()
+            } finally {
+                val d = System.nanoTime() - t
+                if (read) readNs += d else writeNs += d
+            }
+        }
+
+        fun summary(bytes: Long): String {
+            val total = System.nanoTime() - start
+            val busy = (readNs + writeNs).coerceAtLeast(1)
+            val drive = (writeNs * 100 / busy).toInt()
+            val who = when {
+                drive >= 70 -> "the drive is the limit"
+                drive <= 30 -> "unpacking or downloading is the limit, not the drive"
+                else -> "the drive and unpacking are about even"
+            }
+            return "Wrote %.2f GB in %s (%s). %d%% of the time waiting on the drive, %d%% on the image: %s".format(
+                bytes / 1e9, clock(total), rate(bytes, total), drive, 100 - drive, who,
+            )
+        }
+
+        companion object {
+            fun rate(bytes: Long, ns: Long) = "%.1f MB/s".format(bytes / 1e6 / (ns.coerceAtLeast(1) / 1e9))
+            fun clock(ns: Long): String {
+                val s = ns / 1_000_000_000
+                return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
+            }
+        }
     }
 
     fun ahead(decoded: java.io.InputStream, raw: java.io.InputStream): java.io.InputStream =

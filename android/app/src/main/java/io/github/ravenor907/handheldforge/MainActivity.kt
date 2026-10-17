@@ -42,6 +42,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -63,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import io.github.ravenor907.handheldforge.core.Distro
+import io.github.ravenor907.handheldforge.core.DriveTest
 import io.github.ravenor907.handheldforge.core.Fix
 import io.github.ravenor907.handheldforge.core.ImageKind
 import io.github.ravenor907.handheldforge.core.PhoneState
@@ -179,7 +182,7 @@ class MainActivity : ComponentActivity() {
         bootMenu = ForgeService.bootMenu(this)
         val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         val demo = if (debuggable) intent.getStringExtra("demo") else null
-        labs.value = Labs.isOn(this) || demo == "labs" || demo == "confirm-labs"
+        labs.value = Labs.isOn(this) || demo in setOf("labs", "confirm-labs", "labs-tools", "done-test")
         if (demo != null) startDemo(demo, catalog)
         setContent { App(catalog, demo) }
     }
@@ -277,6 +280,16 @@ class MainActivity : ComponentActivity() {
                 lines,
             )
             "done-format" -> Jobs.demo(JobState.Finished(Outcome.OK, "", FORMAT.name, "SanDisk Ultra Fit"), lines)
+            "done-test" -> Jobs.demo(
+                JobState.Finished(
+                    Outcome.OK,
+                    DriveTest.Report(
+                        62_900_000_000, 1_073_741_824, listOf(48.0, 47.5, 9.2, 3.4), 21.3, 46.8, 0, 128, 0, null,
+                    ).lines().joinToString("\n") + "\nConnected at USB 3 speed",
+                    "Drive test", "Fanxiang F372S", setOf(ForgeService.FLAG_TEST),
+                ),
+                lines,
+            )
             "done-cachyos" -> Jobs.demo(
                 JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
             )
@@ -310,6 +323,7 @@ class MainActivity : ComponentActivity() {
         var hint by remember { mutableStateOf("") }
         val scope = rememberCoroutineScope()
         var importing by rememberSaveable { mutableStateOf(demo == "import") }
+        var labsTools by rememberSaveable { mutableStateOf(demo == "labs-tools") }
         var secureBoot by rememberSaveable { mutableStateOf(true) }
         var picked by remember {
             mutableStateOf(
@@ -417,12 +431,20 @@ class MainActivity : ComponentActivity() {
 
         BackHandler(enabled = confirming && job is JobState.Idle) { confirming = false }
         BackHandler(enabled = importing && !confirming && job is JobState.Idle) { importing = false }
+        BackHandler(enabled = labsTools && job is JobState.Idle) { labsTools = false }
 
         Box(Modifier.fillMaxSize().background(Forge.Slate).safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
             Column(Modifier.fillMaxSize()) {
                 Row(Modifier.fillMaxWidth()) {
                     Txt("Handheld Forge", Forge.brand)
                     Spacer(Modifier.weight(1f))
+                    if (labsOn && job is JobState.Idle && !labsTools) {
+                        Txt(
+                            "Labs", Forge.brand.copy(color = Forge.MoltenA),
+                            Modifier.clickable { labsTools = true; confirming = false; importing = false }.padding(horizontal = 6.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                    }
                     val taps = remember { MutableInteractionSource() }
                     Txt(
                         "v${BuildConfigCompat.versionName(this@MainActivity)}", Forge.brand,
@@ -448,7 +470,24 @@ class MainActivity : ComponentActivity() {
                             importing = true
                         },
                     )
-                    JobState.Idle -> if (importing && stick != null && !confirming) {
+                    JobState.Idle -> if (labsTools && labsOn) {
+                        val checkName = when {
+                            custom -> fileName
+                            tool != null -> null
+                            else -> distro?.takeIf { it.enabled }?.name
+                        }
+                        LabsTools(
+                            stick, checkName, demo,
+                            onTest = { s -> ForgeService.startTest(this@MainActivity, s.key, s.label) },
+                            onCheck = { s ->
+                                ForgeService.startCheck(
+                                    this@MainActivity, checkName ?: "", if (custom) null else distro?.id,
+                                    if (custom) Uri.parse(fileUri) else null, s.key, s.label,
+                                )
+                            },
+                            onBack = { labsTools = false },
+                        )
+                    } else if (importing && stick != null && !confirming) {
                         VentoyFiles(
                             stick, picked, hint, demo,
                             onPick = { pickImages.launch(arrayOf("*/*")) },
@@ -779,15 +818,135 @@ class MainActivity : ComponentActivity() {
         if (showLog) LogBox(log)
     }
 
+    /** Labs: experimental settings and drive tools. */
+    @Composable
+    private fun ColumnScope.LabsTools(
+        stick: Stick?,
+        checkName: String?,
+        demo: String?,
+        onTest: (Stick) -> Unit,
+        onCheck: (Stick) -> Unit,
+        onBack: () -> Unit,
+    ) {
+        var stream by remember { mutableStateOf(Labs.streamWriteSetting(this@MainActivity)) }
+        var skip by remember { mutableStateOf(Labs.skipCheckSetting(this@MainActivity)) }
+        var askTest by remember { mutableStateOf(false) }
+        val usable = stick?.takeIf { it.hasPermission }
+        Txt("Labs", Forge.title)
+        Gap(8)
+        Txt("Experimental settings and tools. They work, but they've had less testing than the rest of the app.", Forge.hint)
+        Gap(16)
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            Txt("Settings", Forge.brand)
+            Gap(8)
+            Toggle(
+                "Write while downloading",
+                "Starts writing as the download comes in, so most of the download time disappears. The download is still checked at the end; if it fails, make the drive again.",
+                stream,
+            ) {
+                stream = it
+                if (demo == null) Labs.setStreamWrite(this@MainActivity, it)
+            }
+            Gap(10)
+            Toggle(
+                "Skip the read-back check",
+                "Saves close to half the time after writing. A fake or failing drive won't be caught, so only use it with a drive you trust.",
+                skip,
+            ) {
+                skip = it
+                if (demo == null) Labs.setSkipCheck(this@MainActivity, it)
+            }
+            Gap(20)
+            Txt("Tools", Forge.brand)
+            Gap(8)
+            ToolCard(
+                "Test a drive",
+                (usable?.let { "${it.label}: " } ?: "") +
+                    "real write and read speed, and whether it really holds what it claims. Takes 1 to 6 minutes. " +
+                    "Erases the drive, then formats it so it's usable again.",
+                warn = if (askTest) "Tap again to erase ${usable?.label ?: "the drive"} and test it." else null,
+                action = if (askTest) "Erase and test" else "Test",
+                enabled = usable != null,
+            ) {
+                if (!askTest) askTest = true else { askTest = false; usable?.let(onTest) }
+            }
+            Gap(10)
+            ToolCard(
+                "Check a drive",
+                when {
+                    checkName == null -> "Pick a system or your own file on the main screen first, then compare a drive with it."
+                    else -> (usable?.let { "Compare ${it.label} with $checkName" } ?: "Compare a drive with $checkName") +
+                        ", byte for byte, without changing anything. Handy when a handheld won't start from it."
+                },
+                warn = null,
+                action = "Check",
+                enabled = usable != null && checkName != null,
+            ) { usable?.let(onCheck) }
+            if (usable == null) {
+                Gap(10)
+                Txt(if (stick == null) "Plug in a USB drive to use the tools." else "Allow access to the drive on the main screen first.", Forge.hint)
+            }
+        }
+        Gap(14)
+        QuietButton("Back", modifier = Modifier.fillMaxWidth(), onClick = onBack)
+    }
+
+    @Composable
+    private fun Toggle(title: String, detail: String, on: Boolean, onChange: (Boolean) -> Unit) {
+        val shape = RoundedCornerShape(14.dp)
+        Row(
+            Modifier.fillMaxWidth().clip(shape).background(Forge.Iron).clickable { onChange(!on) }.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Txt(title, TextStyle(color = Forge.Bone, fontSize = 16.sp, fontWeight = FontWeight.SemiBold))
+                Gap(4)
+                Txt(detail, Forge.hint.copy(fontSize = 13.sp, lineHeight = 18.sp))
+            }
+            Spacer(Modifier.width(12.dp))
+            val track = RoundedCornerShape(50)
+            Box(
+                Modifier.width(48.dp).height(28.dp).clip(track)
+                    .then(if (on) Modifier.background(Forge.molten) else Modifier.background(Forge.Seam))
+                    .padding(3.dp),
+                contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart,
+            ) {
+                Box(Modifier.size(22.dp).clip(track).background(if (on) Forge.Ink else Forge.Ash))
+            }
+        }
+    }
+
+    @Composable
+    private fun ToolCard(title: String, detail: String, warn: String?, action: String, enabled: Boolean, onAction: () -> Unit) {
+        Row(
+            Modifier.fillMaxWidth().background(Forge.Iron, RoundedCornerShape(14.dp)).padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Txt(title, TextStyle(color = Forge.Bone, fontSize = 16.sp, fontWeight = FontWeight.SemiBold))
+                Gap(4)
+                Txt(detail, Forge.hint.copy(fontSize = 13.sp, lineHeight = 18.sp))
+                warn?.let {
+                    Gap(6)
+                    Txt(it, Forge.hint.copy(fontSize = 13.sp, color = Forge.MoltenA))
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            QuietButton(action, enabled = enabled, onClick = onAction)
+        }
+    }
+
     @Composable
     private fun ColumnScope.Result(j: JobState.Finished, distro: Distro?, onAgain: () -> Unit, onImport: () -> Unit) {
         var showLog by remember { mutableStateOf(false) }
         val log by Jobs.log.collectAsState()
         val imported = ForgeService.FLAG_IMPORT in j.flags
+        val tested = ForgeService.FLAG_TEST in j.flags
+        val checked = ForgeService.FLAG_CHECK in j.flags
         val ventoy = distro?.id == ForgeService.VENTOY_ID
         val ok = j.outcome == Outcome.OK
         val steps = when {
-            !ok || imported -> emptyList()
+            !ok || imported || tested || checked -> emptyList()
             ventoy -> ventoySteps(ForgeService.FLAG_SB_OFF !in j.flags)
             else -> distro?.installSteps.orEmpty()
         }
@@ -804,19 +963,29 @@ class MainActivity : ComponentActivity() {
             Txt(
                 when (j.outcome) {
                     Outcome.OK -> when {
+                        tested && ForgeService.FLAG_TEST_BAD in j.flags -> "This drive failed the test"
+                        tested -> "Drive test results"
+                        checked -> "The drive matches"
                         imported -> "Added to Ventoy"
                         distro?.id == ForgeService.FORMAT_ID -> "Drive formatted"
                         ventoy -> "Ventoy is installed"
                         else -> "Ready to boot"
                     }
                     Outcome.CANCELLED -> "Stopped"
-                    Outcome.ERROR -> if (imported) "The images weren't all added" else "The drive wasn't finished"
+                    Outcome.ERROR -> when {
+                        imported -> "The images weren't all added"
+                        tested -> "The test didn't finish"
+                        checked -> "The drive doesn't match"
+                        else -> "The drive wasn't finished"
+                    }
                 },
                 Forge.title,
             )
             Gap(8)
             Txt(
                 when {
+                    ok && tested -> "${j.drive}, measured. It's been formatted again, so it's ready to use:"
+                    ok && checked -> j.message
                     ok && imported -> "These are on ${j.drive} and will show in Ventoy's menu:"
                     ok && distro?.id == ForgeService.FORMAT_ID ->
                         "${j.drive} is now one empty exFAT drive named USB DRIVE. Unplug it and plug it back in to use it for files."
@@ -831,14 +1000,16 @@ class MainActivity : ComponentActivity() {
                 },
                 Forge.hint,
             )
-            if (ok && imported) {
+            if (ok && (imported || tested)) {
                 Gap(12)
                 j.message.lines().filter { it.isNotBlank() }.forEach {
                     Gap(6)
                     Txt(it, TextStyle(color = Forge.Bone, fontSize = 15.sp, lineHeight = 20.sp))
                 }
-                Gap(18)
-                Txt("Plug the drive into your handheld, start it from USB and pick one from Ventoy's menu.", Forge.hint)
+                if (imported) {
+                    Gap(18)
+                    Txt("Plug the drive into your handheld, start it from USB and pick one from Ventoy's menu.", Forge.hint)
+                }
             }
             if (steps.isNotEmpty()) InstallGuide(steps, ventoy = ventoy)
         }
@@ -851,6 +1022,8 @@ class MainActivity : ComponentActivity() {
                 MoltenButton(if (imported) "Add more" else "Add images", modifier = Modifier.weight(1f), onClick = onImport)
             } else if (imported) {
                 MoltenButton("Back to the drive", modifier = Modifier.weight(1f), onClick = onImport)
+            } else if (tested || checked) {
+                MoltenButton("Done", modifier = Modifier.weight(1f), onClick = onAgain)
             } else {
                 MoltenButton(
                     when (j.outcome) {

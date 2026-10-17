@@ -23,6 +23,8 @@ import io.github.ravenor907.handheldforge.core.Catalog
 import io.github.ravenor907.handheldforge.core.CancelledException
 import io.github.ravenor907.handheldforge.core.CorruptImageException
 import io.github.ravenor907.handheldforge.core.Distro
+import io.github.ravenor907.handheldforge.core.DriveTest
+import io.github.ravenor907.handheldforge.core.WriteException
 import io.github.ravenor907.handheldforge.core.DownloadException
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Downloader
@@ -37,7 +39,6 @@ import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.usb.UsbSticks
 import java.io.File
 import java.io.IOException
-import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 
 /** Runs download, verify, write and read-back in the foreground so the phone can sleep the screen. */
 class ForgeService : Service() {
@@ -58,6 +59,8 @@ class ForgeService : Service() {
             when {
                 distroId == FORMAT_ID || distroId == VENTOY_ID -> runTool(distroId, stickKey, intent.getBooleanExtra(EXTRA_SECURE_BOOT, true))
                 distroId == IMPORT_ID -> runImport(intent.getStringArrayListExtra(EXTRA_URIS).orEmpty().map { Uri.parse(it) }, stickKey)
+                distroId == TEST_ID -> runTest(stickKey)
+                distroId == CHECK_ID -> runCheck(intent.getStringExtra(EXTRA_CHECK_DISTRO), file, stickKey)
                 file != null -> runFile(file, stickKey)
                 else -> run(distroId, stickKey)
             }
@@ -110,11 +113,13 @@ class ForgeService : Service() {
             Jobs.log("Writing $name (%.1f GB)".format(size / 1e9))
             sticks.open(device).use { s ->
                 s.disk.onNote = { Jobs.log(it) }
+                logDrive(s)
                 if (!kind.compressed && s.disk.sizeBytes < size) throw IOException("This drive is too small for $name.")
                 try {
                     ImageWriter.writeStream(
                         { contentResolver.openInputStream(uri) ?: throw IOException("Couldn't open $name") },
                         size, ImageKind.decoder(kind), s.disk, null, stage, Jobs::log, { Jobs.cancelRequested },
+                        verify = !Labs.skipCheck(this),
                     )
                 } catch (e: CorruptImageException) {
                     throw IOException("$name is damaged or isn't a compressed disk image. Download it again.")
@@ -158,7 +163,7 @@ class ForgeService : Service() {
             val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
             sticks.open(device).use { s ->
                 s.disk.onNote = { Jobs.log(it) }
-                Jobs.log("Drive: ${s.disk.name}, ${"%.1f".format(s.disk.sizeBytes / 1e9)} GB")
+                logDrive(s)
                 if (ventoy != null) {
                     Ventoy.install(s.disk, ventoy.second, stage, Jobs::log, cancel, secureBoot = secureBoot)
                 } else {
@@ -221,7 +226,7 @@ class ForgeService : Service() {
                 val vd = VentoyDrive.detect(s.disk) ?: throw IOException("This drive doesn't have Ventoy on it any more.")
                 val vol = vd.openData(s.disk)
                 Jobs.log("Ventoy partition: %.1f GB free".format(vol.freeBytes / 1e9))
-                VentoyImport.run(vol, plans, stage, Jobs::log, cancel)
+                VentoyImport.run(vol, plans, stage, Jobs::log, cancel, verify = !Labs.skipCheck(this))
             }
             Jobs.finish(Outcome.OK, added.joinToString("\n"), setOf(FLAG_IMPORT))
             done(if (added.size == 1) "${added[0]} is on the Ventoy drive" else "${added.size} images are on the Ventoy drive")
@@ -270,7 +275,7 @@ class ForgeService : Service() {
             val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
             sticks.open(device).use { s ->
                 s.disk.onNote = { Jobs.log(it) }
-                Jobs.log("Drive: ${s.disk.name}, ${"%.1f".format(s.disk.sizeBytes / 1e9)} GB")
+                logDrive(s)
                 if (s.disk.sizeBytes < distro.minDriveBytes) {
                     throw IOException("This drive is too small. ${distro.name} needs ${distro.minDriveGb} GB or more.")
                 }
@@ -281,29 +286,29 @@ class ForgeService : Service() {
                 readKey = { path -> assets.open(path).bufferedReader().use { it.readText() } },
                 userAgent = "HandheldForge-Android/${BuildConfigCompat.versionName(this)}",
             )
-            val img = downloader.prepare(distro, stage, Jobs::log, cancel)
+            val img = downloader.prepare(distro, stage, Jobs::log, cancel, stream = Labs.streamWrite(this))
             if (cancel()) throw CancelledException()
+            val live = img.live
 
             val again = sticks.device(stickKey)
                 ?: throw IOException("The USB drive was unplugged during the download. Plug it back in and try again.")
             sticks.open(again).use { s ->
                 s.disk.onNote = { Jobs.log(it) }
+                logDrive(s)
                 try {
-                    if (distro.format == "raw-bz2") {
-                        // No published checksum: bzip2's block CRCs catch a damaged download.
-                        ImageWriter.writeStream(
-                            img.file, { BZip2CompressorInputStream(it, true) },
-                            s.disk, null, stage, Jobs::log, cancel,
-                        )
-                    } else if (distro.format == "raw-gz") {
-                        // Same idea: gzip's CRC and length check catch a damaged download.
-                        ImageWriter.writeStream(
-                            img.file, ImageKind.decoder(ImageKind.GZIP),
-                            s.disk, null, stage, Jobs::log, cancel,
-                        )
-                    } else {
-                        ImageWriter.write(img.file, s.disk, img.sha256, stage, Jobs::log, cancel)
-                    }
+                    // Compressed disk images have no published checksum: bzip2's block CRCs and
+                    // gzip's CRC catch a damaged download. bzip2 unpacks on every core.
+                    val decode = decoderFor(distro)
+                    val open = live?.let { l -> { l.open() } } ?: { img.file.inputStream() }
+                    val rawSize = live?.total ?: img.file.length()
+                    if (decode == null && s.disk.sizeBytes < rawSize) throw WriteException("This drive is too small for the image.")
+                    ImageWriter.writeStream(
+                        open, rawSize, decode ?: { it }, s.disk,
+                        // A live download is checked once it's all in, below.
+                        if (decode == null && live == null) img.sha256 else null,
+                        stage, Jobs::log, cancel, verify = !Labs.skipCheck(this),
+                    )
+                    live?.finish(Jobs::log)
                 } catch (e: CorruptImageException) {
                     Jobs.log(e.message ?: "")
                     img.file.delete() // fetch a fresh copy next time
@@ -392,7 +397,148 @@ class ForgeService : Service() {
         getSystemService(NotificationManager::class.java).notify(NOTIFY_ID, n)
     }
 
+    private fun logDrive(s: io.github.ravenor907.handheldforge.usb.OpenStick) {
+        Jobs.log("Drive: ${s.disk.name}, ${"%.1f".format(s.disk.sizeBytes / 1e9)} GB, connected at ${s.link}")
+    }
+
+    /** Labs: measures a drive's real speed and capacity (erases it), then formats it for normal use. */
+    private fun runTest(stickKey: String) {
+        val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:test")
+        wake.acquire(4 * 60 * 60 * 1000L)
+        try {
+            val stage = { st: Stage, d: Long, t: Long ->
+                Jobs.progress(st, d, t)
+                maybeNotify(st, d, t)
+            }
+            val cancel = { Jobs.cancelRequested }
+            val sticks = UsbSticks(this)
+            val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
+            val report = sticks.open(device).use { s ->
+                s.disk.onNote = { Jobs.log(it) }
+                logDrive(s)
+                val r = DriveTest.run(s.disk, stage, Jobs::log, cancel)
+                r.lines().forEach { Jobs.log(it) }
+                Jobs.log("Formatting the drive so it's usable again")
+                PlainDrive.format(s.disk, stage = { _, _, _ -> }, log = Jobs::log, cancel = cancel)
+                r to s.link
+            }
+            val (r, link) = report
+            val flags = setOf(FLAG_TEST) + if (r.fake || r.failing) setOf(FLAG_TEST_BAD) else emptySet()
+            Jobs.finish(Outcome.OK, (r.lines() + "Connected at $link").joinToString("\n"), flags)
+            done(if (r.fake || r.failing) "This drive failed the test" else "Drive test done")
+        } catch (e: CancelledException) {
+            Jobs.finish(Outcome.CANCELLED, "Stopped. The drive holds test data now; use Format drive to make it usable.", setOf(FLAG_TEST))
+            done("Stopped")
+        } catch (e: Exception) {
+            Jobs.log("${e.javaClass.simpleName}: ${e.message}")
+            Jobs.finish(Outcome.ERROR, e.message ?: e.javaClass.simpleName, setOf(FLAG_TEST))
+            done("The test didn't finish")
+        } finally {
+            if (wake.isHeld) wake.release()
+            worker = null
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            stopSelf()
+        }
+    }
+
+    /** Labs: compares a drive with the image it was made from, writing nothing. */
+    private fun runCheck(distroId: String?, uri: Uri?, stickKey: String) {
+        val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:check")
+        wake.acquire(4 * 60 * 60 * 1000L)
+        var what = "the image"
+        try {
+            val stage = { st: Stage, d: Long, t: Long ->
+                Jobs.progress(st, d, t)
+                maybeNotify(st, d, t)
+            }
+            val cancel = { Jobs.cancelRequested }
+            val (open, rawSize, decode) = if (uri != null) {
+                val (name, size) = describeFile(this, uri)
+                what = name
+                val kind = sniffFile(this, uri)
+                if (!kind.writable) throw IOException("$name is a ${kind.label} file, which can't be read here.")
+                Triple({ contentResolver.openInputStream(uri) ?: throw IOException("Couldn't open $name") }, size, ImageKind.decoder(kind))
+            } else {
+                val distro = catalog(this).first { it.id == distroId }
+                what = distro.name
+                val downloader = Downloader(
+                    isoDir(this),
+                    readKey = { path -> assets.open(path).bufferedReader().use { it.readText() } },
+                    userAgent = "HandheldForge-Android/${BuildConfigCompat.versionName(this)}",
+                )
+                val img = downloader.prepare(distro, stage, Jobs::log, cancel)
+                Triple({ img.file.inputStream() }, img.file.length(), decoderFor(distro) ?: { it })
+            }
+            val sticks = UsbSticks(this)
+            val device = sticks.device(stickKey) ?: throw IOException("The USB drive was unplugged.")
+            val diff = sticks.open(device).use { s ->
+                s.disk.onNote = { Jobs.log(it) }
+                logDrive(s)
+                Jobs.log("Comparing the drive with $what")
+                ImageWriter.compare(open, rawSize, decode, s.disk, stage, Jobs::log, cancel)
+            }
+            if (diff == null) {
+                Jobs.finish(Outcome.OK, "Every byte of $what matches what's on the drive.", setOf(FLAG_CHECK))
+                done("The drive matches $what")
+            } else {
+                Jobs.finish(
+                    Outcome.ERROR,
+                    "The drive doesn't match $what: they differ from %.2f GB in. Create the drive again. ".format(diff / 1e9) +
+                        "(If $what has been updated since the drive was made, a difference is expected.)",
+                    setOf(FLAG_CHECK),
+                )
+                done("The drive doesn't match")
+            }
+        } catch (e: CancelledException) {
+            Jobs.finish(Outcome.CANCELLED, "Stopped. Nothing on the drive was changed.", setOf(FLAG_CHECK))
+            done("Stopped")
+        } catch (e: Exception) {
+            Jobs.log("${e.javaClass.simpleName}: ${e.message}")
+            Jobs.finish(Outcome.ERROR, e.message ?: e.javaClass.simpleName, setOf(FLAG_CHECK))
+            done("The check didn't finish")
+        } finally {
+            if (wake.isHeld) wake.release()
+            worker = null
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            stopSelf()
+        }
+    }
+
     companion object {
+        const val TEST_ID = "drive-test"
+        const val CHECK_ID = "drive-check"
+        const val EXTRA_CHECK_DISTRO = "checkDistro"
+        const val FLAG_TEST = "drive-test"
+        const val FLAG_TEST_BAD = "drive-test-bad"
+        const val FLAG_CHECK = "drive-check"
+
+        /** How a catalog system's image is unpacked while writing; null for an ISO written as it is. */
+        fun decoderFor(distro: Distro): ((java.io.InputStream) -> java.io.InputStream)? = when (distro.format) {
+            "raw-bz2" -> ImageKind.decoder(ImageKind.BZIP2)
+            "raw-gz" -> ImageKind.decoder(ImageKind.GZIP)
+            else -> null
+        }
+
+        /** Labs: test a drive's speed and capacity (erases it). */
+        fun startTest(context: Context, stickKey: String, stickLabel: String) {
+            Jobs.begin("Drive test", stickLabel, local = true)
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, ForgeService::class.java).putExtra(EXTRA_DISTRO, TEST_ID).putExtra(EXTRA_STICK, stickKey),
+            )
+        }
+
+        /** Labs: compare a drive with a catalog system's image or a picked file. */
+        fun startCheck(context: Context, name: String, distroId: String?, uri: Uri?, stickKey: String, stickLabel: String) {
+            Jobs.begin("Check against $name", stickLabel, local = uri != null)
+            val i = Intent(context, ForgeService::class.java).putExtra(EXTRA_DISTRO, CHECK_ID).putExtra(EXTRA_STICK, stickKey)
+            if (distroId != null) i.putExtra(EXTRA_CHECK_DISTRO, distroId)
+            if (uri != null) i.putExtra(EXTRA_URI, uri.toString()).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            ContextCompat.startForegroundService(context, i)
+        }
+
         const val EXTRA_DISTRO = "distro"
         const val EXTRA_STICK = "stick"
         const val EXTRA_URI = "uri"

@@ -10,6 +10,9 @@ class MiniHttp(private val files: Map<String, ByteArray>, private val hits: Muta
     private val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
     val port: Int get() = server.localPort
 
+    /** The next GET sends only this many body bytes, then hangs up (a dropped connection). */
+    @Volatile var dropNextAfter: Int? = null
+
     init {
         thread(isDaemon = true) {
             while (!server.isClosed) {
@@ -45,6 +48,13 @@ class MiniHttp(private val files: Map<String, ByteArray>, private val hits: Muta
                         out.write("HTTP/1.1 $status\r\nContent-Length: $len\r\nConnection: close\r\n\r\n".toByteArray())
                         if (method == "GET") {
                             try {
+                                val drop = dropNextAfter
+                                if (drop != null) {
+                                    dropNextAfter = null
+                                    out.write(chunk, 0, minOf(drop, chunk.size))
+                                    out.flush()
+                                    return@use
+                                }
                                 out.write(chunk)
                             } catch (_: Exception) {
                                 // client hung up (cancel test)
