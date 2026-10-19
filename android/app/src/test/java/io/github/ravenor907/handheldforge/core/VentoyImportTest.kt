@@ -465,20 +465,23 @@ class OnePassTest {
         val (_, v) = volume(128)
         val disk = Random.nextBytes(5 * 1024 * 1024).also { it[510] = 0x55; it[511] = 0xAA.toByte() }
         val packed = bz2(disk)
-        var opens = 0
-        var bytesRead = 0L
+        // Counted from the decoder's own reading thread, so the count has to be thread-safe.
+        val bytesRead = java.util.concurrent.atomic.AtomicLong()
         val s = VentoyImport.Source("steamdeck-repair.img.bz2", packed.size.toLong()) {
-            opens++
             object : java.io.FilterInputStream(ByteArrayInputStream(packed)) {
-                override fun read(b: ByteArray, off: Int, len: Int) = super.read(b, off, len).also { if (it > 0) bytesRead += it }
+                override fun read(): Int = super.read().also { if (it >= 0) bytesRead.incrementAndGet() }
+                override fun read(b: ByteArray, off: Int, len: Int) =
+                    super.read(b, off, len).also { if (it > 0) bytesRead.addAndGet(it.toLong()) }
+                override fun skip(n: Long): Long = super.skip(n).also { bytesRead.addAndGet(it) }
             }
         }
         val plan = VentoyImport.plan(s)
-        val afterPlan = bytesRead
+        val afterPlan = bytesRead.get()
         assertTrue("plan should only look at the start, read $afterPlan of ${packed.size}", afterPlan < packed.size)
         VentoyImport.run(v, listOf(plan), { _, _, _ -> }, {}, { false })
         // The whole archive is read exactly once for the copy (plus the small look at its start).
-        assertEquals(packed.size.toLong(), bytesRead - afterPlan)
+        val copied = bytesRead.get() - afterPlan
+        assertEquals("archive is ${packed.size} bytes, plan read $afterPlan, the copy read $copied", packed.size.toLong(), copied)
         val f = v.find("steamdeck-repair.img")!!
         assertEquals(disk.size.toLong(), f.size)
         assertTrue(f.contiguous)

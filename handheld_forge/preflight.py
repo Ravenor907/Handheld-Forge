@@ -32,7 +32,9 @@ class Check:
     detail: str
 
 
-def checks(s: MachineState) -> list[Check]:
+def checks(s: MachineState, download: bool = True) -> list[Check]:
+    """What to sort out first. Without a download (your own file, Format, the Labs tools) the
+    network doesn't matter."""
     on_power = s.charging or s.battery_percent is None
     battery_ok = on_power or s.battery_percent >= MIN_BATTERY
     if s.battery_percent is None:
@@ -43,8 +45,11 @@ def checks(s: MachineState) -> list[Check]:
         battery_detail = f"At {s.battery_percent}%. Plugging in the charger is still a good idea."
     else:
         battery_detail = f"At {s.battery_percent}%. Plug in the charger first."
+    battery = Check(battery_ok, True, f"Battery {MIN_BATTERY}% or more, or charging", battery_detail)
+    if not download:
+        return [battery]
     return [
-        Check(battery_ok, True, f"Battery {MIN_BATTERY}% or more, or charging", battery_detail),
+        battery,
         Check(s.online is not False, True, "Connected to the internet",
               "Needed to download the latest release" if s.online is not False
               else "Connect to a network first"),
