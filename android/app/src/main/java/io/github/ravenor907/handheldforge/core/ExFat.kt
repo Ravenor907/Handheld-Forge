@@ -98,6 +98,23 @@ object ExFat {
             }
         }
 
+        // Clear what the structures below don't cover: the boot region, the gap before the FAT, the
+        // gap before the cluster heap, and the volume's last 1 MB. Old filesystem markers there (an
+        // ISO's at 32 KB, a UDF anchor at the end) make Linux see two filesystems and give up.
+        val zero = ByteArray(2048 * SECTOR)
+        for ((start, end) in listOf(
+            0L to l.fatOffset,
+            l.fatOffset + l.fatLength to l.heapOffset,
+            maxOf(l.heapOffset, volumeSectors - 2048) to volumeSectors,
+        )) {
+            var s = start
+            while (s < end) {
+                val n = minOf(2048L, end - s).toInt()
+                dev.write(partitionOffset + s, n, zero, 0)
+                s += n
+            }
+        }
+
         // FAT: media entries, then a chain for each of bitmap, up-case table and root directory.
         val chunk = 2048 * SECTOR
         var fatWritten = 0L
