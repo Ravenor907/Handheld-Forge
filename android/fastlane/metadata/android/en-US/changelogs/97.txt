@@ -1,0 +1,2 @@
+• Format drive fix: sticks that held other systems before now come out clean and readable everywhere
+• Copy report and Report a bug, under Details on the result screen: the whole log plus phone and drive details

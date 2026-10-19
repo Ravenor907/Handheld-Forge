@@ -184,6 +184,18 @@ class ExFatTests(Tmp):
         if FSCK:
             self._fsck(self.dir / "d.img", 2048)
 
+    def test_plain_format_clears_old_markers(self):
+        """An old ISO marker in the gap before the FAT made Linux see two filesystems."""
+        d = self.disk(80)
+        d.write(2048 + 64, b"\x01CD001\x01".ljust(512, b"\0"))
+        d.write(d.block_count - 4096, b"\xAA" * 512)
+        plain_format(d, log=lambda m: None)
+        self.assertEqual(bytes(512), d.read(2048 + 64, 1))
+        if shutil.which("blkid"):
+            out = subprocess.run(["blkid", "-p", "-O", str(2048 * 512), str(self.dir / "d.img")],
+                                 capture_output=True, text=True)
+            self.assertIn('TYPE="exfat"', out.stdout)
+
     def _fsck(self, image, start):
         """fsck.exfat on the volume alone (older exfatprogs can't take an offset)."""
         vol = Path(str(image) + ".vol")

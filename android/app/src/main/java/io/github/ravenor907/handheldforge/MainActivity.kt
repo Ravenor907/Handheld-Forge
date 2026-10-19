@@ -1061,7 +1061,21 @@ class MainActivity : ComponentActivity() {
             if (steps.isNotEmpty()) InstallGuide(steps, ventoy = ventoy)
         }
         Gap(12)
-        if (showLog) LogBox(log)
+        if (showLog) {
+            LogBox(log)
+            // Everything up to now, for a bug report: copy it, or open a prefilled GitHub issue.
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                QuietButton("Copy report") { copyReport(reportInfo(j, distro, log)) }
+                QuietButton("Report a bug") {
+                    val info = reportInfo(j, distro, log)
+                    copyReport(info)
+                    runCatching {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(io.github.ravenor907.handheldforge.core.BugReport.issueUrl(info))))
+                    }
+                }
+            }
+            Gap(10)
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             QuietButton("Details") { showLog = !showLog }
             if (ok && (ventoy || imported)) {
@@ -1355,6 +1369,30 @@ class MainActivity : ComponentActivity() {
                 Txt(s, body, Modifier.weight(1f))
             }
         }
+    }
+
+    private fun reportInfo(j: JobState.Finished, distro: Distro?, log: List<String>) =
+        io.github.ravenor907.handheldforge.core.BugReport.Info(
+            appVersion = BuildConfigCompat.versionName(this),
+            device = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+            android = "${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})",
+            labs = if (Labs.isOn(this)) {
+                mapOf("write while downloading" to Labs.streamWriteSetting(this), "skip read-back" to Labs.skipCheckSetting(this))
+            } else {
+                emptyMap()
+            },
+            job = distro?.name ?: j.distro,
+            drive = j.drive,
+            outcome = j.outcome.name,
+            message = j.message,
+            flags = j.flags,
+            log = log,
+        )
+
+    private fun copyReport(info: io.github.ravenor907.handheldforge.core.BugReport.Info) {
+        val cm = getSystemService(android.content.ClipboardManager::class.java)
+        cm?.setPrimaryClip(android.content.ClipData.newPlainText("Handheld Forge report", io.github.ravenor907.handheldforge.core.BugReport.text(info)))
+        android.widget.Toast.makeText(this, "Report copied", android.widget.Toast.LENGTH_SHORT).show()
     }
 
     @Composable

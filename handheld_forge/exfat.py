@@ -165,6 +165,15 @@ def format_volume(
             done += len(piece) // SECTOR
             progress(done, total)
 
+    # Clear what the structures below don't cover: the boot region, the gap before the FAT, the
+    # gap before the cluster heap, and the volume's last 1 MB. Old filesystem markers there (an
+    # ISO's at 32 KB, a UDF anchor at the end) make Linux see two filesystems and give up.
+    zero = bytes(2048 * SECTOR)
+    for start, end in ((0, lay.fat_offset), (lay.fat_offset + lay.fat_length, lay.heap_offset),
+                       (max(lay.heap_offset, volume_sectors - 2048), volume_sectors)):
+        for s in range(start, end, 2048):
+            dev.write(partition_offset + s, zero[: min(2048, end - s) * SECTOR])
+
     # FAT: media entries, then chains for the bitmap, up-case table and root directory.
     fat_bytes = lay.fat_length * SECTOR
     head = {0: 0xFFFFFFF8, 1: 0xFFFFFFFF}
