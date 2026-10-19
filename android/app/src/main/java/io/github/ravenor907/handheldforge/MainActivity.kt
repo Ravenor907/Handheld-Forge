@@ -394,13 +394,24 @@ class MainActivity : ComponentActivity() {
             }
         }
         var list by remember { mutableStateOf(if (demo != null && demo != "empty") demoSticks else emptyList()) }
+        // Sticks Android has already been asked about this session, so it asks once per stick, not in a loop.
+        val asked = remember { mutableSetOf<String>() }
+        // What the person tapped while Android was still asking for the drive: done as soon as it says yes.
+        var pending by remember { mutableStateOf<String?>(null) }
+        var pendingAt by remember { mutableStateOf(0) }
 
-        // Watch for sticks being plugged in or pulled out while choosing.
+        // Watch for sticks being plugged in or pulled out while choosing. A new stick gets
+        // Android's access question right away, so it's answered before anything else.
         LaunchedEffect(job is JobState.Idle, tick) {
             while (job is JobState.Idle && demo == null) {
                 val now = withContext(Dispatchers.IO) { sticks.list(probe = true) }
                 list = now
-                if (now.none { it.key == stickKey }) stickKey = now.singleOrNull()?.key
+                if (now.none { it.key == stickKey }) stickKey = now.firstOrNull { it.hasPermission }?.key ?: now.firstOrNull()?.key
+                now.firstOrNull { !it.hasPermission && it.key !in asked }?.let { s ->
+                    asked += s.key
+                    stickKey = s.key
+                    sticks.device(s.key)?.let { sticks.requestPermission(it) }
+                }
                 delay(2000)
             }
         }
@@ -428,6 +439,32 @@ class MainActivity : ComponentActivity() {
             else -> catalog.firstOrNull { it.id == distroId }
         }
         val stick = list.firstOrNull { it.key == stickKey }
+
+        // Android answered the access question: carry on with what was tapped, or say it was refused.
+        LaunchedEffect(tick, list) {
+            val want = pending ?: return@LaunchedEffect
+            val s = list.firstOrNull { it.key == stickKey } ?: return@LaunchedEffect
+            if (s.hasPermission) {
+                pending = null
+                when (want) {
+                    "ventoy" -> if (s.ventoy) importing = true
+                    "create" -> {
+                        val size = s.sizeBytes
+                        when {
+                            distro == null -> {}
+                            !custom && size != null && size < distro.minDriveBytes ->
+                                hint = "That drive is too small. ${distro.name} needs ${distro.minDriveGb} GB or more."
+                            custom && size != null && !kind.compressed && fileSize > size -> hint = "That drive is too small for $fileName."
+                            else -> confirming = true
+                        }
+                    }
+                }
+            } else if (tick > pendingAt && sticks.device(s.key)?.let { sticks.hasPermission(it) } == false) {
+                pending = null
+                hint = "Android didn't allow access to the drive. Tap the drive to ask again."
+            }
+        }
+
 
         BackHandler(enabled = confirming && job is JobState.Idle) { confirming = false }
         BackHandler(enabled = importing && !confirming && job is JobState.Idle) { importing = false }
@@ -524,13 +561,19 @@ class MainActivity : ComponentActivity() {
                         }
                     } else {
                         Choose(
-                            shown, distroId, fileName.takeIf { fileUri != null }, fileSize, kind, list, stickKey, hint,
+                            shown, distroId, fileName.takeIf { fileUri != null }, fileSize, kind, list, stickKey,
+                            if (pending != null) "Waiting for Android to allow access to the drive..." else hint,
                             onDistro = { distroId = it },
                             onPickFile = { pickFile.launch(ForgeService.PICK_TYPES) },
                             onAddToVentoy = {
                                 hint = ""
-                                if (stick?.hasPermission == true) importing = true
-                                else stick?.let { s -> sticks.device(s.key)?.let { sticks.requestPermission(it) } }
+                                if (stick?.hasPermission == true) {
+                                    importing = true
+                                } else {
+                                    pending = "ventoy"
+                                    pendingAt = tick
+                                    stick?.let { s -> sticks.device(s.key)?.let { sticks.requestPermission(it) } }
+                                }
                             },
                             onStick = { s ->
                                 stickKey = s.key
@@ -541,7 +584,11 @@ class MainActivity : ComponentActivity() {
                                 val size = stick?.sizeBytes
                                 when {
                                     distro == null || stick == null -> {}
-                                    !stick.hasPermission -> sticks.device(stick.key)?.let { sticks.requestPermission(it) }
+                                    !stick.hasPermission -> {
+                                        pending = "create"
+                                        pendingAt = tick
+                                        sticks.device(stick.key)?.let { sticks.requestPermission(it) }
+                                    }
                                     !custom && size != null && size < distro.minDriveBytes ->
                                         hint = "That drive is too small. ${distro.name} needs ${distro.minDriveGb} GB or more."
                                     custom && !kind.writable ->

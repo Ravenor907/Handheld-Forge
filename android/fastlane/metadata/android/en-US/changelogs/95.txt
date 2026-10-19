@@ -1,0 +1,1 @@
+• Android asks for access to a USB drive as soon as it's plugged in, and whatever you tapped while it was asking carries on by itself once you say yes
