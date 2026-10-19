@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import os
+import time
 import shutil
 import threading
 import urllib.error
@@ -42,6 +44,124 @@ class PreparedImage:
     source: ImageSource
     signature_verified: bool
     from_cache: bool
+    # Labs "write while downloading": still arriving; write from live.open(), then live.finish().
+    live: LiveDownload | None = None
+
+
+class LiveDownload:
+    """Downloads into the cache in the background while the writer reads the same file as it
+    grows (Labs). Every byte is hashed as it's read, so the published checksum is still checked
+    when the download ends; finish() moves the file into the cache like a normal download."""
+
+    def __init__(self, url: str, part: Path, done_path: Path, stamp: Path, part_stamp: Path,
+                 expected: str, checksummed: bool, size: int, stage: StageFn, cancel: threading.Event,
+                 finalize: Callable[[], bool]) -> None:
+        self.url, self.part, self.done_path = url, part, done_path
+        self.stamp, self.part_stamp = stamp, part_stamp
+        self.expected, self.checksummed, self.size = expected, checksummed, size
+        self.cancel, self._finalize = cancel, finalize
+        self.error: BaseException | None = None
+        self.finished = threading.Event()
+        self.md = hashlib.sha256()
+        self.read_bytes = 0
+        if part.exists():
+            part.unlink()  # streaming has to read from the first byte
+        part.touch()
+
+        def run() -> None:
+            try:
+                _download(url, part, stage, cancel)
+            except BaseException as e:  # reported to the writer
+                self.error = e
+            finally:
+                self.finished.set()
+
+        self.thread = threading.Thread(target=run, name="live-download", daemon=True)
+        self.thread.start()
+
+    def open(self) -> _Tail:
+        return _Tail(self)
+
+    def finish(self, log: LogFn = print) -> bool:
+        """After writing: waits for the download, checks it, moves it into the cache. Returns
+        whether the signature was verified."""
+        self.finished.wait()
+        if self.error:
+            raise self.error
+        with self.part.open("rb") as f:  # anything the writer didn't need to read
+            f.seek(self.read_bytes)
+            while chunk := f.read(CHUNK):
+                self.md.update(chunk)
+        actual = self.md.hexdigest()
+        if self.checksummed and actual != self.expected:
+            self.part.unlink(missing_ok=True)
+            self.part_stamp.unlink(missing_ok=True)
+            raise VerificationError("The download didn't match its published checksum, so the drive "
+                                    "isn't usable. Try again.")
+        if not self.checksummed and self.size and self.part.stat().st_size != self.size:
+            raise VerificationError("The download came out the wrong size. Try again.")
+        log("Checksum OK" if self.checksummed else "Download complete")
+        signed = self._finalize()
+        self.stamp.unlink(missing_ok=True)
+        os.replace(self.part, self.done_path)
+        self.part_stamp.unlink(missing_ok=True)
+        self.stamp.write_text(self.expected)
+        return signed
+
+
+class _Tail:
+    """Reads a file that's still being downloaded, waiting at its end until more arrives."""
+
+    def __init__(self, live: LiveDownload) -> None:
+        self.live = live
+        self.f = live.part.open("rb")
+        self.waited = 0.0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        while True:
+            n = self.f.readinto(b)
+            if n:
+                self.live.md.update(memoryview(b)[:n])
+                self.live.read_bytes += n
+                return n
+            if self.live.finished.is_set():
+                if self.live.error:
+                    raise OSError(f"The download failed: {self.live.error}")
+                n = self.f.readinto(b)  # the last bytes before it finished
+                if n:
+                    self.live.md.update(memoryview(b)[:n])
+                    self.live.read_bytes += n
+                return n or 0
+            if self.live.cancel.is_set():
+                raise Cancelled()
+            if self.live.part.stat().st_size < self.live.read_bytes:
+                raise OSError("The server restarted the download. Turn off writing while downloading "
+                              "in Labs and try again.")
+            t = time.monotonic()
+            self.live.finished.wait(0.05)
+            self.waited += time.monotonic() - t
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            out = bytearray()
+            while chunk := self.read(CHUNK):
+                out += chunk
+            return bytes(out)
+        b = bytearray(n)
+        got = self.readinto(b)
+        return bytes(b[:got])
+
+    def close(self) -> None:
+        self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
 
 
 def cache_dir() -> Path:
@@ -154,8 +274,10 @@ def prepare_iso(
     stage: StageFn = lambda *_: None,
     log: LogFn = print,
     cancel: threading.Event | None = None,
+    stream: bool = False,
 ) -> PreparedImage:
-    """Return a verified local ISO, downloading only if the cache is stale."""
+    """Return a verified local ISO, downloading only if the cache is stale. With stream (Labs),
+    a fresh download is returned while it's still arriving: write from .live, then finish it."""
     cancel = cancel or threading.Event()
     img = resolve_image(distro, log)
 
@@ -213,6 +335,12 @@ def prepare_iso(
     if need > 0 and free < need + SPACE_MARGIN:
         raise DownloadError(f"Not enough space. Free up {(need + SPACE_MARGIN - free) / 1e9:.1f} GB "
                             f"in {cdir} and try again.")
+
+    if stream:
+        log(f"Downloading {img.iso_url} and writing at the same time (Labs)")
+        live = LiveDownload(img.iso_url, part, iso, stamp, part_stamp, expected, checksummed, size,
+                            lambda *_: None, cancel, check_sig)  # progress follows the writer
+        return PreparedImage(part, expected, img, False, from_cache=False, live=live)
 
     log(f"Downloading {img.iso_url}")
     _download(img.iso_url, part, stage, cancel)

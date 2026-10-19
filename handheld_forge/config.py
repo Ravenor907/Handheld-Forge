@@ -12,6 +12,7 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 CATALOG_PATH = PACKAGE_DIR / "distros.json"
+LABS_PATH = PACKAGE_DIR / "labs.json"  # shared with the Android app; shown once Labs is on
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class Distro:
     variants: tuple = ()
     experimental: bool = False
     preset_user: PresetUser | None = None
+    labs: bool = False
 
     @property
     def needs_password(self) -> bool:
@@ -128,6 +130,13 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
     return distros
 
 
+def load_labs(path: Path = LABS_PATH) -> list[Distro]:
+    """Labs systems (Batocera): hidden until Labs is turned on. Empty if the file is missing."""
+    if not Path(path).is_file():
+        return []
+    return [replace(d, labs=True) for d in load_catalog(path) if d.enabled]
+
+
 def experimental_variants(catalog: list[Distro]) -> list[Distro]:
     """Untested versions of catalog systems, such as CachyOS copied without a password or
     Bazzite with the account filled in. They're listed apart from the regular choices."""
@@ -179,7 +188,7 @@ def install_guide(distro: Distro, boot_menu: list[str] | None = None) -> str:
 
 def get_distro(distro_id: str, catalog: list[Distro] | None = None) -> Distro:
     catalog = catalog if catalog is not None else load_catalog()
-    for d in catalog + experimental_variants(catalog):
+    for d in catalog + experimental_variants(catalog) + load_labs():
         if d.id == distro_id:
             return d
     raise KeyError(distro_id)

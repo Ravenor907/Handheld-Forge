@@ -31,7 +31,7 @@ packages = ["handheld_forge"]
 version = { attr = "handheld_forge.__version__" }
 
 [tool.setuptools.package-data]
-handheld_forge = ["distros.json", "keys/*.pub"]
+handheld_forge = ["distros.json", "labs.json", "exfat_upcase.bin", "keys/*.pub"]
 
 [tool.ruff]
 line-length = 110

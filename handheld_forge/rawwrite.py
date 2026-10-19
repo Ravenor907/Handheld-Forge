@@ -13,15 +13,18 @@ back from the drive, bypassing the page cache, and compared with what was writte
 
 from __future__ import annotations
 
-import bz2
 import hashlib
+import lzma
 import mmap
 import os
 import threading
+import time
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 
 from .drives import Drive, find_drive
+from .imagekind import ImageKind, decoder
 from .udisks import BLOCK, NotAuthorized, UDisks, UDisksError, object_path_for
 
 CHUNK = 4 * 1024 * 1024
@@ -60,23 +63,75 @@ class _Counting:
         self.count += n or 0
         return n
 
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:  # zip files need to seek
+        return getattr(self.f, "seekable", lambda: False)()
+
+    def seek(self, *a) -> int:
+        return self.f.seek(*a)
+
+    def tell(self) -> int:
+        return self.f.tell()
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass  # the file itself is closed by its own with-block
+
     def __enter__(self):
         return self
 
     def __exit__(self, *_) -> None:
-        pass  # the file itself is closed by its own with-block
+        pass
 
 
 def _round_up(n: int) -> int:
     return (n + ALIGN - 1) // ALIGN * ALIGN
 
 
-def write_image(fd: int, image: Path, compressed: bool, stage: StageFn = lambda *_: None,
-                log: LogFn = print, cancel: threading.Event | None = None) -> int:
-    """Write image (or its bzip2 contents) to the open device fd and verify it. Returns bytes written."""
+def _kind(compressed) -> ImageKind:
+    if isinstance(compressed, ImageKind):
+        return compressed
+    return ImageKind.BZIP2 if compressed else ImageKind.DISK
+
+
+class _Timer:
+    """Where the writing time went: waiting for the image (download or unpacking) or the drive."""
+
+    def __init__(self) -> None:
+        self.read = self.write = 0.0
+        self.start = time.monotonic()
+
+    def summary(self, n: int) -> str:
+        total = max(time.monotonic() - self.start, 1e-6)
+        busy = max(self.read + self.write, 1e-9)
+        drive = int(self.write * 100 / busy)
+        who = ("the drive is the limit" if drive >= 70 else
+               "unpacking or downloading is the limit, not the drive" if drive <= 30 else
+               "the drive and unpacking are about even")
+        clock = f"{int(total) // 60}:{int(total) % 60:02d}"
+        return (f"Wrote {n / 1e9:.2f} GB in {clock} ({n / 1e6 / total:.1f} MB/s). "
+                f"{drive}% of the time waiting on the drive, {100 - drive}% on the image: {who}")
+
+
+def write_image(fd: int, image, compressed=False, stage: StageFn = lambda *_: None,
+                log: LogFn = print, cancel: threading.Event | None = None, verify: bool = True,
+                raw_size: int | None = None, expected_sha256: str | None = None) -> int:
+    """Write an image to the open device fd and read it back. `image` is a path or a function
+    returning a fresh stream; `compressed` is an ImageKind (or True for bzip2). bzip2 unpacks on
+    every core. Returns bytes written."""
     cancel = cancel or threading.Event()
+    kind = _kind(compressed)
     dev_size = os.lseek(fd, 0, os.SEEK_END)
-    file_size = image.stat().st_size
+    if callable(image):
+        opener, file_size = image, raw_size or 0
+    else:
+        path = Path(image)
+        opener, file_size = (lambda: path.open("rb")), path.stat().st_size
     buf = mmap.mmap(-1, CHUNK)  # page aligned, as O_DIRECT requires
     view = memoryview(buf)
 
@@ -88,10 +143,11 @@ def write_image(fd: int, image: Path, compressed: bool, stage: StageFn = lambda 
 
     md = hashlib.sha256()
     done = 0
-    with image.open("rb") as raw:
+    timer = _Timer()
+    with opener() as raw:
         counted = _Counting(raw)
         try:
-            src = bz2.BZ2File(counted) if compressed else counted
+            src = decoder(kind, counted)
         except (OSError, EOFError, ValueError) as e:
             raise CorruptImage(f"The image file is damaged: {e}") from e
         with src:
@@ -99,14 +155,16 @@ def write_image(fd: int, image: Path, compressed: bool, stage: StageFn = lambda 
                 if cancel.is_set():
                     raise Cancelled()
                 got = 0
+                t = time.monotonic()
                 try:
                     while got < CHUNK:
                         n = src.readinto(view[got:CHUNK])
                         if not n:
                             break
                         got += n
-                except (OSError, EOFError, ValueError) as e:
+                except (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError) as e:
                     raise CorruptImage(f"The image file is damaged: {e}") from e
+                timer.read += time.monotonic() - t
                 if not got:
                     break
                 md.update(view[:got])
@@ -115,19 +173,32 @@ def write_image(fd: int, image: Path, compressed: bool, stage: StageFn = lambda 
                     view[got:padded] = bytes(padded - got)
                 if done + padded > dev_size:
                     raise RawWriteError("This drive is too small for the image.")
+                t = time.monotonic()
                 os.pwrite(fd, view[:padded], done)
+                timer.write += time.monotonic() - t
                 done += got
-                stage("write", counted.count, file_size)
+                stage("write", counted.count, file_size or counted.count)
                 if got < CHUNK:
                     break
     written = md.hexdigest()
-    stage("write", file_size, file_size)
+    if expected_sha256 and written != expected_sha256:
+        raise RawWriteError("The image changed while it was being written. Try again.")
+    stage("write", file_size or counted.count, file_size or counted.count)
     stage("sync", 0, 0)
+    t = time.monotonic()
     os.fsync(fd)
+    timer.write += time.monotonic() - t
+    log(timer.summary(done))
+    if not verify:
+        log("Skipped reading the drive back (Labs setting)")
+        view.release()
+        buf.close()
+        return done
 
     log("Reading the drive back to confirm")
     check = hashlib.sha256()
     read = 0
+    r0 = time.monotonic()
     while read < done:
         if cancel.is_set():
             raise Cancelled()
@@ -143,7 +214,8 @@ def write_image(fd: int, image: Path, compressed: bool, stage: StageFn = lambda 
     if check.hexdigest() != written:
         raise RawWriteError("The drive didn't store the image correctly. It may be failing or "
                             "counterfeit. Try another drive.")
-    log("Every byte on the drive matches the image")
+    rate = done / 1e6 / max(time.monotonic() - r0, 1e-6)
+    log(f"Every byte on the drive matches the image (read back at {rate:.1f} MB/s)")
     return done
 
 
@@ -188,18 +260,19 @@ def _open(bus, block: str, timeout_ms: int, QDBusMessage, QDBusUnixFileDescripto
     return os.dup(fd)
 
 
-def write_drive(
+def with_drive(
     drive: Drive,
-    image: Path,
-    compressed: bool,
+    work: Callable[[int], object],
     stage: StageFn = lambda *_: None,
     log: LogFn = print,
     cancel: threading.Event | None = None,
     udisks: UDisks | None = None,
     recheck: bool = True,
     opener: Callable[[str], int] = open_device,
-) -> None:
-    """Unmount the drive, open it (password), write and verify the image, then eject."""
+    eject: bool = True,
+):
+    """Checks the drive is still a safe USB target, unmounts it, opens the whole drive (one
+    password window), runs work(fd), closes it and optionally ejects. Returns what work returns."""
     cancel = cancel or threading.Event()
     ud = udisks or UDisks()
     if recheck:
@@ -217,19 +290,44 @@ def write_drive(
         ud.unmount(object_path_for(part))
     if cancel.is_set():
         raise Cancelled()
-    log("Asking for permission to write the whole drive (Linux shows its password window)")
+    log("Asking for permission to use the whole drive (Linux shows its password window)")
     fd = opener(block)
     try:
-        log(f"Writing {image.name} to {drive.path}")
-        write_image(fd, image, compressed, stage, log, cancel)
+        result = work(fd)
     finally:
         os.close(fd)
+    if eject:
+        stage("eject", 0, 0)
+        try:
+            drive_obj = ud.drive_of(block)
+            if drive_obj:
+                ud.power_off(drive_obj)
+                log("Drive ejected")
+        except UDisksError as e:
+            log(f"Could not eject automatically ({e}). Eject it from the file manager.")
+    return result
 
-    stage("eject", 0, 0)
-    try:
-        drive_obj = ud.drive_of(block)
-        if drive_obj:
-            ud.power_off(drive_obj)
-            log("Drive ejected")
-    except UDisksError as e:
-        log(f"Could not eject automatically ({e}). Eject it from the file manager.")
+
+def write_drive(
+    drive: Drive,
+    image: Path,
+    compressed=False,
+    stage: StageFn = lambda *_: None,
+    log: LogFn = print,
+    cancel: threading.Event | None = None,
+    udisks: UDisks | None = None,
+    recheck: bool = True,
+    opener: Callable[[str], int] = open_device,
+    verify: bool = True,
+    raw_size: int | None = None,
+    name: str | None = None,
+) -> None:
+    """Unmount the drive, open it (password), write and verify the image, then eject. `image` is
+    a path, or a function returning a stream (writing while downloading) with its raw_size."""
+    cancel = cancel or threading.Event()
+
+    def work(fd: int) -> None:
+        log(f"Writing {name or Path(image).name} to {drive.path}")
+        write_image(fd, image, compressed, stage, log, cancel, verify=verify, raw_size=raw_size)
+
+    with_drive(drive, work, stage, log, cancel, udisks, recheck, opener)

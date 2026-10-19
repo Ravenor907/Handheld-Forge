@@ -6,7 +6,11 @@ on:
     paths:
       - "android/**"
       - "handheld_forge/distros.json"
+      - "handheld_forge/labs.json"
       - "handheld_forge/keys/**"
+      # The desktop app's drives get the same checks (the drive-images job).
+      - "handheld_forge/*.py"
+      - "tests/export_drive_images.py"
       - ".github/workflows/android.yml"
     tags:
       - "android-v*"
@@ -137,15 +141,23 @@ jobs:
 
   drive-images:
     # Format drive and Ventoy, checked against the real tools: fsck.exfat, the kernel's exFAT
-    # driver, Ventoy's own Ventoy2Disk.sh (byte for byte), and booting both in QEMU.
+    # driver, Ventoy's own Ventoy2Disk.sh (byte for byte), and booting both in QEMU. Once with the
+    # Android app's drives and once with the desktop app's, so both apps pass the same checks.
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        maker: [android, desktop]
+    name: drive-images (${{ matrix.maker }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
+        if: matrix.maker == 'android'
         with:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
+        if: matrix.maker == 'android'
       - name: Tools
         run: |
           sudo apt-get update
@@ -177,6 +189,7 @@ jobs:
           cp forge-test.iso forge-zip.iso && zip -j imports/forge-zip.zip forge-zip.iso && rm forge-zip.iso
           ls -l imports
       - name: Valve's real SteamOS image unpacks the same with the app's parallel bzip2 decoder
+        if: matrix.maker == 'android'
         working-directory: android
         run: |
           curl -fsSL --retry 3 -o /tmp/steamos.img.bz2 https://steamdeck-images.steamos.cloud/recovery/steamdeck-repair-latest.img.bz2
@@ -186,7 +199,38 @@ jobs:
           HF_BZ2_FILE=/tmp/steamos.img.bz2 HF_BZ2_SHA256="$want" ./gradlew --no-daemon :app:testDebugUnitTest --tests '*ParallelBzip2Test.realFileMatchesBzip2' --rerun-tasks 2>&1 | tail -5
           test -s /tmp/bz2-result.txt && echo "::notice title=SteamOS image, parallel bzip2::$(cat /tmp/bz2-result.txt)" && grep -q "^match" /tmp/bz2-result.txt
           rm -f /tmp/steamos.img.bz2
+      - name: Valve's real SteamOS image unpacks the same with the desktop app's parallel bzip2 decoder
+        if: matrix.maker == 'desktop'
+        run: |
+          curl -fsSL --retry 3 -o /tmp/steamos.img.bz2 https://steamdeck-images.steamos.cloud/recovery/steamdeck-repair-latest.img.bz2
+          want=$(bzip2 -dc /tmp/steamos.img.bz2 | sha256sum | cut -d' ' -f1)
+          echo "bzip2 -dc: $want"
+          python3 - "$want" <<'PY'
+          import hashlib, io, os, sys, time
+          from handheld_forge.pbzip2 import ParallelBz2Reader
+          t, h, n = time.monotonic(), hashlib.sha256(), 0
+          with open("/tmp/steamos.img.bz2", "rb") as raw:
+              r = ParallelBz2Reader(raw)
+              f = io.BufferedReader(r, 1 << 20)
+              while b := f.read(4 << 20):
+                  h.update(b); n += len(b)
+          secs = time.monotonic() - t
+          ok = h.hexdigest() == sys.argv[1]
+          msg = (f"{'match' if ok else 'MISMATCH'}: {n / 1e9:.2f} GB in {secs:.0f} s "
+                 f"({n / 1e6 / secs:.0f} MB/s, {os.cpu_count()} cores, {r.joins} joins)")
+          print(f"::notice title=SteamOS image, desktop parallel bzip2::{msg}")
+          sys.exit(0 if ok else 1)
+          PY
+          rm -f /tmp/steamos.img.bz2
+      - name: Make the desktop app's drives (same five)
+        if: matrix.maker == 'desktop'
+        run: |
+          sudo env PYTHONPATH="$PWD" python3 tests/export_drive_images.py "$GITHUB_WORKSPACE/img" 16777216 "$VTTAR" "$GITHUB_WORKSPACE/imports"
+          sudo chown -R "$USER" "$GITHUB_WORKSPACE/img"
+          ls -ls "$GITHUB_WORKSPACE/img"
+          for f in plain ventoy ventoy-nosb ventoy-import ventoy-bootnext; do test -s "$GITHUB_WORKSPACE/img/$f.img"; done
       - name: Make the app's drives (Format, Ventoy, Ventoy without Secure Boot, Ventoy with imported images, boot next)
+        if: matrix.maker == 'android'
         working-directory: android
         env:
           HF_IMAGE_OUT: ${{ github.workspace }}/img
@@ -205,7 +249,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: drive-images-screens
+          name: drive-images-screens-${{ matrix.maker }}
           path: screens/
           if-no-files-found: ignore
 

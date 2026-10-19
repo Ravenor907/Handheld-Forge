@@ -33,7 +33,7 @@ abstract class SyncCatalog : DefaultTask() {
 val shared = rootProject.layout.projectDirectory.dir("../handheld_forge")
 val syncCatalog = tasks.register<SyncCatalog>("syncCatalog") {
     catalogRoot.set(shared)
-    sources.from(shared.file("distros.json"), shared.dir("keys").asFileTree.matching { include("*.pub") })
+    sources.from(shared.file("distros.json"), shared.file("labs.json"), shared.dir("keys").asFileTree.matching { include("*.pub") })
 }
 
 // Signing: a release key from CI secrets if configured, otherwise the repo's

@@ -1,7 +1,8 @@
-"""Handheld Forge window: pick a system, pick a USB drive, create.
+"""Handheld Forge window: pick a system (or your own file, Ventoy, Format drive), pick a USB
+drive, create. The same screens and wording as the Android app.
 
-One panel that changes in place (choose, confirm, working, done, error), sized
-for a 7 inch handheld screen, usable by touch, mouse, keyboard or D-pad.
+One panel that changes in place (choose, confirm, working, done, error, Ventoy's files, Labs),
+sized for a 7 inch handheld screen, usable by touch, mouse, keyboard or D-pad.
 """
 
 from __future__ import annotations
@@ -18,21 +19,21 @@ from PySide6.QtGui import (
     QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QButtonGroup, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMenu,
-    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout,
-    QWidget,
+    QAbstractButton, QApplication, QButtonGroup, QCheckBox, QFileDialog, QHBoxLayout, QLabel,
+    QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, __version__
+from . import APP_NAME, __version__, jobs, settings
 from .builder import BuildError
 from .builder import Cancelled as BuildCancelled
 from .maker import make_drive
 from .rawwrite import Cancelled as RawCancelled
 from .rawwrite import RawWriteError
 from .udisks import UDisksError
-from .config import Distro, experimental_variants, load_boot_menu, load_catalog
+from .config import Distro, experimental_variants, load_boot_menu, load_catalog, load_labs
 from .download import Cancelled as DownloadCancelled
-from .download import prepare_iso
+from .download import VerificationError, cache_dir, prepare_iso
 from .progress import Progress, describe
 from .preflight import SleepBlocker, can_start, checks, explain_network, read_state
 from .drives import GB, Drive, list_drives
@@ -48,6 +49,7 @@ BONE = QColor("#ECEFF2")
 MOLTEN_A = QColor("#F5B83D")
 MOLTEN_B = QColor("#E4572E")
 DANGER = QColor("#F07167")
+INK = QColor("#1A1410")
 
 
 def molten(rect: QRectF) -> QLinearGradient:
@@ -92,6 +94,14 @@ QLabel[role="banner"] {{
 }}
 QWidget#ack {{ background: {IRON.name()}; border: 1px solid {SEAM.name()}; border-radius: 10px; }}
 QWidget#ack QLabel, QWidget#ack QCheckBox {{ background: transparent; font-size: 14px; }}
+QWidget#card {{ background: {IRON.name()}; border-radius: 14px; }}
+QWidget#card QLabel {{ background: transparent; }}
+QLabel[role="cardtitle"] {{ font-size: 16px; font-weight: 600; }}
+QLabel[role="small"] {{ color: {ASH.name()}; font-size: 13px; }}
+QLabel[role="warn"] {{ color: {MOLTEN_A.name()}; font-size: 13px; }}
+QLabel[role="error"] {{ color: {DANGER.name()}; font-size: 14px; }}
+QToolButton#labs {{ color: {MOLTEN_A.name()}; }}
+QPushButton[role="quiet"]:disabled {{ color: {SEAM.name()}; border-color: {SEAM.name()}; }}
 """
 
 # Steps shown while working. The engine's stages map onto these.
@@ -108,16 +118,22 @@ def label(text: str = "", role: str | None = None) -> QLabel:
     return lab
 
 
-def guide_html(distro: Distro) -> str:
-    """The install guide as rich text: boot menu tips, then numbered steps."""
+def guide_html(steps: list[str], ventoy: bool = False) -> str:
+    """The install guide as rich text: boot menu tips, then numbered steps. For Ventoy, how to use
+    it first, then the general boot menu tips."""
     def esc(t: str) -> str:
         return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     head = f'<p style="color:{ASH.name()}; font-size:13px; font-weight:600">'
-    menu = "".join(f"<p>{esc(line)}</p>" for line in load_boot_menu())
+    lines = load_boot_menu()
+    if ventoy:
+        lines = [x for x in lines if "Bazzite" not in x and "Secure Boot" not in x]
+    menu = "".join(f"<p>{esc(line)}</p>" for line in lines)
     num = f'<span style="color:{MOLTEN_A.name()}">'
-    steps = "".join(f"<p>{num}{i}.</span>&nbsp; {esc(s)}</p>"
-                    for i, s in enumerate(distro.install_steps, 1))
-    body = f"{head}Open the boot menu</p>{menu}{head}Then install</p>{steps}"
+    numbered = "".join(f"<p>{num}{i}.</span>&nbsp; {esc(s)}</p>" for i, s in enumerate(steps, 1))
+    if ventoy:
+        body = f"{head}How to use it</p>{numbered}{head}Open the boot menu</p>{menu}"
+    else:
+        body = f"{head}Open the boot menu</p>{menu}{head}Then install</p>{numbered}"
     return f'<div style="font-size:14px">{body}</div>'
 
 
@@ -160,19 +176,25 @@ def remember_experimental(on: bool) -> None:
 # ---------------------------------------------------------------- widgets
 
 class Tile(QAbstractButton):
-    """Selectable card. Selected = molten edge; disabled = dimmed with a 'Soon' tag."""
+    """Selectable card. Selected = molten edge; disabled = dimmed with a 'Soon' tag. A long
+    subtitle wraps onto a second line when the tile is made taller (two_lines)."""
 
-    def __init__(self, title: str, subtitle: str, icon: str | None = None, tag: str = "") -> None:
+    def __init__(self, title: str, subtitle: str, icon: str | None = None, tag: str = "",
+                 two_lines: bool = False) -> None:
         super().__init__()
         self.title, self.subtitle, self.icon, self.tag = title, subtitle, icon, tag
+        self.two_lines = two_lines
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setMinimumHeight(84)
+        self.setMinimumHeight(self._height())
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+    def _height(self) -> int:
+        return 104 if self.two_lines else 84
+
     def sizeHint(self) -> QSize:
-        return QSize(160, 84)
+        return QSize(160, self._height())
 
     def paintEvent(self, _) -> None:
         p = QPainter(self)
@@ -208,7 +230,12 @@ class Tile(QAbstractButton):
         f.setWeight(QFont.Normal)
         p.setFont(f)
         p.setPen(ASH)
-        p.drawText(QRectF(x, r.top() + 44, text_w, 22), Qt.AlignLeft | Qt.AlignVCenter, self.subtitle)
+        if self.two_lines:
+            p.drawText(QRectF(x, r.top() + 46, text_w, 42), Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+                       self.subtitle)
+        else:
+            sub = p.fontMetrics().elidedText(self.subtitle, Qt.ElideRight, text_w)
+            p.drawText(QRectF(x, r.top() + 44, text_w, 22), Qt.AlignLeft | Qt.AlignVCenter, sub)
 
         if self.tag:
             f.setPixelSize(12)
@@ -239,10 +266,10 @@ class Tile(QAbstractButton):
 class EmptySlot(QWidget):
     """Dashed placeholder where a drive will appear once plugged in."""
 
-    def __init__(self) -> None:
+    def __init__(self, text: str = "Plug in a USB drive of 16 GB or more") -> None:
         super().__init__()
         self.setMinimumHeight(84)
-        self.text = "Plug in a USB drive of 16 GB or more"
+        self.text = text
 
     def paintEvent(self, _) -> None:
         p = QPainter(self)
@@ -255,7 +282,7 @@ class EmptySlot(QWidget):
         f.setPixelSize(15)
         p.setFont(f)
         p.setPen(ASH)
-        p.drawText(r, Qt.AlignCenter, self.text)
+        p.drawText(r.adjusted(16, 0, -16, 0), Qt.AlignCenter | Qt.TextWordWrap, self.text)
 
 
 class StatusMark(QWidget):
@@ -432,32 +459,161 @@ class StepTrack(QWidget):
             p.drawText(QRectF(x - 50, y + 12, 100, 20), Qt.AlignCenter, self.steps[i])
 
 
+class Switch(QAbstractButton):
+    """The on/off pill from the Android app's Labs screen."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFixedSize(48, 28)
+
+    def paintEvent(self, _) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(BONE, 1.5) if self.hasFocus() else Qt.NoPen)
+        p.setBrush(molten(r) if self.isChecked() else SEAM)
+        p.drawRoundedRect(r, 14, 14)
+        x = r.right() - 25 if self.isChecked() else r.left() + 3
+        knob = QRectF(x, r.top() + 3, 22, 22)
+        p.setPen(Qt.NoPen)
+        p.setBrush(INK if self.isChecked() else ASH)
+        p.drawEllipse(knob)
+
+
+class Card(QWidget):
+    """A dark rounded row: a title, a line of detail, an optional amber note, and a control on
+    the right. Used for Labs settings and tools, and for files on the Ventoy screen."""
+
+    clicked = Signal()
+
+    def __init__(self, title: str, detail: str = "", control: QWidget | None = None) -> None:
+        super().__init__()
+        self.setObjectName("card")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.selected = False
+        row = QHBoxLayout(self)
+        row.setContentsMargins(16, 12, 10, 12)
+        col = QVBoxLayout()
+        col.setSpacing(3)
+        self.title = label(title, "cardtitle")
+        self.detail = label(detail, "small")
+        self.note = label("", "warn")
+        self.note.setVisible(False)
+        col.addWidget(self.title)
+        col.addWidget(self.detail)
+        col.addWidget(self.note)
+        row.addLayout(col, 1)
+        if control is not None:
+            row.addSpacing(10)
+            row.addWidget(control, 0, Qt.AlignVCenter)
+        self.control = control
+
+    def set_note(self, text: str | None) -> None:
+        self.note.setText(text or "")
+        self.note.setVisible(bool(text))
+
+    def set_selected(self, on: bool) -> None:
+        self.selected = on
+        self.update()
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        if self.selected:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            r = QRectF(self.rect()).adjusted(1.25, 1.25, -1.25, -1.25)
+            p.setPen(QPen(molten(r), 2.5))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r, 14, 14)
+
+
+def gb(n: int) -> str:
+    return f"{n / 1e9:.1f} GB"
+
+
 # ---------------------------------------------------------------- worker
+
+SYSTEM, FILE, VENTOY, FORMAT = "system", "file", "ventoy", "format"
+IMPORT, TEST, CHECK = "import", "test", "check"
+RAW_JOBS = {FILE, VENTOY, TEST, CHECK}
+
+
+def ventoy_steps(secure_boot: bool) -> list[str]:
+    return [
+        "Add images: click Add images below, or copy ISO files onto the drive's Ventoy partition.",
+        "Plug the drive into your handheld and start it from USB.",
+        "If Secure Boot is on, the first start shows a blue key screen: choose Enroll key from disk, "
+        "open VTOYEFI, pick ENROLL_THIS_KEY_IN_MOKMANAGER.cer, confirm, and restart. Only needed once "
+        "per handheld."
+        if secure_boot else
+        "This drive was made without Secure Boot support, so turn Secure Boot off in the BIOS first.",
+        "Ventoy shows a menu of the images on the drive. Pick one to start it. If the controls don't work in "
+        "that menu, click an image under Add images and Ventoy will start it on its own.",
+    ]
+
 
 class Worker(QObject):
     stage = Signal(str, int, int)
     log = Signal(str)
     finished = Signal(str, str)  # status: ok | cancelled | error, message
 
-    def __init__(self, distro: Distro, drive: Drive) -> None:
+    def __init__(self, distro: Distro | None, drive: Drive, job: str = SYSTEM, **args) -> None:
         super().__init__()
-        self.distro, self.drive = distro, drive
+        self.distro, self.drive, self.job, self.args = distro, drive, job, args
         self.cancel = threading.Event()
+        self.result = None  # what the job returned (Ventoy's version, a test report, names added)
+        self.settings = settings.load()
+
+    def _run_job(self):
+        s, st, lg, c = self.settings, self.stage.emit, self.log.emit, self.cancel
+        if self.job == SYSTEM:
+            stream = s.streaming and self.distro.needs_password
+            img = prepare_iso(self.distro, st, lg, c, stream=stream)
+            if c.is_set():
+                raise DownloadCancelled()
+            jobs.log_drive(self.drive, lg)
+            make_drive(self.distro, self.drive, img.path, st, lg, c, verify=s.verify, live=img.live)
+            return None
+        if self.job == FILE:
+            return jobs.write_own_file(self.drive, self.args["file"], st, lg, c, verify=s.verify)
+        if self.job == VENTOY:
+            return jobs.install_ventoy(self.drive, self.args["secure_boot"], st, lg, c)
+        if self.job == FORMAT:
+            return jobs.format_drive(self.drive, st, lg, c)
+        if self.job == IMPORT:
+            return jobs.import_images(self.drive, self.args["plans"], st, lg, c, verify=s.verify)
+        if self.job == TEST:
+            return jobs.test_drive(self.drive, st, lg, c)
+        if self.job == CHECK:
+            return jobs.check_drive(self.drive, self.args["image"], st, lg, c)
+        raise ValueError(self.job)
 
     def run(self) -> None:
         try:
             with SleepBlocker():
-                img = prepare_iso(self.distro, self.stage.emit, self.log.emit, self.cancel)
-                if self.cancel.is_set():
-                    raise DownloadCancelled()
-                make_drive(self.distro, self.drive, img.path, self.stage.emit, self.log.emit, self.cancel)
+                self.result = self._run_job()
             self.finished.emit("ok", "")
         except DownloadCancelled:
             self.finished.emit("cancelled", "Download paused. It picks up where it left off next time.")
         except (BuildCancelled, RawCancelled):
-            self.finished.emit("cancelled", "Stopped. The drive is unfinished, so create it again "
-                                            "before booting from it.")
-        except (BuildError, RawWriteError, UDisksError) as e:
+            if self.job == TEST:
+                msg = "Stopped. The drive holds test data now; use Format drive to make it usable."
+            elif self.job == CHECK:
+                msg = "Stopped. Nothing on the drive was changed."
+            elif self.job == IMPORT:
+                msg = "Stopped. Images that finished copying are on the drive; the one in progress isn't."
+            else:
+                msg = "Stopped. The drive is unfinished, so create it again before booting from it."
+            self.finished.emit("cancelled", msg)
+        except (BuildError, RawWriteError, UDisksError, VerificationError) as e:
             self.finished.emit("error", str(e))
         except urllib.error.HTTPError as e:
             self.finished.emit("error", f"The download server answered {e.code}. Try again later.")
@@ -465,7 +621,30 @@ class Worker(QObject):
             self.log.emit(f"{type(e).__name__}: {e}")
             self.finished.emit("error", explain_network(str(e)))
         except Exception as e:  # anything unexpected still lands in the window
-            self.finished.emit("error", f"{type(e).__name__}: {e}")
+            self.log.emit(f"{type(e).__name__}: {e}")
+            self.finished.emit("error", str(e) or type(e).__name__)
+
+
+class Task(QObject):
+    """Runs a quick drive operation (reading Ventoy's files, removing one) off the window's thread."""
+
+    done = Signal(object, object)  # result, error
+
+    def __init__(self, fn, parent: QObject) -> None:
+        super().__init__(parent)
+        self.fn = fn
+
+    def start(self) -> None:
+        def run():
+            try:
+                r, err = self.fn(), None
+            except Exception as e:  # shown in the window
+                r, err = None, e
+            self.done.emit(r, err)
+        threading.Thread(target=run, daemon=True).start()
+
+
+LABS_TAPS = 10
 
 
 # ---------------------------------------------------------------- window
@@ -474,32 +653,53 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(620, 660)
+        self.resize(620, 700)
         self.setMinimumSize(480, 480)
         self.catalog = load_catalog()
         self.experimental = experimental_variants(self.catalog)
+        self.labs_systems = load_labs()
+        self.settings = settings.load()
         self.thread: QThread | None = None
         self.worker: Worker | None = None
         self.drives: list[Drive] = []
+        self.ventoy_paths: set[str] = set()
+        self.own_file: jobs.OwnFile | None = None
+        self.picked: list[jobs.ImportPlan] = []
+        self.ventoy_info: jobs.VentoyInfo | None = None
+        self.secure_boot = True
         self.progress = Progress()
         self._step = 0
+        self._tasks: list[Task] = []
 
         self.stack = QStackedWidget()
         self.choose_page = self._build_choose()
         self.confirm_page = self._build_confirm()
         self.work_page = self._build_work()
         self.result_page = self._build_result()
-        for page in (self.choose_page, self.confirm_page, self.work_page, self.result_page):
+        self.ventoy_page = self._build_ventoy()
+        self.labs_page = self._build_labs()
+        for page in (self.choose_page, self.confirm_page, self.work_page, self.result_page,
+                     self.ventoy_page, self.labs_page):
             self.stack.addWidget(page)
 
         root = QWidget()
         lay = QVBoxLayout(root)
         lay.setContentsMargins(32, 22, 32, 28)
         head = QHBoxLayout()
+        head.setSpacing(6)
         head.addWidget(label(APP_NAME, "brand"))
         head.addStretch()
-        # The version doubles as the app menu: updating and uninstalling live here.
-        self.app_menu_btn = QToolButton(text=f"v{__version__}  \u25BE")
+        self.labs_btn = QToolButton(text="Labs")
+        self.labs_btn.setObjectName("labs")
+        self.labs_btn.setCursor(Qt.PointingHandCursor)
+        self.labs_btn.clicked.connect(self._open_labs)
+        head.addWidget(self.labs_btn)
+        # Tapping the version ten times turns Labs on, as on Android. The arrow opens the app menu.
+        self.version_btn = QToolButton(text=f"v{__version__}")
+        self.version_btn.setCursor(Qt.PointingHandCursor)
+        self.version_btn.clicked.connect(self._tap_version)
+        head.addWidget(self.version_btn)
+        self.app_menu_btn = QToolButton(text="▾")
         self.app_menu_btn.setPopupMode(QToolButton.InstantPopup)
         self.app_menu_btn.setCursor(Qt.PointingHandCursor)
         menu = QMenu(self.app_menu_btn)
@@ -508,12 +708,15 @@ class MainWindow(QMainWindow):
         self.hide_exp_action = menu.addAction("Hide experimental options",
                                               lambda: self._set_experimental(False))
         self.hide_exp_action.setVisible(not self.exp_box.isHidden())
+        self.labs_off_action = menu.addAction("Turn off Labs", lambda: self._set_labs(False))
         self.app_menu_btn.setMenu(menu)
         head.addWidget(self.app_menu_btn)
         lay.addLayout(head)
         lay.addSpacing(14)
         lay.addWidget(self.stack, 1)
         self.setCentralWidget(root)
+        self._vtaps, self._last_vtap = 0, 0.0
+        self._show_labs(self.settings.labs)
 
         QShortcut(QKeySequence(Qt.Key_Escape), self, activated=self._escape)
         self.refresh_drives()
@@ -526,7 +729,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(12)
+        lay.setSpacing(10)
         lay.addWidget(label("Pick a system and a USB drive.", "title"))
         lay.addSpacing(6)
 
@@ -563,15 +766,46 @@ class MainWindow(QMainWindow):
         box.addLayout(row)
         lay.addWidget(self.exp_box)
         self.exp_box.setVisible(bool(self.experimental) and experimental_unlocked())
+        # Labs systems (Batocera): a full-width row each, tagged, once Labs is on.
+        self.labs_box = QWidget()
+        box = QVBoxLayout(self.labs_box)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(10)
+        for d in self.labs_systems:
+            t = Tile(d.name, d.edition, tag="Labs")
+            t.setToolTip(d.warning or "")
+            t.setProperty("distro", d.id)
+            self.os_group.addButton(t)
+            box.addWidget(t)
+        lay.addWidget(self.labs_box)
         self._taps, self._last_tap = 0, 0.0
         bazzite = next((b for b in self.os_group.buttons() if b.property("distro") == UNLOCK_DISTRO), None)
         if bazzite:
             bazzite.clicked.connect(self._tap_unlock)
+
+        # Anything else: an ISO or disk image already on this computer.
+        self.file_tile = Tile("Your own file", "Pick an ISO or disk image on this computer")
+        self.file_tile.setProperty("tool", FILE)
+        self.file_tile.pressed.connect(lambda: setattr(self, "_file_was_checked", self.file_tile.isChecked()))
+        self.file_tile.clicked.connect(self._file_tile_clicked)
+        self.os_group.addButton(self.file_tile)
+        lay.addWidget(self.file_tile)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self.ventoy_tile = Tile("Ventoy", "Multi-boot: many images, one drive", two_lines=True)
+        self.ventoy_tile.setProperty("tool", VENTOY)
+        self.format_tile = Tile("Format drive", "Empty exFAT drive for files", two_lines=True)
+        self.format_tile.setProperty("tool", FORMAT)
+        for t in (self.ventoy_tile, self.format_tile):
+            self.os_group.addButton(t)
+            row.addWidget(t)
+        lay.addLayout(row)
+
         first = next((b for b in self.os_group.buttons() if b.isEnabled()), None)
         if first:
             first.setChecked(True)
         self.os_group.buttonToggled.connect(lambda *_: self._update_ready())
-        lay.addSpacing(10)
+        lay.addSpacing(4)
 
         self.drive_box = QWidget()
         self.drive_list = QVBoxLayout(self.drive_box)
@@ -588,6 +822,20 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.drive_box)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         lay.addWidget(scroll, 1)
+
+        # A Ventoy drive can take more images without being erased.
+        self.ventoy_bar = QWidget()
+        self.ventoy_bar.setObjectName("card")
+        self.ventoy_bar.setAttribute(Qt.WA_StyledBackground, True)
+        bar = QHBoxLayout(self.ventoy_bar)
+        bar.setContentsMargins(16, 8, 8, 8)
+        bar.addWidget(label("This drive has Ventoy. Add OS images to it without erasing anything.",
+                            "hint"), 1)
+        add = quiet_button("Add images")
+        add.clicked.connect(self._open_ventoy)
+        bar.addWidget(add)
+        self.ventoy_bar.setVisible(False)
+        lay.addWidget(self.ventoy_bar)
 
         self.empty_hint = label("", "hint")
         lay.addWidget(self.empty_hint)
@@ -617,6 +865,24 @@ class MainWindow(QMainWindow):
         body = QWidget()
         outer, lay = lay, QVBoxLayout(body)
         lay.setContentsMargins(0, 0, 8, 0)
+        # Ventoy: with or without Secure Boot support, as on Android.
+        self.sb_box = QWidget()
+        sb = QVBoxLayout(self.sb_box)
+        sb.setContentsMargins(0, 0, 0, 10)
+        sb.addWidget(label("Secure Boot support", "brand"))
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self.sb_group = QButtonGroup(self)
+        self.sb_on = Tile("On", "Recommended. Enroll a key once", two_lines=True)
+        self.sb_off = Tile("Off", "Needs Secure Boot off in BIOS", two_lines=True)
+        for t, on in ((self.sb_on, True), (self.sb_off, False)):
+            self.sb_group.addButton(t)
+            row.addWidget(t)
+            t.clicked.connect(lambda _=False, v=on: self._set_secure_boot(v))
+        sb.addLayout(row)
+        self.sb_text = label("", "hint")
+        sb.addWidget(self.sb_text)
+        lay.addWidget(self.sb_box)
         self.confirm_warning = label("", "banner")
         lay.addWidget(self.confirm_warning)
         lay.addSpacing(6)
@@ -634,11 +900,11 @@ class MainWindow(QMainWindow):
         ack_lay = QHBoxLayout(ack_row)
         ack_lay.setContentsMargins(12, 10, 12, 10)
         self.ack = QCheckBox()
-        ack_text = label("I'll leave the drive plugged in and this window open until it's done. "
-                         "This can take 30 minutes or more.")
-        ack_text.mousePressEvent = lambda _: self.ack.toggle()
+        self.ack_text = label("I'll leave the drive plugged in and this window open until it's done. "
+                              "This can take 30 minutes or more.")
+        self.ack_text.mousePressEvent = lambda _: self.ack.toggle()
         ack_lay.addWidget(self.ack, 0, Qt.AlignTop)
-        ack_lay.addWidget(ack_text, 1)
+        ack_lay.addWidget(self.ack_text, 1)
         self.ack.toggled.connect(lambda _: self._refresh_checks(reread=False))
         lay.addWidget(ack_row)
         lay.addStretch(1)
@@ -720,11 +986,17 @@ class MainWindow(QMainWindow):
         inner.addSpacing(16)
         self.result_title = label("", "title")
         self.result_text = label("", "hint")
+        self.result_lines = label("")  # a test report or the images added
+        self.result_lines.setStyleSheet("font-size: 15px;")
+        self.result_after = label("", "hint")
         self.result_guide = label("")
         self.result_guide.setTextFormat(Qt.RichText)
         inner.addWidget(self.result_title)
         inner.addSpacing(8)
         inner.addWidget(self.result_text)
+        inner.addSpacing(10)
+        inner.addWidget(self.result_lines)
+        inner.addWidget(self.result_after)
         inner.addSpacing(14)
         inner.addWidget(self.result_guide)
         inner.addStretch(2)
@@ -741,11 +1013,112 @@ class MainWindow(QMainWindow):
         self.result_details = quiet_button("Details")
         self.result_details.clicked.connect(
             lambda: self.result_log.setVisible(not self.result_log.isVisible()))
+        self.result_done = quiet_button("Done")
+        self.result_done.clicked.connect(self._back_to_start)
         self.result_btn = MoltenButton("Make another")
-        self.result_btn.clicked.connect(self._back_to_start)
+        self.result_btn.clicked.connect(self._result_action)
         row.addWidget(self.result_details)
+        row.addWidget(self.result_done)
         row.addWidget(self.result_btn, 1)
         lay.addLayout(row)
+        return page
+
+    def _build_ventoy(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(label("Add images to Ventoy", "title"))
+        lay.addSpacing(8)
+        self.v_info = label("", "hint")
+        lay.addWidget(self.v_info)
+        self.v_error = label("", "error")
+        self.v_error.setVisible(False)
+        lay.addWidget(self.v_error)
+        lay.addSpacing(10)
+        body = QWidget()
+        self.v_body = QVBoxLayout(body)
+        self.v_body.setContentsMargins(0, 0, 8, 0)
+        self.v_body.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(body)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lay.addWidget(scroll, 1)
+        self.v_space = label("", "error")
+        self.v_space.setVisible(False)
+        lay.addWidget(self.v_space)
+        lay.addSpacing(12)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        back = quiet_button("Back")
+        back.clicked.connect(self._back_to_start)
+        self.v_more = quiet_button("Pick more")
+        self.v_more.clicked.connect(self._pick_images)
+        self.v_go = MoltenButton("Pick images")
+        self.v_go.clicked.connect(self._ventoy_go)
+        row.addWidget(back)
+        row.addWidget(self.v_more)
+        row.addWidget(self.v_go, 1)
+        lay.addLayout(row)
+        self._confirm_remove: str | None = None
+        self._v_busy = False
+        return page
+
+    def _build_labs(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(label("Labs", "title"))
+        lay.addSpacing(8)
+        lay.addWidget(label("Experimental settings and tools. They work, but they've had less testing than "
+                            "the rest of the app.", "hint"))
+        lay.addSpacing(14)
+        body = QWidget()
+        b = QVBoxLayout(body)
+        b.setContentsMargins(0, 0, 8, 0)
+        b.setSpacing(10)
+        b.addWidget(label("Settings", "brand"))
+        self.stream_switch = Switch()
+        self.stream_card = Card(
+            "Write while downloading",
+            "Starts writing as the download comes in, so most of the download time disappears. The download "
+            "is still checked at the end; if it fails, make the drive again. For systems written byte "
+            "for byte.",
+            self.stream_switch)
+        self.skip_switch = Switch()
+        self.skip_card = Card(
+            "Skip the read-back check",
+            "Saves close to half the time after writing. A fake or failing drive won't be caught, so only "
+            "use it with a drive you trust.", self.skip_switch)
+        for card, sw, key in ((self.stream_card, self.stream_switch, "stream"),
+                              (self.skip_card, self.skip_switch, "skip_check")):
+            sw.setChecked(getattr(self.settings, key))
+            sw.toggled.connect(lambda on, k=key: self._set_setting(k, on))
+            card.clicked.connect(sw.toggle)
+            b.addWidget(card)
+        b.addSpacing(10)
+        b.addWidget(label("Tools", "brand"))
+        self.test_btn = quiet_button("Test")
+        self.test_btn.clicked.connect(self._labs_test)
+        self.test_card = Card("Test a drive", "", self.test_btn)
+        self.check_btn = quiet_button("Check")
+        self.check_btn.clicked.connect(self._labs_check)
+        self.check_card = Card("Check a drive", "", self.check_btn)
+        b.addWidget(self.test_card)
+        b.addWidget(self.check_card)
+        self.labs_hint = label("", "hint")
+        b.addWidget(self.labs_hint)
+        b.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(body)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lay.addWidget(scroll, 1)
+        lay.addSpacing(12)
+        back = quiet_button("Back")
+        back.clicked.connect(self._back_to_start)
+        lay.addWidget(back)
+        self._ask_test = False
         return page
 
     # ------------------------------------------------------------ state
@@ -777,16 +1150,96 @@ class MainWindow(QMainWindow):
                 next(b for b in self.os_group.buttons() if b.isEnabled()).setChecked(True)
             self.empty_hint.setVisible(False)
 
+    def _tap_version(self) -> None:
+        """Ten taps in a row on the version turn Labs on, like the Android app."""
+        if self.settings.labs:
+            self._open_labs()
+            return
+        now = time.monotonic()
+        self._vtaps = self._vtaps + 1 if now - self._last_vtap < TAP_GAP else 1
+        self._last_vtap = now
+        left = LABS_TAPS - self._vtaps
+        if left <= 0:
+            self._set_labs(True)
+            text = "Labs is on. Open it from Labs at the top, next to the version."
+        elif left <= 5:
+            text = f"{left} more tap{'s' if left > 1 else ''} to turn on Labs"
+        else:
+            return
+        if self.stack.currentWidget() is self.choose_page:
+            self.empty_hint.setText(text)
+            self.empty_hint.setVisible(True)
+
+    def _set_labs(self, on: bool) -> None:
+        self.settings.labs = on
+        settings.save(self.settings)
+        self._vtaps = 0
+        self._show_labs(on)
+        if not on:
+            d = self._distro()
+            if d and d.labs:
+                next(b for b in self.os_group.buttons() if b.isEnabled()).setChecked(True)
+            if self.stack.currentWidget() is self.labs_page:
+                self._back_to_start()
+
+    def _show_labs(self, on: bool) -> None:
+        self.labs_btn.setVisible(on)
+        self.labs_off_action.setVisible(on)
+        self.labs_box.setVisible(on and bool(self.labs_systems))
+
+    def _set_setting(self, key: str, on: bool) -> None:
+        setattr(self.settings, key, on)
+        settings.save(self.settings)
+
+    def _choice(self) -> str:
+        b = self.os_group.checkedButton()
+        return (b.property("tool") or SYSTEM) if b else SYSTEM
+
     def _distro(self) -> Distro | None:
         b = self.os_group.checkedButton()
-        return next((d for d in self.catalog + self.experimental if b and d.id == b.property("distro")), None)
+        every = self.catalog + self.experimental + self.labs_systems
+        return next((d for d in every if b and d.id == b.property("distro")), None)
 
     def _drive(self) -> Drive | None:
         b = self.drive_group.checkedButton()
         return next((d for d in self.drives if b and d.path == b.property("path")), None)
 
     def _update_ready(self) -> None:
-        self.create_btn.setEnabled(self._distro() is not None and self._drive() is not None)
+        choice, drive = self._choice(), self._drive()
+        ok = {SYSTEM: self._distro() is not None, FILE: self.own_file is not None}.get(choice, True)
+        self.create_btn.setEnabled(ok and drive is not None)
+        self.create_btn.setText({FILE: "Write to drive", VENTOY: "Install Ventoy",
+                                 FORMAT: "Format drive"}.get(choice, "Create boot drive"))
+        self.ventoy_bar.setVisible(drive is not None and drive.path in self.ventoy_paths)
+
+    def _file_tile_clicked(self) -> None:
+        if self.own_file is None or getattr(self, "_file_was_checked", False):
+            self._pick_own_file()
+
+    def _pick_own_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick an ISO or disk image", str(Path.home()),
+            "Images (*.iso *.img *.raw *.bin *.gz *.xz *.bz2 *.zip *.vhd *.vhdx);;All files (*)")
+        if path:
+            self.set_own_file(Path(path))
+        elif self.own_file is None:
+            next(b for b in self.os_group.buttons() if b.isEnabled()).setChecked(True)
+
+    def set_own_file(self, path: Path) -> None:
+        try:
+            f = jobs.look_at(path)
+        except (OSError, RawWriteError) as e:
+            self.empty_hint.setText(str(e))
+            self.empty_hint.setVisible(True)
+            return
+        self.own_file = f
+        self.file_tile.title = f.path.name
+        self.file_tile.subtitle = f"{f.kind.label}, {gb(f.size)}"
+        self.file_tile.tag = "Change"
+        self.file_tile.setChecked(True)
+        self.file_tile.update()
+        self.empty_hint.setVisible(False)
+        self._update_ready()
 
     def _poll_drives(self) -> None:
         if self.stack.currentWidget() is self.choose_page:
@@ -802,13 +1255,21 @@ class MainWindow(QMainWindow):
             return
         selected = self._drive().path if self._drive() else None
         self.drives = drives
+        self.ventoy_paths = set()
+        for d in drives:
+            try:
+                if jobs.ventoy_parts(d):
+                    self.ventoy_paths.add(d.path)
+            except Exception:  # noqa: BLE001 - only a hint on the tile
+                pass
         for b in self.drive_group.buttons():
             self.drive_group.removeButton(b)
             self.drive_list.removeWidget(b)
             b.hide()
             b.deleteLater()
         for d in drives:
-            t = Tile(d.model, d.size_label, icon="usb")
+            sub = d.size_label + (", has Ventoy" if d.path in self.ventoy_paths else "")
+            t = Tile(d.model, sub, icon="usb")
             t.setProperty("path", d.path)
             self.drive_group.addButton(t)
             self.drive_list.insertWidget(self.drive_list.count() - 2, t)
@@ -821,41 +1282,78 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ flow
 
     def _ask_confirm(self) -> None:
-        distro, drive = self._distro(), self._drive()
-        if not distro or not drive:
+        choice, distro, drive = self._choice(), self._distro(), self._drive()
+        if not drive or (choice == SYSTEM and not distro) or (choice == FILE and not self.own_file):
             return
-        if drive.size < distro.min_drive_gb * GB * 0.93:
+        if choice == SYSTEM and drive.size < distro.min_drive_gb * GB * 0.93:
             self.empty_hint.setText(f"That drive is too small. {distro.name} needs "
                                     f"{distro.min_drive_gb} GB or more.")
             self.empty_hint.setVisible(True)
             return
+        if choice == VENTOY and drive.size < 1 * GB:
+            self.empty_hint.setText("Ventoy needs a drive of at least 1 GB.")
+            self.empty_hint.setVisible(True)
+            return
         self.confirm_title.setText("Erase this drive?")
-        self.confirm_text.setText(f"Everything on it will be replaced with {distro.name}.")
+        name = self.own_file.path.name if choice == FILE else distro.name if distro else ""
+        self.confirm_text.setText({
+            FORMAT: "Everything on it will be erased, leaving one empty exFAT drive named USB DRIVE that "
+                    "works on Windows, Mac, Linux and SteamOS.",
+            VENTOY: "Everything on it will be replaced with the latest Ventoy. Afterwards add images with "
+                    "this app (or by copying files) and choose one when you start from it.",
+        }.get(choice, f"Everything on it will be replaced with {name}."))
         self.confirm_tile.title, self.confirm_tile.subtitle = drive.model, drive.size_label
         self.confirm_tile.update()
+        self.sb_box.setVisible(choice == VENTOY)
+        self._set_secure_boot(self.secure_boot)
         notes = []
-        if distro.needs_password:
-            notes.append(f"{distro.name} is written byte for byte, so Linux will ask for your password "
-                         "once, when writing starts. Nothing else needs it.")
-        if distro.warning:
+        if choice == SYSTEM and distro.needs_password or choice in (FILE, VENTOY):
+            what = "Ventoy is installed" if choice == VENTOY else f"{name} is written"
+            notes.append(f"{what} byte for byte, so Linux will ask for your password once, when writing "
+                         "starts. Nothing else needs it.")
+        if choice == SYSTEM and distro.warning:
             notes.append(distro.warning)
+        if choice == FILE and self.own_file.warning:
+            notes.append(self.own_file.warning)
         self.confirm_warning.setText("\n\n".join(notes))
         self.confirm_warning.setVisible(bool(notes))
+        long_job = choice in (SYSTEM, FILE)
+        self.ack_text.setText("I'll leave the drive plugged in and this window open until it's done."
+                              + (" This can take 30 minutes or more." if long_job else ""))
+        self.erase_btn.setText({FORMAT: "Erase and format", VENTOY: "Erase and install",
+                                FILE: "Erase and write"}.get(choice, "Erase and create"))
         self.ack.setChecked(False)
         self._refresh_checks()
         self.check_timer.start()
         self.stack.setCurrentWidget(self.confirm_page)
         self.ack.setFocus()
 
+    def _set_secure_boot(self, on: bool) -> None:
+        self.secure_boot = on
+        (self.sb_on if on else self.sb_off).setChecked(True)
+        self.sb_text.setText(
+            "Starts whether Secure Boot is on or off. On a handheld with Secure Boot on, the first start "
+            "asks you to enroll Ventoy's key once." if on else
+            "No key step, but the drive only starts once Secure Boot is turned off in the BIOS. The Steam "
+            "Deck doesn't use Secure Boot, so either works there.")
+
+    def _needs_download(self) -> bool:
+        return self._choice() in (SYSTEM, VENTOY)
+
     def _refresh_checks(self, reread: bool = True) -> None:
         if reread or not hasattr(self, "_checks"):
-            self._checks = checks(read_state())
-        for lab, c in zip(self.check_labels, self._checks, strict=True):
+            self._checks = checks(read_state(), download=self._needs_download())
+        for i, lab in enumerate(self.check_labels):
+            if i >= len(self._checks):
+                lab.setVisible(False)
+                continue
+            c = self._checks[i]
             mark, color = ("✓", MOLTEN_A) if c.ok else (("✕", DANGER) if c.required else ("!", ASH))
             detail_color = ASH if c.ok or not c.required else DANGER
             lab.setText(f'<span style="color:{color.name()}; font-weight:700">{mark}</span>&nbsp; '
                         f"<b>{c.title}</b><br>"
                         f'<span style="color:{detail_color.name()}">{c.detail}</span>')
+            lab.setVisible(True)
         self.erase_btn.setEnabled(can_start(self._checks, self.ack.isChecked()))
 
     def _leave_confirm(self) -> None:
@@ -863,31 +1361,48 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.choose_page)
 
     def start(self) -> None:
-        distro, drive = self._distro(), self._drive()
-        if not distro or not drive or not self.erase_btn.isEnabled():
+        if not self.erase_btn.isEnabled():
+            return
+        choice, distro, drive = self._choice(), self._distro(), self._drive()
+        if not drive:
             return
         self.check_timer.stop()
+        if choice == SYSTEM:
+            if not distro:
+                return
+            self._run(SYSTEM, distro, drive, f"Creating {distro.name} on {drive.model}")
+        elif choice == FILE:
+            self._run(FILE, None, drive, f"Writing {self.own_file.path.name} to {drive.model}",
+                      file=self.own_file)
+        elif choice == VENTOY:
+            self._run(VENTOY, None, drive, f"Installing Ventoy on {drive.model}",
+                      secure_boot=self.secure_boot)
+        else:
+            self._run(FORMAT, None, drive, f"Formatting {drive.model}")
+
+    def _run(self, job: str, distro: Distro | None, drive: Drive, title: str, **args) -> None:
         self.log_view.clear()
         self.log_view.setVisible(False)
-        self._append(f"Creating {distro.name} on {drive.path}")
-        self.work_title.setText(f"Creating {distro.name} on {drive.model}")
+        self._append(title)
+        self.work_title.setText(title)
         self.percent.setText("0%")
-        self._last = ("lookup", 0, 0)
+        self._last = ("lookup", 0, 0) if job in (SYSTEM, VENTOY) else ("prepare", 0, 0)
         self.work_last.setText("")
         self.status_timer.start()
-        self.track.steps = RAW_STEPS if distro.needs_password else STEPS
+        raw = job in RAW_JOBS or (job == SYSTEM and distro.needs_password)
+        self.track.steps = RAW_STEPS if raw or job == FORMAT else STEPS
         self.track.set_step(0)
         self._step = 0
         self.progress = Progress()
         self.bar.set_value(0, busy=True)
-        self._render_status()
         self.cancel_btn.setEnabled(True)
         self.cancel_btn.setText("Stop")
         self._stop_armed = False
         self.stack.setCurrentWidget(self.work_page)
 
         self.thread = QThread(self)
-        self.worker = Worker(distro, drive)
+        self.worker = Worker(distro, drive, job, **args)
+        self._render_status()
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.stage.connect(self.on_stage)
@@ -932,19 +1447,34 @@ class MainWindow(QMainWindow):
 
     def _render_status(self) -> None:
         stage, done, total = getattr(self, "_last", ("lookup", 0, 0))
-        distro = self.worker.distro if self.worker else None
+        w = self.worker
+        job = getattr(w, "job", SYSTEM)
+        distro = w.distro if w else None
+        password = job in RAW_JOBS or bool(distro and distro.needs_password)
+        name = distro.name if distro else "Ventoy" if job == VENTOY else ""
         headline, detail = describe(
-            stage, done, total, self.progress.elapsed,
-            needs_password=bool(distro and distro.needs_password), name=distro.name if distro else "",
+            stage, done, total, self.progress.elapsed, needs_password=password, name=name,
             time_left=self.progress.time_left(done, total))
+        if job == IMPORT:
+            headline = headline.replace("Copying files to the drive", "Copying images to the drive")
+        if job == TEST:
+            headline = headline.replace("Writing the image to the drive", "Writing test data")
+            headline = headline.replace("Reading the drive back to confirm", "Reading the test data back")
+        if job == CHECK:
+            headline = headline.replace("Reading the drive back to confirm",
+                                        "Comparing the drive with the image")
         self.work_status.setText(headline)
         self.work_detail.setText(detail)
 
     def on_finished(self, status: str, message: str) -> None:
         self.thread.quit()
         self.thread.wait()
-        distro, drive = self.worker.distro, self.worker.drive
+        w = self.worker
+        distro, drive = w.distro, w.drive
+        job, result = getattr(w, "job", SYSTEM), getattr(w, "result", None)
+        args = getattr(w, "args", {})
         self.thread = self.worker = None
+        self._finished_job = (job, drive, args)
         self.bar.stop()
         self.status_timer.stop()
         self.result_log.setPlainText(self.log_view.toPlainText())
@@ -952,28 +1482,318 @@ class MainWindow(QMainWindow):
         self.result_btn.danger = False
         self.result_mark.set_kind(status)
         self.result_guide.setVisible(False)
-        if status == "ok":
+        self.result_lines.setVisible(False)
+        self.result_after.setVisible(False)
+        self.result_done.setVisible(False)
+        ok = status == "ok"
+        steps: list[str] = []
+        bad_test = job == TEST and ok and result is not None and (result.fake or result.failing)
+        if job == CHECK and ok and result is not None:  # a difference is a finding, shown as an error
+            status, ok = "error", False
+            self.result_mark.set_kind("error")
+            message = (f"The drive differs from {Path(args['image']).name} starting at byte {result:,}. Make "
+                       "the drive again, or try another drive if it keeps happening.")
+        if ok:
             self.track.set_step(len(STEPS))
-            self.result_title.setText("Ready to boot")
-            self.result_text.setText(
-                f"{drive.model} now holds {distro.name}. Plug it into your handheld and follow these steps."
-                if distro.install_steps else
-                f"{drive.model} now holds {distro.name}. Plug it into your handheld, open the boot "
-                "menu and choose the USB drive.")
-            self.result_guide.setText(guide_html(distro))
-            self.result_guide.setVisible(bool(distro.install_steps))
-            self.result_btn.setText("Make another")
+            if job == TEST:
+                self.result_title.setText("This drive failed the test" if bad_test else "Drive test results")
+                if bad_test:
+                    self.result_mark.set_kind("error")
+                self.result_text.setText(f"{drive.model}, measured. It's been formatted again, so it's "
+                                         "ready to use:")
+                self.result_lines.setText("\n\n".join(result.lines()) if result else "")
+                self.result_lines.setVisible(True)
+            elif job == CHECK:
+                self.result_title.setText("The drive matches")
+                self.result_text.setText(f"Every byte on {drive.model} matches {Path(args['image']).name}.")
+            elif job == IMPORT:
+                self.result_title.setText("Added to Ventoy")
+                self.result_text.setText(f"These are on {drive.model} and will show in Ventoy's menu:")
+                self.result_lines.setText("\n".join(result or []))
+                self.result_lines.setVisible(True)
+                self.result_after.setText("Plug the drive into your handheld, start it from USB and pick one "
+                                          "from Ventoy's menu.")
+                self.result_after.setVisible(True)
+            elif job == FORMAT:
+                self.result_title.setText("Drive formatted")
+                self.result_text.setText(f"{drive.model} is now one empty exFAT drive named USB DRIVE. "
+                                         "Unplug it and plug it back in to use it for files.")
+            elif job == VENTOY:
+                sb = args.get("secure_boot", True)
+                self.result_title.setText("Ventoy is installed")
+                self.result_text.setText(f"{drive.model} now has Ventoy {result or ''}, "
+                                         f"{'with' if sb else 'without'} Secure Boot support.")
+                steps = ventoy_steps(sb)
+            else:
+                name = args["file"].path.name if job == FILE else distro.name
+                steps = [] if job == FILE else list(distro.install_steps)
+                self.result_title.setText("Ready to boot")
+                self.result_text.setText(
+                    f"{drive.model} now holds {name}. Plug it into your handheld and follow these steps."
+                    if steps else
+                    f"{drive.model} now holds {name}. Plug it into your handheld, open the boot "
+                    "menu and choose the USB drive.")
+            if steps:
+                self.result_guide.setText(guide_html(steps, ventoy=job == VENTOY))
+                self.result_guide.setVisible(True)
         elif status == "cancelled":
             self.result_title.setText("Stopped")
             self.result_text.setText(message)
-            self.result_btn.setText("Start over")
         else:
             self.track.set_step(self._step, failed=True)
-            self.result_title.setText("The drive wasn't finished")
+            self.result_title.setText({IMPORT: "The images weren't all added", TEST: "The test didn't finish",
+                                       CHECK: "The drive doesn't match"}.get(job,
+                                                                              "The drive wasn't finished"))
             self.result_text.setText(message)
-            self.result_btn.setText("Try again")
+        # Buttons, as on Android.
+        if ok and job in (VENTOY, IMPORT):
+            self.result_done.setVisible(True)
+            self.result_btn.setText("Add more" if job == IMPORT else "Add images")
+        elif job == IMPORT:
+            self.result_btn.setText("Back to the drive")
+        elif job in (TEST, CHECK):
+            self.result_btn.setText("Done")
+        else:
+            again = {"ok": "Make another", "cancelled": "Start over"}
+            self.result_btn.setText(again.get(status, "Try again"))
         self.stack.setCurrentWidget(self.result_page)
         self.result_btn.setFocus()
+
+    def _result_action(self) -> None:
+        job, drive, _ = getattr(self, "_finished_job", (SYSTEM, None, {}))
+        if job in (VENTOY, IMPORT) and drive is not None and self.result_btn.text() != "Try again":
+            self.picked = [] if self.result_btn.text() != "Back to the drive" else self.picked
+            self._open_ventoy(drive)
+            return
+        self._back_to_start()
+
+    # ------------------------------------------------------------ Ventoy files
+
+    def _open_ventoy(self, drive: Drive | None = None) -> None:
+        drive = drive or self._drive()
+        if drive is None:
+            return
+        self._v_drive = drive
+        self._confirm_remove = None
+        self.ventoy_info = None
+        self.v_error.setVisible(False)
+        self.v_info.setText("Reading the drive...")
+        self.stack.setCurrentWidget(self.ventoy_page)
+        self._render_ventoy()
+        self._background(lambda: jobs.ventoy_info(drive), self._ventoy_loaded)
+
+    def _background(self, fn, then) -> None:
+        self._v_busy = True
+        t = Task(fn, self)
+        self._tasks.append(t)
+
+        def done(r, err):
+            self._tasks.remove(t)
+            self._v_busy = False
+            then(r, err)
+
+        t.done.connect(done, Qt.QueuedConnection)  # back on the window's thread
+        t.start()
+
+    def _ventoy_loaded(self, info, err) -> None:
+        if err is not None or info is None:
+            self.ventoy_info = None
+            self.v_info.setText(str(err) if err else "This drive doesn't have Ventoy on it.")
+        else:
+            self.ventoy_info = info
+            sb = "" if info.secure_boot is None else (
+                ", Secure Boot support " + ("on" if info.secure_boot else "off"))
+            self.v_info.setText(f"{self._v_drive.model}: Ventoy {info.version or ''}".rstrip()
+                                + f"{sb}. {gb(info.free)} free.")
+        self._render_ventoy()
+
+    def _clear_body(self) -> None:
+        while self.v_body.count():
+            item = self.v_body.takeAt(0)
+            if item.widget():
+                item.widget().hide()
+                item.widget().deleteLater()
+
+    def _render_ventoy(self) -> None:
+        self._clear_body()
+        b = self.v_body
+        b.addWidget(label("To add", "brand"))
+        if not self.picked:
+            b.addWidget(EmptySlot("Pick ISOs or disk images on this computer. Compressed ones are unpacked "
+                                  "on the way in."))
+        for p in self.picked:
+            notes = [p.kind.label]
+            if p.source.exists():
+                notes.append(gb(p.source.stat().st_size))
+            if p.unpacks:
+                notes.append("unpacked onto the drive")
+            remove = quiet_button("Remove")
+            card = Card(p.source.name, ", ".join(notes), remove)
+            unlisted = None if p.bootable else "Ventoy won't list this in its menu."
+            card.set_note(p.content.warning or unlisted)
+            remove.clicked.connect(lambda _=False, x=p: self._unpick(x))
+            b.addWidget(card)
+        b.addSpacing(10)
+        b.addWidget(label("On the drive", "brand"))
+        info = self.ventoy_info
+        if info is not None and not info.files:
+            b.addWidget(label("Nothing yet.", "hint"))
+        elif info is not None:
+            b.addWidget(label(
+                "Ventoy starts the marked image on its own after 5 seconds. Click it again to go back to "
+                "choosing from the menu." if info.boot_next else
+                "Click an image to have Ventoy start it on its own, no buttons needed.", "small"))
+            for f in info.files:
+                asking = self._confirm_remove == f.name
+                auto = f.name == info.boot_next
+                remove = quiet_button("Remove?" if asking else "Remove")
+                card = Card(f.name, gb(f.size) + (", starts on its own" if auto else ""), remove)
+                card.set_selected(auto)
+                card.set_note("Click Remove again to delete it from the drive." if asking else None)
+                if f.bootable:
+                    card.setCursor(Qt.PointingHandCursor)
+                    card.clicked.connect(lambda n=f.name, a=auto: self._set_boot_next(None if a else n))
+                remove.clicked.connect(lambda _=False, n=f.name: self._remove(n))
+                b.addWidget(card)
+        b.addStretch(1)
+        # Space and buttons.
+        space = None
+        if info is not None:
+            known = sum(p.size for p in self.picked if p.size >= 0)
+            if known > info.free:
+                space = f"That's more than the {gb(info.free)} free on the drive."
+        self.v_space.setText(space or "")
+        self.v_space.setVisible(bool(space))
+        self.v_more.setVisible(bool(self.picked))
+        self.v_more.setEnabled(not self._v_busy)
+        n = len(self.picked)
+        self.v_go.setText("Pick images" if not n else "Copy to drive" if n == 1 else f"Copy {n} to drive")
+        self.v_go.setEnabled(info is not None and not self._v_busy and space is None)
+
+    def _pick_images(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Pick ISOs or disk images", str(Path.home()),
+            "Images (*.iso *.img *.raw *.wim *.vhd *.vhdx *.efi *.vtoy *.gz *.xz *.bz2 *.zip);;All files (*)")
+        self.add_picked([Path(p) for p in paths])
+
+    def add_picked(self, paths: list[Path]) -> None:
+        errors = []
+        for p in paths:
+            if any(x.source == p for x in self.picked):
+                continue
+            try:
+                self.picked.append(jobs.plan_import(p))
+            except OSError as e:
+                errors.append(str(e))
+        self.v_error.setText("\n".join(errors))
+        self.v_error.setVisible(bool(errors))
+        self._render_ventoy()
+
+    def _unpick(self, p) -> None:
+        self.picked = [x for x in self.picked if x is not p]
+        self._render_ventoy()
+
+    def _ventoy_go(self) -> None:
+        if not self.picked:
+            self._pick_images()
+            return
+        drive = self._v_drive
+        n = len(self.picked)
+        self._run(IMPORT, None, drive, f"Adding {n} image{'s' if n > 1 else ''} to {drive.model}",
+                  plans=list(self.picked))
+        self.picked = []
+
+    def _set_boot_next(self, name: str | None) -> None:
+        if self._v_busy:
+            return
+        drive = self._v_drive
+        self.v_error.setVisible(False)
+        self._background(lambda: jobs.set_boot_next(drive, name, log=lambda m: None),
+                         lambda _, err: self._after_change(err, "Couldn't change what starts on its own"))
+
+    def _remove(self, name: str) -> None:
+        if self._v_busy:
+            return
+        if self._confirm_remove != name:
+            self._confirm_remove = name
+            self._render_ventoy()
+            return
+        self._confirm_remove = None
+        drive = self._v_drive
+        self._background(lambda: jobs.remove_image(drive, name, log=lambda m: None),
+                         lambda _, err: self._after_change(err, f"Couldn't remove {name}"))
+
+    def _after_change(self, err, what: str) -> None:
+        if err is not None:
+            self.v_error.setText(f"{what}: {err}")
+            self.v_error.setVisible(True)
+        self._background(lambda: jobs.ventoy_info(self._v_drive), self._ventoy_loaded)
+
+    # ------------------------------------------------------------ Labs
+
+    def _open_labs(self) -> None:
+        if self.thread is not None:
+            return
+        self._ask_test = False
+        self._render_labs()
+        self.stack.setCurrentWidget(self.labs_page)
+
+    def _check_source(self) -> tuple[str, Path] | None:
+        """What Check a drive compares with: your own file, or the picked system's last download."""
+        choice, distro = self._choice(), self._distro()
+        if choice == FILE and self.own_file:
+            return self.own_file.path.name, self.own_file.path
+        if choice == SYSTEM and distro:
+            try:
+                for img in distro.images:
+                    f = cache_dir() / img.filename
+                    if f.exists() and f.with_name(f.name + ".verified").exists():
+                        return distro.name, f
+            except OSError:
+                return None
+        return None
+
+    def _render_labs(self) -> None:
+        drive = self._drive()
+        self.test_card.detail.setText(
+            (f"{drive.model}: " if drive else "") + "real write and read speed, and whether it really holds "
+            "what it claims. Takes 1 to 6 minutes. Erases the drive, then formats it so it's usable again.")
+        self.test_card.set_note(f"Click again to erase {drive.model if drive else 'the drive'} and test it."
+                                if self._ask_test else None)
+        self.test_btn.setText("Erase and test" if self._ask_test else "Test")
+        self.test_btn.setEnabled(drive is not None)
+        src = self._check_source()
+        if src is None:
+            self.check_card.detail.setText("Pick a system you've made a drive with, or your own file, on the "
+                                           "main screen first, then compare a drive with it.")
+        else:
+            self.check_card.detail.setText((f"Compare {drive.model} with {src[0]}" if drive else
+                                            f"Compare a drive with {src[0]}")
+                                           + ", byte for byte, without changing anything. Handy when a "
+                                           "handheld won't start from it.")
+        self.check_btn.setEnabled(drive is not None and src is not None)
+        self.labs_hint.setText("" if drive else
+                               "Plug in a USB drive and pick it on the main screen to use the tools.")
+        self.labs_hint.setVisible(drive is None)
+
+    def _labs_test(self) -> None:
+        drive = self._drive()
+        if drive is None:
+            return
+        if not self._ask_test:
+            self._ask_test = True
+            self._render_labs()
+            return
+        self._ask_test = False
+        self._run(TEST, None, drive, f"Testing {drive.model}")
+
+    def _labs_check(self) -> None:
+        drive, src = self._drive(), self._check_source()
+        if drive is None or src is None:
+            return
+        self._run(CHECK, None, drive, f"Checking {drive.model}", image=src[1])
+
+    # ------------------------------------------------------------ app
 
     def _run_installer(self, cmd: str) -> None:
         """Runs `handheld-forge update/uninstall --ask` on its own, so its windows ask and report."""
@@ -989,8 +1809,11 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.choose_page)
 
     def _escape(self) -> None:
-        if self.stack.currentWidget() is self.confirm_page:
+        page = self.stack.currentWidget()
+        if page is self.confirm_page:
             self._leave_confirm()
+        elif page in (self.ventoy_page, self.labs_page):
+            self._back_to_start()
 
     def closeEvent(self, event) -> None:
         if self.thread is not None:

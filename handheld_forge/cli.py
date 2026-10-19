@@ -7,11 +7,12 @@ import sys
 import time
 
 from . import APP_NAME, __version__
-from .config import experimental_variants, get_distro, install_guide, load_catalog
+from .config import experimental_variants, get_distro, install_guide, load_catalog, load_labs
 from .progress import Progress
 from .preflight import SleepBlocker, can_start, checks, read_state
 from .download import prepare_iso
 from .drives import list_drives
+from . import settings
 
 DEFAULT_DISTRO = "bazzite-deck"
 
@@ -52,6 +53,10 @@ def cmd_distros(_: argparse.Namespace) -> int:
     if extra:
         print("\nExperimental (not tested on a handheld yet):")
         for d in extra:
+            print(f"{d.id:<22} {d.name}, {d.edition}")
+    if settings.load().labs:
+        print("\nLabs:")
+        for d in load_labs():
             print(f"{d.id:<22} {d.name}, {d.edition}")
     return 0
 
@@ -113,11 +118,152 @@ def cmd_create(a: argparse.Namespace) -> int:
             print("Cancelled.")
             return 1
     bar = _Bar()
+    s = settings.load()
     with SleepBlocker():
-        img = prepare_iso(distro, bar, _log)
-        make_drive(distro, drive, img.path, bar, _log)
+        img = prepare_iso(distro, bar, _log, stream=s.streaming and distro.needs_password)
+        make_drive(distro, drive, img.path, bar, _log, verify=s.verify, live=img.live)
     print(f"\n{distro.name} boot drive is ready.\n\n{install_guide(distro)}")
     return 0
+
+
+def _drive(path: str):
+    drive = next((d for d in list_drives() if d.path == path), None)
+    if drive is None:
+        print(f"{path} is not an eligible USB drive. See: handheld-forge drives --all", file=sys.stderr)
+    return drive
+
+
+def _erase_ok(a: argparse.Namespace, drive, what: str) -> bool:
+    if a.yes:
+        return True
+    print(f"This will ERASE everything on {drive.label} {what}")
+    if input("Type ERASE to continue: ").strip() != "ERASE":
+        print("Cancelled.")
+        return False
+    return True
+
+
+def cmd_write(a: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import jobs
+    drive = _drive(a.device)
+    if drive is None:
+        return 1
+    f = jobs.look_at(Path(a.file))
+    if f.warning:
+        print(f.warning)
+    if not _erase_ok(a, drive, f"and write {f.path.name} ({f.kind.label}) to it."):
+        return 1
+    with SleepBlocker():
+        jobs.write_own_file(drive, f, _Bar(), _log, verify=settings.load().verify)
+    print("\nDone. The drive is ready.")
+    return 0
+
+
+def cmd_format(a: argparse.Namespace) -> int:
+    from . import jobs
+    drive = _drive(a.device)
+    if drive is None or not _erase_ok(a, drive, "and leave one empty exFAT partition."):
+        return 1
+    jobs.format_drive(drive, _Bar(), _log)
+    print("\nDone. One exFAT partition, ready on Windows, macOS, Linux and SteamOS.")
+    return 0
+
+
+def cmd_ventoy(a: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import jobs
+    drive = _drive(a.device)
+    if drive is None:
+        return 1
+    if a.action == "install":
+        if not _erase_ok(a, drive, "and install Ventoy."):
+            return 1
+        with SleepBlocker():
+            jobs.install_ventoy(drive, not a.no_secure_boot, _Bar(), _log)
+        print("\nVentoy is installed. Add images with: handheld-forge ventoy add --device "
+              f"{drive.path} FILE...")
+        return 0
+    if a.action == "add":
+        plans = [jobs.plan_import(Path(f)) for f in a.files]
+        for p in plans:
+            note = "" if p.bootable else "  (Ventoy won't list this in its menu)"
+            print(f"{p.source.name} -> {p.target}{', unpacked' if p.unpacks else ''}{note}")
+        with SleepBlocker():
+            jobs.import_images(drive, plans, _Bar(), _log, verify=settings.load().verify,
+                               boot_next=a.boot_next)
+        print("\nDone.")
+        return 0
+    if a.action == "boot-next":
+        jobs.set_boot_next(drive, a.image or None, _log)
+        return 0
+    if a.action == "remove":
+        jobs.remove_image(drive, a.image, _log)
+        return 0
+    info = jobs.ventoy_info(drive)
+    if info is None:
+        print("This drive doesn't have Ventoy on it.")
+        return 1
+    sb = {True: "Secure Boot support on", False: "Secure Boot support off", None: ""}[info.secure_boot]
+    print(f"Ventoy {info.version or '(version unknown)'}  {sb}")
+    print(f"{info.free / 1e9:.1f} GB free of {info.size / 1e9:.1f} GB")
+    for f in info.files:
+        star = "  starts on its own" if f.name == info.boot_next else ""
+        print(f"  {f.name:<40} {f.size / 1e9:6.2f} GB{star}")
+    return 0
+
+
+def _labs_on() -> bool:
+    if not settings.load().labs:
+        print("This is a Labs tool. Turn Labs on with: handheld-forge labs on", file=sys.stderr)
+        return False
+    return True
+
+
+def cmd_labs(a: argparse.Namespace) -> int:
+    s = settings.load()
+    if a.setting in ("on", "off"):
+        s.labs = a.setting == "on"
+    elif a.setting:
+        if a.value not in ("on", "off"):
+            print("Use on or off.", file=sys.stderr)
+            return 1
+        setattr(s, {"stream": "stream", "skip-check": "skip_check"}[a.setting], a.value == "on")
+    settings.save(s)
+    print(f"Labs: {'on' if s.labs else 'off'}")
+    print(f"  stream (write while downloading): {'on' if s.stream else 'off'}")
+    print(f"  skip-check (don't read the drive back): {'on' if s.skip_check else 'off'}")
+    return 0
+
+
+def cmd_test_drive(a: argparse.Namespace) -> int:
+    from . import jobs
+    if not _labs_on():
+        return 1
+    drive = _drive(a.device)
+    if drive is None or not _erase_ok(a, drive, "to test its real speed and size."):
+        return 1
+    report = jobs.test_drive(drive, _Bar(), _log)
+    return 2 if report.fake or report.failing else 0
+
+
+def cmd_check_drive(a: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import jobs
+    if not _labs_on():
+        return 1
+    drive = _drive(a.device)
+    if drive is None:
+        return 1
+    at = jobs.check_drive(drive, Path(a.file), _Bar(), _log)
+    if at is None:
+        print("\nThe drive matches the image.")
+    else:
+        print(f"\nThe drive differs from the image at byte {at}.")
+    return 0 if at is None else 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -139,6 +285,30 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--device", required=True, help="e.g. /dev/sdb")
     s.add_argument("--distro", default=DEFAULT_DISTRO)
     s.add_argument("--yes", action="store_true", help="skip the ERASE confirmation")
+    s = sub.add_parser("write", help="write your own image file (.iso, .img, .gz, .xz, .bz2, .zip)")
+    s.add_argument("--device", required=True)
+    s.add_argument("file")
+    s.add_argument("--yes", action="store_true", help="skip the ERASE confirmation")
+    s = sub.add_parser("format", help="erase the drive to one exFAT partition")
+    s.add_argument("--device", required=True)
+    s.add_argument("--yes", action="store_true", help="skip the ERASE confirmation")
+    s = sub.add_parser("ventoy", help="install Ventoy, list, add or remove images, pick one to start")
+    s.add_argument("action", choices=["install", "list", "add", "boot-next", "remove"])
+    s.add_argument("--device", required=True)
+    s.add_argument("files", nargs="*", help="images to add")
+    s.add_argument("--image", help="for boot-next (empty for the menu) and remove")
+    s.add_argument("--boot-next", help="with add: start this image on its own")
+    s.add_argument("--no-secure-boot", action="store_true", help="install without Secure Boot support")
+    s.add_argument("--yes", action="store_true", help="skip the ERASE confirmation")
+    s = sub.add_parser("labs", help="turn Labs on or off, or change a Labs setting")
+    s.add_argument("setting", nargs="?", choices=["on", "off", "stream", "skip-check"])
+    s.add_argument("value", nargs="?")
+    s = sub.add_parser("test-drive", help="Labs: test a drive's real speed and size (erases it)")
+    s.add_argument("--device", required=True)
+    s.add_argument("--yes", action="store_true", help="skip the ERASE confirmation")
+    s = sub.add_parser("check-drive", help="Labs: compare a drive with an image without writing")
+    s.add_argument("--device", required=True)
+    s.add_argument("file")
     s = sub.add_parser("update", help="update Handheld Forge to the latest version")
     s.add_argument("--force", action="store_true", help="reinstall even if already up to date")
     s.add_argument("--ask", action="store_true", help=argparse.SUPPRESS)
@@ -165,8 +335,9 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(report))
         return 1 if any(line.startswith("Problem") for line in report) else 0
     try:
-        return {"distros": cmd_distros, "drives": cmd_drives,
-                "download": cmd_download, "create": cmd_create}[a.cmd](a)
+        return {"distros": cmd_distros, "drives": cmd_drives, "download": cmd_download,
+                "create": cmd_create, "write": cmd_write, "format": cmd_format, "ventoy": cmd_ventoy,
+                "labs": cmd_labs, "test-drive": cmd_test_drive, "check-drive": cmd_check_drive}[a.cmd](a)
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         return 130

@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "handheld_forge" / "distros.json"
 # The Android app's experimental systems, kept out of the shared catalog.
-LABS = ROOT / "android" / "app" / "src" / "main" / "assets" / "labs.json"
+LABS = ROOT / "handheld_forge" / "labs.json"
 
 
 def status(url: str) -> str:

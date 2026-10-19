@@ -143,9 +143,10 @@ class UDisks:
         if self.mount_points(block):
             self.call(block, FILESYSTEM, "Unmount", self.NO_PROMPT)
 
-    def mount(self, block: str) -> str:
+    def mount(self, block: str, read_only: bool = False) -> str:
+        opts = {**self.NO_PROMPT, "options": "ro"} if read_only else self.NO_PROMPT
         try:
-            out = self.call(block, FILESYSTEM, "Mount", self.NO_PROMPT)
+            out = self.call(block, FILESYSTEM, "Mount", opts)
             return parse_strings(out)[0]
         except UDisksError as e:
             if "AlreadyMounted" in e.name:  # the desktop may automount new partitions
