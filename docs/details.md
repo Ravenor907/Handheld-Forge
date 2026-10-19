@@ -10,6 +10,8 @@ Pick a system, pick a USB drive, press **Create boot drive**. No terminal, no pa
 | Bazzite (Handheld KDE) | Ready | Ready |
 | SteamOS (Steam Deck recovery image) | Ready (asks for your password once) | Ready |
 | CachyOS Handheld | Ready (asks for your password once) | Ready |
+| Your own file, Ventoy, Format drive | Ready | Ready |
+| Labs: Batocera, drive test, check a drive | Ready | Ready |
 
 Both apps work the same way: a short "Before you start" check (battery, internet, metered connection) and a tick box to leave it alone, a reminder while it works, Stop asks before stopping, downloads resume through dropped connections, and when the drive is ready they show how to open the boot menu and get through that system's installer.
 
@@ -50,6 +52,17 @@ Bazzite publishes no signature for the Legacy ISO, so only its checksum is check
 The experimental section also has **CachyOS, No password**. It skips the password by copying CachyOS's files instead of writing the ISO byte for byte: the drive gets one FAT32 partition holding every file from the ISO. CachyOS is built with Arch's archiso, whose boot loader and startup look for a marker file (`/boot/<ISO UUID>.uuid`) on any drive rather than a drive label, which is what makes a copied stick findable. If the ISO's label is too long for FAT, the boot entries that use it are pointed at the partition's UUID. Files over 4 GB can't go on FAT32, so the app refuses before erasing if a future ISO has one. Secure Boot must be off, as for the regular CachyOS option.
 
 It hasn't been tried on a handheld yet. If the drive doesn't start, make it again with the regular CachyOS option. From the command line it's `--distro cachyos-handheld-copy`.
+
+## Your own file, Ventoy, Format and Labs on the desktop
+
+The desktop app has everything the Android app has (see [Android](#android) for how each one works), with the same screens and wording:
+
+- **Your own file**, **Ventoy** (with the Secure Boot choice) and **Format drive** are tiles under the systems. A drive with Ventoy on it says so, and **Add images** opens its files: pick images, mark one to start on its own, remove one.
+- **Password.** Anything that rewrites the whole drive (your own file, installing Ventoy, the drive test, checking a drive) asks for your password once, like SteamOS. Adding images, starting on its own and removing go through the desktop's own mount of the drive, with no password, and each image is read back from the drive (not from memory) after copying. Format drive uses the system's exFAT tools with no password, and falls back to the app's own formatter (one password) if they're missing.
+- **Labs.** Tap the version number at the top right 10 times; the arrow next to it opens the app menu. Labs shows Batocera and a **Labs** button with the same two settings and two tools as on Android. The settings live in `~/.config/handheld-forge/settings.json`; **Turn off Labs** in the app menu hides it all again.
+- **Speed.** `.bz2` images unpack on every core, and the log says how long the write took, where the time went, and the USB speed the drive is connected at.
+
+Both apps share `handheld_forge/distros.json`, `handheld_forge/labs.json` and the Bazzite key, and CI runs both apps' Format and Ventoy drives through the same checks.
 
 ## Safety
 
@@ -134,6 +147,16 @@ handheld-forge distros                  # list systems
 handheld-forge drives --all             # list disks and why any are blocked
 handheld-forge download                 # fetch and verify the latest ISO only
 handheld-forge create --device /dev/sdb
+handheld-forge write --device /dev/sdb my.img.xz        # your own file
+handheld-forge format --device /dev/sdb                 # one exFAT partition
+handheld-forge ventoy install --device /dev/sdb         # add --no-secure-boot to leave it out
+handheld-forge ventoy list --device /dev/sdb
+handheld-forge ventoy add --device /dev/sdb a.iso b.img.bz2 [--boot-next a.iso]
+handheld-forge ventoy boot-next --device /dev/sdb --image a.iso   # --image "" for the menu
+handheld-forge ventoy remove --device /dev/sdb --image a.iso
+handheld-forge labs on                                  # or: labs stream on, labs skip-check on
+handheld-forge test-drive --device /dev/sdb             # Labs
+handheld-forge check-drive --device /dev/sdb my.img.xz  # Labs
 ```
 
 ## Adding another system
@@ -147,7 +170,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest -v
 ```
 
-CI runs the unit tests, a headless render of every screen, and a full build through a real udisks daemon onto a loop device using an ISO made with Bazzite's own xorriso settings (including a file over 4 GB). The result is compared file by file against the kernel's mount of the ISO.
+CI runs the unit tests, a headless render of every screen, and a full build through a real udisks daemon onto a loop device using an ISO made with Bazzite's own xorriso settings (including a file over 4 GB). The result is compared file by file against the kernel's mount of the ISO. Every other desktop job (Format both ways, your own file, Check a drive, Ventoy, adding images, starting on its own, removing, the drive test) also runs through the real udisks daemon, the desktop's Format and Ventoy drives get the same `drive-images` checks and QEMU boots as the Android app's, and Valve's real SteamOS image is unpacked with the desktop's parallel bzip2 decoder and compared with `bzip2 -d`.
 
 ## License
 

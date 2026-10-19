@@ -185,11 +185,13 @@ class ExFatTests(Tmp):
             self._fsck(self.dir / "d.img", 2048)
 
     def _fsck(self, image, start):
-        out = subprocess.run(
-            [FSCK, "-n", f"--offset={start * 512}", str(image)], capture_output=True, text=True
-        )
-        if "unrecognized option" in out.stderr:
-            self.skipTest("this fsck.exfat can't take an offset")
+        """fsck.exfat on the volume alone (older exfatprogs can't take an offset)."""
+        vol = Path(str(image) + ".vol")
+        with open(image, "rb") as src, open(vol, "wb") as dst:
+            src.seek(start * 512)
+            shutil.copyfileobj(src, dst, 1 << 20)
+        out = subprocess.run([FSCK, "-n", str(vol)], capture_output=True, text=True)
+        vol.unlink()
         self.assertEqual(0, out.returncode, out.stdout + out.stderr)
 
 

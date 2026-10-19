@@ -19,11 +19,11 @@ No root, no terminal, no `dd` roulette.
 <table>
 <tr>
 <td width="33%"><img src="docs/assets/icon-systems.png" width="44"><br><b>One-tap systems</b><br>Bazzite, SteamOS and CachyOS, fresh from the source.</td>
-<td width="33%"><img src="docs/assets/icon-file.png" width="44"><br><b>Your own file</b><br>Any ISO or disk image on your phone, even <code>.xz</code>, <code>.gz</code>, <code>.bz2</code> or <code>.zip</code>.</td>
+<td width="33%"><img src="docs/assets/icon-file.png" width="44"><br><b>Your own file</b><br>Any ISO or disk image on your phone or PC, even <code>.xz</code>, <code>.gz</code>, <code>.bz2</code> or <code>.zip</code>.</td>
 <td width="33%"><img src="docs/assets/icon-ventoy.png" width="44"><br><b>Ventoy</b><br>One stick, every OS. Installs the latest release, Secure Boot on or off.</td>
 </tr>
 <tr>
-<td><img src="docs/assets/icon-add.png" width="44"><br><b>Add images</b><br>Drop ISOs onto a Ventoy stick straight from your phone. Compressed ones get unpacked.</td>
+<td><img src="docs/assets/icon-add.png" width="44"><br><b>Add images</b><br>Drop ISOs onto a Ventoy stick straight from your phone or PC. Compressed ones get unpacked.</td>
 <td><img src="docs/assets/icon-auto.png" width="44"><br><b>Starts on its own</b><br>Controller dead in Ventoy's menu? Mark an image and it boots itself.</td>
 <td><img src="docs/assets/icon-format.png" width="44"><br><b>Format drive</b><br>Turns a used boot stick back into a normal exFAT drive.</td>
 </tr>
@@ -56,7 +56,7 @@ git clone https://github.com/Ravenor907/Handheld-Forge.git
 cd Handheld-Forge && ./install.sh
 ```
 
-Then open **Handheld Forge** from your app menu. Bazzite needs no password. SteamOS and CachyOS ask for it once, because Linux.
+Then open **Handheld Forge** from your app menu. Bazzite, adding images and Format need no password. Anything that writes the whole stick asks for it once, because Linux.
 
 ## Systems
 
@@ -65,8 +65,9 @@ Then open **Handheld Forge** from your app menu. Bazzite needs no password. Stea
 | Bazzite (Handheld KDE) | ✓ | ✓ |
 | SteamOS (Valve recovery image) | ✓ | ✓ |
 | CachyOS Handheld | ✓ | ✓ |
-| Your own ISO or image | ✓ | |
-| Ventoy, add images, format | ✓ | |
+| Your own ISO or image | ✓ | ✓ |
+| Ventoy, add images, format | ✓ | ✓ |
+| Labs (Batocera, drive test, check) | ✓ | ✓ |
 
 ## It won't eat your laptop
 
