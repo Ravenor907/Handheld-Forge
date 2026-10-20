@@ -897,6 +897,8 @@ class MainActivity : ComponentActivity() {
             when {
                 j.distro == FORMAT.name -> "Formatting ${j.drive}"
                 j.distro == VENTOY.name -> "Installing Ventoy on ${j.drive}"
+                j.distro == "Drive test" -> "Testing ${j.drive}"
+                j.distro.startsWith("Check against") -> "Checking ${j.drive}"
                 j.local -> "Writing ${j.distro} to ${j.drive}"
                 else -> "Creating ${j.distro} on ${j.drive}"
             },
