@@ -1,4 +1,6 @@
 package io.github.ravenor907.handheldforge.core
+import io.github.ravenor907.ravendisk.core.io.ScsiDisk
+import io.github.ravenor907.ravendisk.core.io.BulkOnly
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals

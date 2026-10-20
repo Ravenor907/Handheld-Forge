@@ -1,4 +1,6 @@
 package io.github.ravenor907.handheldforge.core
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.job.toHex
 
 import java.io.File
 import java.security.KeyFactory
@@ -103,6 +105,4 @@ object Verify {
     }
 }
 
-class CancelledException : Exception("Cancelled")
 
-fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

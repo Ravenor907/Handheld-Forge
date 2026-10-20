@@ -50,8 +50,8 @@ android {
         applicationId = "io.github.ravenor907.handheldforge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 97
-        versionName = "0.9.7"
+        versionCode = 98
+        versionName = "0.9.8"
     }
 
     signingConfigs {
@@ -103,6 +103,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":drivecore")) // shared with Raven Disk Utility
     val composeBom = platform("androidx.compose:compose-bom:2025.02.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")

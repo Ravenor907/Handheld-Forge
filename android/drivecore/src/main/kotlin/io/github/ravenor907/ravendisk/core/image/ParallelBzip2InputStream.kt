@@ -1,4 +1,4 @@
-package io.github.ravenor907.handheldforge.core
+package io.github.ravenor907.ravendisk.core.image
 
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.ByteArrayInputStream

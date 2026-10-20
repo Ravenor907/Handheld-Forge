@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "HandheldForge"
 include(":app")
+include(":drivecore")

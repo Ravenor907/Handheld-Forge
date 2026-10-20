@@ -1,5 +1,17 @@
 package io.github.ravenor907.handheldforge
 
+import io.github.ravenor907.ravendisk.core.io.BlockDevice
+import io.github.ravenor907.ravendisk.core.job.Stage
+import io.github.ravenor907.ravendisk.core.job.Progress
+import io.github.ravenor907.ravendisk.core.image.ImageKind
+import io.github.ravenor907.ravendisk.core.bench.DriveTest
+import io.github.ravenor907.ravendisk.core.fs.FsSupport
+import io.github.ravenor907.ravendisk.core.fs.FsType
+import io.github.ravenor907.ravendisk.core.job.SpeedPhase
+import io.github.ravenor907.ravendisk.core.job.SpeedSample
+import io.github.ravenor907.handheldforge.core.PlainDrive
+import io.github.ravenor907.handheldforge.ui.SpeedGraph
+
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Intent
@@ -65,13 +77,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import io.github.ravenor907.handheldforge.core.Distro
-import io.github.ravenor907.handheldforge.core.DriveTest
 import io.github.ravenor907.handheldforge.core.Fix
-import io.github.ravenor907.handheldforge.core.ImageKind
 import io.github.ravenor907.handheldforge.core.PhoneState
 import io.github.ravenor907.handheldforge.core.Preflight
-import io.github.ravenor907.handheldforge.core.Progress
-import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.core.VentoyConfig
 import io.github.ravenor907.handheldforge.core.VentoyImport
 import io.github.ravenor907.handheldforge.ui.Banner
@@ -131,7 +139,7 @@ private data class VentoyInfo(
     /** Set when the drive's ventoy.json couldn't be read, so boot-next can't be changed safely. */
     val configError: String? = null,
 )
-private val FORMAT = Distro(ForgeService.FORMAT_ID, "Format drive", "Empty exFAT", true, 1, null, emptyList())
+private val FORMAT = Distro(ForgeService.FORMAT_ID, "Format drive", "exFAT, FAT32 or ext4", true, 1, null, emptyList())
 private val TOOLS = listOf(VENTOY, FORMAT)
 
 val STEPS = Progress.STEPS
@@ -253,6 +261,28 @@ class MainActivity : ComponentActivity() {
         Stick("demo2", "Kingston DataTraveler", false, null),
     )
 
+    /** A made-up speed trace for screenshots: a stick that slows once its cache fills, then reads back. */
+    private fun demoSamples(upTo: Double): List<SpeedSample> {
+        val out = ArrayList<SpeedSample>()
+        var t = 0.25
+        var at = 0L
+        while (t <= upTo) {
+            val (phase, base) = when {
+                t < 9 -> SpeedPhase.WRITE to 46.0
+                t < 22 -> SpeedPhase.WRITE to 14.0
+                t < 25 -> SpeedPhase.SCATTER_WRITE to 9.0
+                t < 36 -> SpeedPhase.READ to 88.0
+                else -> SpeedPhase.SCATTER_READ to 60.0
+            }
+            val wobble = kotlin.math.sin(t * 2.3) * base * 0.12 + kotlin.math.sin(t * 7.1) * base * 0.06
+            val mbps = (base + wobble).coerceAtLeast(1.0)
+            at += (mbps * 250_000).toLong()
+            out.add(SpeedSample(phase, t, mbps, at))
+            t += 0.25
+        }
+        return out
+    }
+
     private fun startDemo(demo: String, catalog: List<Distro>) {
         val name = catalog.first { it.enabled }.name
         val lines = listOf("09:12:01  Using Live ISO (current installer)", "09:12:02  Latest sha256 4c1f0e9a...")
@@ -266,7 +296,14 @@ class MainActivity : ComponentActivity() {
                     name, "SanDisk Ultra Fit", Stage.WRITE, 4_100_000_000, 8_300_000_000,
                     fraction = 0.71f, timeLeft = "about 7 min left",
                 ),
-                lines,
+                lines, demoSamples(16.0),
+            )
+            "test-live" -> Jobs.demo(
+                JobState.Running(
+                    "Drive test", "Fanxiang F372S", Stage.WRITE, 600_000_000, 1_200_000_000,
+                    fraction = 0.38f, local = true,
+                ),
+                lines, demoSamples(18.0),
             )
             "done" -> Jobs.demo(JobState.Finished(Outcome.OK, "", name, "SanDisk Ultra Fit"), lines)
             "done-ventoy" -> Jobs.demo(
@@ -279,7 +316,7 @@ class MainActivity : ComponentActivity() {
                 ),
                 lines,
             )
-            "done-format" -> Jobs.demo(JobState.Finished(Outcome.OK, "", FORMAT.name, "SanDisk Ultra Fit"), lines)
+            "done-format" -> Jobs.demo(JobState.Finished(Outcome.OK, "ext4\nGAMES", FORMAT.name, "SanDisk Ultra Fit"), lines)
             "done-test" -> Jobs.demo(
                 JobState.Finished(
                     Outcome.OK,
@@ -288,7 +325,7 @@ class MainActivity : ComponentActivity() {
                     ).lines().joinToString("\n") + "\nConnected at USB 3 speed",
                     "Drive test", "Fanxiang F372S", setOf(ForgeService.FLAG_TEST),
                 ),
-                lines,
+                lines, demoSamples(40.0),
             )
             "done-cachyos" -> Jobs.demo(
                 JobState.Finished(Outcome.OK, "", catalog.first { it.id == CACHY }.name, "SanDisk Ultra Fit"), lines,
@@ -314,17 +351,21 @@ class MainActivity : ComponentActivity() {
                     "file" -> ForgeService.CUSTOM_ID
                     "ventoy", "confirm-ventoy" -> ForgeService.VENTOY_ID
                     "labs", "confirm-labs" -> "batocera"
+                    "confirm-format-ext4" -> ForgeService.FORMAT_ID
                     else -> first
                 },
             )
         }
         var stickKey by rememberSaveable { mutableStateOf(if (demo != null && demo != "empty") "demo1" else null) }
-        var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ventoy" || demo == "confirm-labs") }
+        var confirming by rememberSaveable { mutableStateOf(demo == "confirm" || demo == "confirm-ventoy" || demo == "confirm-labs" || demo == "confirm-format-ext4") }
         var hint by remember { mutableStateOf("") }
         val scope = rememberCoroutineScope()
         var importing by rememberSaveable { mutableStateOf(demo == "import") }
         var labsTools by rememberSaveable { mutableStateOf(demo == "labs-tools") }
         var secureBoot by rememberSaveable { mutableStateOf(true) }
+        // Format drive: the filesystem and name (the same choices as Raven Disk Utility).
+        var formatFs by rememberSaveable { mutableStateOf(if (demo == "confirm-format-ext4") FsType.EXT4.name else FsType.EXFAT.name) }
+        var formatLabel by rememberSaveable { mutableStateOf(if (demo == "confirm-format-ext4") "GAMES" else PlainDrive.LABEL) }
         var picked by remember {
             mutableStateOf(
                 if (demo == "import") {
@@ -544,6 +585,8 @@ class MainActivity : ComponentActivity() {
                         Confirm(
                             distro, stick, needsInternet = !custom && distroId != ForgeService.FORMAT_ID,
                             secureBoot = secureBoot, onSecureBoot = { secureBoot = it }, onBack = { confirming = false },
+                            formatFs = FsType.valueOf(formatFs), onFormatFs = { formatFs = it.name },
+                            formatLabel = formatLabel, onFormatLabel = { formatLabel = it },
                         ) {
                             if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                                     this@MainActivity, Manifest.permission.POST_NOTIFICATIONS,
@@ -554,7 +597,10 @@ class MainActivity : ComponentActivity() {
                             if (custom) {
                                 ForgeService.startFile(this@MainActivity, Uri.parse(fileUri), fileName, stick.key, stick.label)
                             } else if (tool != null) {
-                                ForgeService.startTool(this@MainActivity, tool.id, tool.name, stick.key, stick.label, secureBoot)
+                                ForgeService.startTool(
+                                    this@MainActivity, tool.id, tool.name, stick.key, stick.label, secureBoot,
+                                    FsType.valueOf(formatFs), formatLabel,
+                                )
                             } else {
                                 ForgeService.start(this@MainActivity, distro, stick.key, stick.label)
                             }
@@ -708,6 +754,10 @@ class MainActivity : ComponentActivity() {
         secureBoot: Boolean,
         onSecureBoot: (Boolean) -> Unit,
         onBack: () -> Unit,
+        formatFs: FsType = FsType.EXFAT,
+        onFormatFs: (FsType) -> Unit = {},
+        formatLabel: String = "",
+        onFormatLabel: (String) -> Unit = {},
         onErase: () -> Unit,
     ) {
         val resumed by resumeTick.collectAsState()
@@ -726,7 +776,7 @@ class MainActivity : ComponentActivity() {
         Gap(8)
         Txt(
             when (distro.id) {
-                ForgeService.FORMAT_ID -> "Everything on it will be erased, leaving one empty exFAT drive named USB DRIVE that works on Windows, Mac, Linux and Android."
+                ForgeService.FORMAT_ID -> "Everything on it will be erased, leaving one empty drive. Pick what you'll use it with."
                 ForgeService.VENTOY_ID -> "Everything on it will be replaced with the latest Ventoy. Afterwards add images with this app (or from a computer) and choose one when you start from it."
                 else -> "Everything on it will be replaced with ${distro.name}."
             },
@@ -736,6 +786,10 @@ class MainActivity : ComponentActivity() {
         Tile(stick.label, stick.sizeBytes?.let { gb(it) } ?: "", selected = true, usb = true, modifier = Modifier.fillMaxWidth())
         Gap(16)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (distro.id == ForgeService.FORMAT_ID) {
+                FormatChoices(formatFs, onFormatFs, formatLabel, onFormatLabel)
+                Gap(14)
+            }
             if (distro.id == ForgeService.VENTOY_ID) {
                 Txt("Secure Boot support", Forge.brand)
                 Gap(8)
@@ -775,8 +829,45 @@ class MainActivity : ComponentActivity() {
                     ForgeService.FORMAT_ID -> "Erase and format"
                     ForgeService.VENTOY_ID -> "Erase and install"
                     else -> "Erase and write"
-                }, enabled = Preflight.canStart(checks), modifier = Modifier.weight(1f), onClick = onErase,
+                }, enabled = Preflight.canStart(checks) &&
+                    (distro.id != ForgeService.FORMAT_ID || FsSupport.labelProblem(formatFs, formatLabel.trim()) == null),
+                modifier = Modifier.weight(1f), onClick = onErase,
             )
+        }
+    }
+
+    /** Format drive choices, the same as Raven Disk Utility's: what it's for, and an optional name. */
+    @Composable
+    private fun FormatChoices(fs: FsType, onFs: (FsType) -> Unit, label: String, onLabel: (String) -> Unit) {
+        Txt("Use it with", Forge.brand)
+        Gap(8)
+        listOf(
+            Triple(FsType.EXFAT, "exFAT", "Windows, Mac, Linux, Android, cameras and consoles. Best for most drives"),
+            Triple(FsType.FAT32, "FAT32", "Older gear: car stereos, some TVs and consoles. Files up to 4 GB"),
+            Triple(FsType.EXT4, "ext4", "Linux: Steam Deck, Bazzite, SteamOS game drives. Windows and Mac can't read it"),
+        ).forEach { (t, name, detail) ->
+            Tile(name, detail, selected = fs == t, subtitleLines = 2, modifier = Modifier.fillMaxWidth()) { onFs(t) }
+            Gap(8)
+        }
+        Gap(6)
+        Txt("Name (optional)", Forge.brand)
+        Gap(8)
+        val shape = RoundedCornerShape(14.dp)
+        androidx.compose.foundation.text.BasicTextField(
+            value = label,
+            onValueChange = { v -> onLabel(v.take(fs.maxLabel)) },
+            singleLine = true,
+            textStyle = TextStyle(color = Forge.Bone, fontSize = 16.sp),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(Forge.MoltenA),
+            modifier = Modifier.fillMaxWidth().clip(shape).background(Forge.Iron).border(1.dp, Forge.Seam, shape).padding(16.dp),
+            decorationBox = { inner ->
+                if (label.isEmpty()) Txt("My drive", TextStyle(color = Forge.Ash, fontSize = 16.sp))
+                inner()
+            },
+        )
+        FsSupport.labelProblem(fs, label.trim())?.let {
+            Gap(6)
+            Txt(it, Forge.hint.copy(color = Forge.Danger, fontSize = 13.sp))
         }
     }
 
@@ -833,6 +924,11 @@ class MainActivity : ComponentActivity() {
             Gap(8)
             // The latest thing that happened, without its timestamp.
             Txt(it.substringAfter("  "), Forge.hint, maxLines = 2)
+        }
+        val samples by Jobs.samples.collectAsState()
+        if (samples.isNotEmpty()) {
+            Gap(14)
+            SpeedGraph(samples, live = true)
         }
         Spacer(Modifier.weight(1f))
         val first = Progress.firstStep(j.local)
@@ -1034,8 +1130,12 @@ class MainActivity : ComponentActivity() {
                     ok && tested -> "${j.drive}, measured. It's been formatted again, so it's ready to use:"
                     ok && checked -> j.message
                     ok && imported -> "These are on ${j.drive} and will show in Ventoy's menu:"
-                    ok && distro?.id == ForgeService.FORMAT_ID ->
-                        "${j.drive} is now one empty exFAT drive named USB DRIVE. Unplug it and plug it back in to use it for files."
+                    ok && distro?.id == ForgeService.FORMAT_ID -> {
+                        val fsName = j.message.lineSequence().firstOrNull()?.takeIf { it.isNotBlank() } ?: "exFAT"
+                        val named = j.message.lineSequence().drop(1).firstOrNull()?.takeIf { it.isNotBlank() }
+                        "${j.drive} is now one empty $fsName drive" + (named?.let { " named \"$it\"" } ?: "") +
+                            ". Unplug it and plug it back in to use it."
+                    }
                     ok && ventoy -> "${j.drive} now has Ventoy ${j.message}, " +
                         (if (ForgeService.FLAG_SB_OFF in j.flags) "without" else "with") + " Secure Boot support."
                     ok -> "${j.drive} now holds ${j.distro}. " + if (steps.isEmpty()) {
@@ -1057,6 +1157,13 @@ class MainActivity : ComponentActivity() {
                     Gap(18)
                     Txt("Plug the drive into your handheld, start it from USB and pick one from Ventoy's menu.", Forge.hint)
                 }
+            }
+            val samples by Jobs.samples.collectAsState()
+            if (samples.isNotEmpty()) {
+                Gap(18)
+                Txt("Speed", Forge.brand)
+                Gap(8)
+                SpeedGraph(samples, live = false)
             }
             if (steps.isNotEmpty()) InstallGuide(steps, ventoy = ventoy)
         }
@@ -1119,7 +1226,7 @@ class MainActivity : ComponentActivity() {
         var busy by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
 
-        fun <T> withVolume(op: (io.github.ravenor907.handheldforge.core.VentoyDrive, io.github.ravenor907.handheldforge.core.ExFatVolume, io.github.ravenor907.handheldforge.core.BlockDevice) -> T): T {
+        fun <T> withVolume(op: (io.github.ravenor907.handheldforge.core.VentoyDrive, io.github.ravenor907.handheldforge.core.ExFatVolume, io.github.ravenor907.ravendisk.core.io.BlockDevice) -> T): T {
             val d = sticks.device(stick.key) ?: throw java.io.IOException("The drive was unplugged.")
             return sticks.open(d).use { s ->
                 val vd = io.github.ravenor907.handheldforge.core.VentoyDrive.detect(s.disk)

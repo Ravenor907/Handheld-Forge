@@ -1,5 +1,10 @@
 package io.github.ravenor907.handheldforge.core
 
+import io.github.ravenor907.ravendisk.core.job.Stage
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.image.ImageKind
+import io.github.ravenor907.ravendisk.core.image.PrefetchInputStream
+
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

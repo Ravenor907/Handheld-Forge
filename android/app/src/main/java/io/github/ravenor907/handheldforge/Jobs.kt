@@ -1,8 +1,9 @@
 package io.github.ravenor907.handheldforge
 
 import android.os.SystemClock
-import io.github.ravenor907.handheldforge.core.Progress
-import io.github.ravenor907.handheldforge.core.Stage
+import io.github.ravenor907.ravendisk.core.job.Progress
+import io.github.ravenor907.ravendisk.core.job.SpeedSample
+import io.github.ravenor907.ravendisk.core.job.Stage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -49,6 +50,12 @@ object Jobs {
     private val _log = MutableStateFlow<List<String>>(emptyList())
     val log: StateFlow<List<String>> = _log
 
+    /** Live speed graph points for the current job (write, read back, speed test). */
+    private val _samples = MutableStateFlow<List<SpeedSample>>(emptyList())
+    val samples: StateFlow<List<SpeedSample>> = _samples
+
+    fun sample(s: SpeedSample) = _samples.update { it + s }
+
     @Volatile
     var cancelRequested = false
         private set
@@ -81,6 +88,7 @@ object Jobs {
         cancelReason = null
         leftDuringJob = !appVisible
         _log.value = emptyList()
+        _samples.value = emptyList()
         tracker = Progress(if (local) Progress.LOCAL_WEIGHTS else Progress.WEIGHTS) { SystemClock.elapsedRealtime() }
         _state.value = JobState.Running(distro, drive, stage = if (local) Stage.WRITE else Stage.LOOKUP, local = local)
     }
@@ -107,9 +115,10 @@ object Jobs {
     }
 
     /** Debug builds only: show a canned state so each screen can be screenshotted. */
-    fun demo(state: JobState, lines: List<String>) {
+    fun demo(state: JobState, lines: List<String>, samples: List<SpeedSample> = emptyList()) {
         _state.value = state
         _log.value = lines
+        _samples.value = samples
     }
 
     fun reset() {

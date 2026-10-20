@@ -1,5 +1,18 @@
 package io.github.ravenor907.handheldforge.core
 
+import io.github.ravenor907.ravendisk.core.io.BlockDevice
+import io.github.ravenor907.ravendisk.core.job.Stage
+import io.github.ravenor907.ravendisk.core.job.StageFn
+import io.github.ravenor907.ravendisk.core.job.LogFn
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.image.WriteException
+import io.github.ravenor907.ravendisk.core.fs.FsType
+import io.github.ravenor907.ravendisk.core.io.ScsiDisk
+import io.github.ravenor907.ravendisk.core.plan.DiskIdentity
+import io.github.ravenor907.ravendisk.core.plan.DiskSession
+import io.github.ravenor907.ravendisk.core.plan.Outcome
+import io.github.ravenor907.ravendisk.core.plan.QuickFormat
+import io.github.ravenor907.ravendisk.core.plan.RunListener
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
@@ -285,36 +298,45 @@ object Mbr {
     }
 }
 
-/** "Format drive": one exFAT partition across the whole drive, readable everywhere. */
+/**
+ * "Format drive": one partition across the whole drive. The work is done by the drive engine shared
+ * with Raven Disk Utility (QuickFormat): the same planner checks, the same write order (old layout
+ * cleared, filesystem, then the partition table) and the same read-back checks, in both apps.
+ */
 object PlainDrive {
     const val LABEL = "USB DRIVE"
-    const val START = 2048L // 1 MB in, the standard alignment
 
-    fun format(dev: BlockDevice, label: String = LABEL, stage: StageFn, log: LogFn, cancel: () -> Boolean) {
-        require(dev.blockSize == 512) { "This drive uses ${dev.blockSize}-byte sectors, which formatting doesn't support yet." }
-        val total = dev.blockCount
-        require(total > START + 8192) { "This drive is too small to format." }
+    fun format(
+        dev: BlockDevice,
+        label: String = LABEL,
+        stage: StageFn,
+        log: LogFn,
+        cancel: () -> Boolean,
+        fs: FsType = FsType.EXFAT,
+    ) {
         stage(Stage.WRITE, 0, 0)
-        log("Clearing the old layout from ${dev.name}")
-        Wipe.ends(dev)
-        if (cancel()) throw CancelledException()
-        // Partition ends on a 1 MB boundary so the volume stays aligned.
-        val sectors = (total - START) / 2048 * 2048
-        log("Formatting exFAT, ${"%.1f".format(sectors * 512 / 1e9)} GB, label \"$label\"")
-        ExFat.format(dev, START, sectors, label) { d, t -> stage(Stage.WRITE, d, t) }
-        val mbr = ByteArray(512)
-        Mbr.writeTable(mbr, listOf(Mbr.Part(START, sectors, 0x07)))
-        // A disk signature, so Windows doesn't ask to "initialize" the drive.
-        val sig = ByteArray(4).also { java.security.SecureRandom().nextBytes(it) }
-        sig.copyInto(mbr, 440)
-        dev.write(0, 1, mbr)
-        dev.sync()
-        stage(Stage.CHECK, 0, 1)
-        val back = ByteArray(512)
-        dev.read(0, 1, back)
-        if (!back.contentEquals(mbr)) throw WriteException("The drive didn't keep what was written. It may be failing; try another drive.")
-        stage(Stage.CHECK, 1, 1)
-        log("Done: one exFAT partition")
+        val snap = QuickFormat.snapshot(dev, "usb", dev.name, null, (dev as? ScsiDisk)?.physicalBlockSize)
+        QuickFormat.plan(snap, fs, label).second?.let { throw WriteException(it) }
+        log("Formatting ${dev.name} as ${fs.label}" + if (label.isNotBlank()) ", named \"${label.trim()}\"" else "")
+        val session = object : DiskSession {
+            override val dev: BlockDevice = dev
+            override fun identity() = DiskIdentity.of(dev, "usb", dev.name, null)
+            override fun close() {}
+        }
+        val r = QuickFormat.run(session, snap, fs, label, object : RunListener {
+            override fun step(index: Int, count: Int, title: String) = log(title)
+            override fun progress(done: Long, total: Long) = stage(Stage.WRITE, done, total)
+            override fun log(line: String) = log(line)
+        }, cancelled = cancel)
+        r.checks.forEach { log(it) }
+        when (r.outcome) {
+            Outcome.SUCCESS, Outcome.PARTIAL -> {
+                stage(Stage.CHECK, 1, 1)
+                log("Done: one ${fs.label} partition")
+            }
+            Outcome.CANCELLED -> throw CancelledException()
+            Outcome.FAILED -> throw WriteException(r.summary)
+        }
     }
 }
 

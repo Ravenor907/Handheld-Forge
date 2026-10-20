@@ -31,6 +31,8 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
+      - name: Shared drive engine matches Raven Disk Utility
+        run: bash android/drivecore/sync.sh --check
       - name: Unit tests and APKs
         working-directory: android
         env:
@@ -279,9 +281,12 @@ jobs:
             echo "Release $tag already exists, nothing to publish"
             exit 0
           fi
+          code=$(grep -oP 'versionCode = \K[0-9]+' android/app/build.gradle.kts)
+          notes="android/fastlane/metadata/android/en-US/changelogs/$code.txt"
+          { if [ -f "$notes" ]; then echo "## What's new"; echo; sed 's/^• /- /' "$notes"; echo; fi
+            echo "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite, SteamOS or CachyOS boot drive. Keep the app open and the phone alone until it finishes. Signed with the shared test key."; } > "$RUNNER_TEMP/notes.md"
           gh release create "$tag" "HandheldForge-$v.apk" -R "${{ github.repository }}" --target "$GITHUB_SHA" \
-            --title "Handheld Forge for Android $v" \
-            --notes "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite, SteamOS or CachyOS boot drive. Keep the app open and the phone alone until it finishes. Signed with the shared test key."
+            --title "Handheld Forge for Android $v" --notes-file "$RUNNER_TEMP/notes.md"
           echo "published=true" >> "$GITHUB_OUTPUT"
 
   play:

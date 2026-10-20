@@ -1,5 +1,8 @@
 package io.github.ravenor907.handheldforge.core
 
+import io.github.ravenor907.ravendisk.core.io.BulkOnly
+import io.github.ravenor907.ravendisk.core.io.UsbTransport
+
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -18,7 +21,7 @@ class FakeUsbDrive(
     /** Flip a bit in data returned by reads at or after this byte offset (fake/failing stick). */
     var corruptReadsFrom: Long = -1,
     override val maxTransfer: Int = 16384,
-    override val largestTransfer: Int = maxTransfer,
+    val largestTransfer: Int = maxTransfer,
     /** Bulk transfers longer than this fail, like a phone whose kernel caps them. */
     private val refuseAbove: Int = Int.MAX_VALUE,
     /** WRITE commands carrying more than this many bytes stall partway, like a stick that chokes on big writes. */

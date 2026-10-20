@@ -1,4 +1,7 @@
 package io.github.ravenor907.handheldforge.usb
+import io.github.ravenor907.ravendisk.core.io.ScsiDisk
+import io.github.ravenor907.ravendisk.core.io.BulkOnly
+import io.github.ravenor907.ravendisk.core.io.UsbTransport
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -15,9 +18,6 @@ import android.hardware.usb.UsbRequest
 import java.nio.ByteBuffer
 import android.os.Build
 import androidx.core.content.ContextCompat
-import io.github.ravenor907.handheldforge.core.BulkOnly
-import io.github.ravenor907.handheldforge.core.ScsiDisk
-import io.github.ravenor907.handheldforge.core.UsbTransport
 import java.io.Closeable
 import java.io.IOException
 

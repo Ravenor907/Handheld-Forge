@@ -1,11 +1,22 @@
-package io.github.ravenor907.handheldforge.core
+package io.github.ravenor907.ravendisk.core.bench
+
+import io.github.ravenor907.ravendisk.core.io.BlockDevice
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.job.LogFn
+import io.github.ravenor907.ravendisk.core.job.SampleFn
+import io.github.ravenor907.ravendisk.core.job.SpeedMeter
+import io.github.ravenor907.ravendisk.core.job.SpeedPhase
+import io.github.ravenor907.ravendisk.core.job.SpeedSample
+import io.github.ravenor907.ravendisk.core.job.Stage
+import io.github.ravenor907.ravendisk.core.job.StageFn
 
 import java.nio.ByteBuffer
 import java.util.SplittableRandom
 
 /**
- * Measures a drive's real write and read speed and checks it holds what it claims (Labs).
- * Erases the drive.
+ * Measures a drive's real write and read speed and checks it holds what it claims. Erases the
+ * drive. Shared by Raven Disk Utility and Handheld Forge: both show the same live graph from
+ * [SpeedSample]s (the speed over the last quarter second, so drops and spikes show as they happen).
  *
  * 1. Writes a long sequential run from the start (1 to 4 GB, about 90 seconds' worth at the
  *    speed it shows), timing each 256 MB, so a stick that slows down once its fast cache fills
@@ -35,6 +46,11 @@ object DriveTest {
         val badSpots: Int,
         /** Start of the first marker that didn't survive, if any. */
         val firstBadSpot: Long?,
+        /** Every point of the live graph, for drawing it again on the result screen. */
+        val samples: List<SpeedSample> = emptyList(),
+        /** Fastest and slowest moment of the sequential write, MB/s. */
+        val writePeak: Double = 0.0,
+        val writeLow: Double = 0.0,
     ) {
         val fake get() = badSpots > 0
         val failing get() = badBytes > 0
@@ -49,6 +65,7 @@ object DriveTest {
 
         fun lines(): List<String> = buildList {
             add("Write: %.1f MB/s over %.1f GB".format(writeMBs, testedBytes / 1e9))
+            if (writePeak > 0) add("Write speed swung between %.0f and %.0f MB/s".format(writeLow, writePeak))
             slowdown?.let { (a, b) -> add("It starts at %.0f MB/s, then drops to %.0f MB/s once its fast cache is full".format(a, b)) }
             add("Read: %.1f MB/s".format(readMBs))
             when {
@@ -66,8 +83,7 @@ object DriveTest {
                         "(writing near its end overwrote the start). Don't trust it with anything.",
                 )
             }
-            val gb8 = 8.12e9
-            add("A SteamOS image (8.1 GB) would take about %s to write".format(minutes(gb8 / (slowdown?.second ?: writeMBs) / 1e6)))
+            add("An 8 GB image (a typical Linux handheld OS) would take about %s to write".format(minutes(8e9 / (slowdown?.second ?: writeMBs) / 1e6)))
         }
 
         private fun minutes(seconds: Double) = if (seconds < 90) "%.0f seconds".format(seconds) else "%.0f minutes".format(seconds / 60)
@@ -98,7 +114,9 @@ object DriveTest {
         budgetSeconds: Double = 90.0,
         spots: Int = 128,
         seed: Long = System.nanoTime(),
+        sample: SampleFn = {},
     ): Report {
+        val meter = SpeedMeter(sample)
         val bs = dev.blockSize
         require(CHUNK % bs == 0)
         val size = dev.sizeBytes
@@ -120,6 +138,7 @@ object DriveTest {
             val n = minOf(CHUNK.toLong(), target - written).toInt() / bs * bs
             pattern(buf, n, written, seed)
             dev.write(written / bs, n / bs, buf)
+            meter.add(SpeedPhase.WRITE, n.toLong())
             written += n
             segBytes += n
             if (segBytes >= SEGMENT || written >= target) {
@@ -148,9 +167,11 @@ object DriveTest {
             if (cancel()) throw CancelledException()
             pattern(buf, SPOT.toInt(), p, seed.inv())
             dev.write(p / bs, (SPOT / bs).toInt(), buf)
+            meter.add(SpeedPhase.SCATTER_WRITE, SPOT)
             stage(Stage.WRITE, written + (i + 1) * SPOT, target + spotArea)
         }
         dev.sync()
+        meter.flush()
         val writeNs = System.nanoTime() - t0
         val writeMBs = (written + positions.size * SPOT) / 1e6 / (writeNs / 1e9)
 
@@ -164,6 +185,7 @@ object DriveTest {
             if (cancel()) throw CancelledException()
             val n = minOf(CHUNK.toLong(), written - read).toInt()
             dev.read(read / bs, n / bs, check)
+            meter.add(SpeedPhase.READ, n.toLong())
             pattern(buf, n, read, seed)
             if (!buf.contentEquals(check) || n < CHUNK) {
                 for (k in 0 until n) if (buf[k] != check[k]) badBytes++
@@ -179,6 +201,7 @@ object DriveTest {
         for ((i, p) in positions.withIndex()) {
             if (cancel()) throw CancelledException()
             dev.read(p / bs, (SPOT / bs).toInt(), spotCheck)
+            meter.add(SpeedPhase.SCATTER_READ, SPOT)
             pattern(spotBuf, SPOT.toInt(), p, seed.inv())
             if (!spotBuf.contentEquals(spotCheck)) {
                 badSpots++
@@ -186,6 +209,11 @@ object DriveTest {
             }
             stage(Stage.CHECK, written + (i + 1) * SPOT, total)
         }
-        return Report(size, written, segments, writeMBs, readMBs, badBytes, positions.size, badSpots, firstBad)
+        meter.flush()
+        val w = meter.samples.filter { it.phase == SpeedPhase.WRITE }.map { it.mbps }
+        return Report(
+            size, written, segments, writeMBs, readMBs, badBytes, positions.size, badSpots, firstBad,
+            meter.samples.toList(), w.maxOrNull() ?: 0.0, w.minOrNull() ?: 0.0,
+        )
     }
 }
