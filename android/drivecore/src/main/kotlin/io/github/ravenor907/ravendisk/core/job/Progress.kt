@@ -1,4 +1,4 @@
-package io.github.ravenor907.handheldforge.core
+package io.github.ravenor907.ravendisk.core.job
 
 /**
  * Overall progress for a whole job (download, verify, write, check), the same rules as the

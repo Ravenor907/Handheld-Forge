@@ -1,5 +1,15 @@
-package io.github.ravenor907.handheldforge.core
+package io.github.ravenor907.ravendisk.core.image
 
+import io.github.ravenor907.ravendisk.core.io.BlockDevice
+import io.github.ravenor907.ravendisk.core.io.ScsiDisk
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.job.LogFn
+import io.github.ravenor907.ravendisk.core.job.Stage
+import io.github.ravenor907.ravendisk.core.job.StageFn
+import io.github.ravenor907.ravendisk.core.job.SampleFn
+import io.github.ravenor907.ravendisk.core.job.SpeedMeter
+import io.github.ravenor907.ravendisk.core.job.SpeedPhase
+import io.github.ravenor907.ravendisk.core.job.toHex
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
@@ -10,8 +20,8 @@ class WriteException(msg: String) : IOException(msg)
 class CorruptImageException(cause: Throwable) : IOException("The image file is damaged: ${cause.message}", cause)
 
 /**
- * Writes an ISO to a block device byte for byte (Bazzite's ISO is a hybrid
- * image, so this is a bootable drive), then reads the drive back and compares.
+ * Writes an image to a drive byte for byte (a hybrid ISO or disk image becomes a bootable
+ * drive), then reads the drive back and compares. Shared by Raven Disk Utility and Handheld Forge.
  */
 object ImageWriter {
     /** Bytes per write command. Big commands let the stick write in long runs, like a PC does. */
@@ -45,7 +55,8 @@ object ImageWriter {
         log: LogFn,
         cancel: () -> Boolean,
         verify: Boolean = true,
-    ) = writeStream({ file.inputStream() }, file.length(), decode, dev, expectedSha256, stage, log, cancel, verify)
+        sample: SampleFn = {},
+    ) = writeStream({ file.inputStream() }, file.length(), decode, dev, expectedSha256, stage, log, cancel, verify, sample)
 
     /** Same, reading from [open] (for example a file the person picked); [rawSize] drives progress. */
     fun writeStream(
@@ -57,9 +68,12 @@ object ImageWriter {
         stage: StageFn,
         log: LogFn,
         cancel: () -> Boolean,
-        /** Read the drive back and compare (off only by the Labs setting). */
+        /** Read the drive back and compare (off only by Handheld Forge's Labs setting). */
         verify: Boolean = true,
+        /** Live speed, for the graph. */
+        sample: SampleFn = {},
     ): Long {
+        val meter = SpeedMeter(sample)
         val fileSize = rawSize
         val bs = dev.blockSize
         require(CHUNK % bs == 0)
@@ -99,6 +113,7 @@ object ImageWriter {
                     throw WriteException("This drive is too small for the image.")
                 }
                 timer.writing { dev.write(done / bs, padded / bs, buf) }
+                meter.add(SpeedPhase.WRITE, got.toLong())
                 done += got
                 stage(Stage.WRITE, raw.count, fileSize)
                 if (got < CHUNK) break
@@ -111,6 +126,7 @@ object ImageWriter {
         }
         stage(Stage.WRITE, fileSize, fileSize)
         timer.writing { dev.sync() }
+        meter.flush()
         log(timer.summary(size))
         if (!verify) {
             log("Skipped reading the drive back (Labs setting)")
@@ -127,10 +143,12 @@ object ImageWriter {
             val want = minOf(CHUNK.toLong(), size - read).toInt()
             val padded = roundUp(want, bs)
             dev.read(read / bs, padded / bs, buf)
+            meter.add(SpeedPhase.READ, want.toLong())
             check.update(buf, 0, want)
             read += want
             stage(Stage.CHECK, read, size)
         }
+        meter.flush()
         if (check.digest().toHex() != written) {
             throw WriteException(
                 "The drive didn't store the image correctly. It may be failing or counterfeit. Try another drive.",

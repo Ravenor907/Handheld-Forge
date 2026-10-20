@@ -31,6 +31,8 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
+      - name: Shared drive engine matches Raven Disk Utility
+        run: bash android/drivecore/sync.sh --check
       - name: Unit tests and APKs
         working-directory: android
         env:
@@ -104,6 +106,8 @@ jobs:
     # Twice: Android 14, and Android 16 (the API level the app targets).
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -137,6 +141,16 @@ jobs:
           name: android-screens-${{ matrix.api }}
           path: screens/
           if-no-files-found: ignore
+      - name: Publish screenshots to a branch (easy to fetch and review)
+        if: always() && github.event_name == 'push'
+        run: |
+          [ -d screens ] || exit 0
+          branch="ci-screens/android-api-${{ matrix.api }}"
+          cd screens
+          git init -q && git checkout -q -b "$branch"
+          git config user.name "github-actions[bot]" && git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add . && git commit -q -m "Screenshots from ${GITHUB_SHA::7} (API ${{ matrix.api }})"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" "$branch"
 
 
   drive-images:
@@ -279,9 +293,12 @@ jobs:
             echo "Release $tag already exists, nothing to publish"
             exit 0
           fi
+          code=$(grep -oP 'versionCode = \K[0-9]+' android/app/build.gradle.kts)
+          notes="android/fastlane/metadata/android/en-US/changelogs/$code.txt"
+          { if [ -f "$notes" ]; then echo "## What's new"; echo; sed 's/^• /- /' "$notes"; echo; fi
+            echo "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite, SteamOS or CachyOS boot drive. Keep the app open and the phone alone until it finishes. Signed with the shared test key."; } > "$RUNNER_TEMP/notes.md"
           gh release create "$tag" "HandheldForge-$v.apk" -R "${{ github.repository }}" --target "$GITHUB_SHA" \
-            --title "Handheld Forge for Android $v" \
-            --notes "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite, SteamOS or CachyOS boot drive. Keep the app open and the phone alone until it finishes. Signed with the shared test key."
+            --title "Handheld Forge for Android $v" --notes-file "$RUNNER_TEMP/notes.md"
           echo "published=true" >> "$GITHUB_OUTPUT"
 
   play:

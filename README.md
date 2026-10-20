@@ -25,7 +25,7 @@ No root, no terminal, no `dd` roulette.
 <tr>
 <td><img src="docs/assets/icon-add.png" width="44"><br><b>Add images</b><br>Drop ISOs onto a Ventoy stick straight from your phone or PC. Compressed ones get unpacked.</td>
 <td><img src="docs/assets/icon-auto.png" width="44"><br><b>Starts on its own</b><br>Controller dead in Ventoy's menu? Mark an image and it boots itself.</td>
-<td><img src="docs/assets/icon-format.png" width="44"><br><b>Format drive</b><br>Turns a used boot stick back into a normal exFAT drive.</td>
+<td><img src="docs/assets/icon-format.png" width="44"><br><b>Format drive</b><br>Turns a used boot stick back into a normal drive: exFAT, FAT32 or ext4, with a name.</td>
 </tr>
 <tr>
 <td><img src="docs/assets/icon-verify.png" width="44"><br><b>Checked twice</b><br>Downloads are checked, and every byte is read back off the stick.</td>

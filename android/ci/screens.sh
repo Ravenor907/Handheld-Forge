@@ -6,7 +6,7 @@ PKG=io.github.ravenor907.handheldforge
 mkdir -p screens
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb logcat -c
-for demo in empty choose labs confirm-labs file ventoy confirm confirm-ventoy import working stop done done-cachyos done-ventoy done-format done-import labs-tools done-test error; do
+for demo in empty choose labs confirm-labs file ventoy confirm confirm-ventoy import confirm-format-ext4 working test-live stop done done-cachyos done-ventoy done-format done-import labs-tools done-test error; do
   adb shell am force-stop $PKG
   adb shell am start -W -n $PKG/.MainActivity --es demo $demo >/dev/null
   sleep 4

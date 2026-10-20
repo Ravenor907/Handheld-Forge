@@ -1,0 +1,4 @@
+• Format drive: pick exFAT, FAT32 or ext4 and give the drive a name. Formatting now uses the same engine as Raven Disk Utility, with a read-back check
+• Drive test: live speed graph while it runs, plus the full graph on the results
+• Live speed graph while writing images too
+• Faster, sturdier USB: more transfers in flight, and better recovery on picky sticks

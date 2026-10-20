@@ -1,5 +1,14 @@
 package io.github.ravenor907.handheldforge
 
+import io.github.ravenor907.ravendisk.core.bench.DriveTest
+import io.github.ravenor907.ravendisk.core.fs.FsType
+import io.github.ravenor907.ravendisk.core.image.CorruptImageException
+import io.github.ravenor907.ravendisk.core.image.ImageKind
+import io.github.ravenor907.ravendisk.core.image.ImageWriter
+import io.github.ravenor907.ravendisk.core.image.WriteException
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.job.Progress
+import io.github.ravenor907.ravendisk.core.job.Stage
 import android.net.Uri
 import android.provider.OpenableColumns
 
@@ -20,22 +29,14 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import io.github.ravenor907.handheldforge.core.Catalog
-import io.github.ravenor907.handheldforge.core.CancelledException
-import io.github.ravenor907.handheldforge.core.CorruptImageException
 import io.github.ravenor907.handheldforge.core.Distro
-import io.github.ravenor907.handheldforge.core.DriveTest
-import io.github.ravenor907.handheldforge.core.WriteException
 import io.github.ravenor907.handheldforge.core.DownloadException
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Downloader
-import io.github.ravenor907.handheldforge.core.ImageKind
-import io.github.ravenor907.handheldforge.core.ImageWriter
-import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Ventoy
 import io.github.ravenor907.handheldforge.core.VentoyImport
 import io.github.ravenor907.handheldforge.core.VentoyDrive
 import io.github.ravenor907.handheldforge.core.PlainDrive
-import io.github.ravenor907.handheldforge.core.Stage
 import io.github.ravenor907.handheldforge.usb.UsbSticks
 import java.io.File
 import java.io.IOException
@@ -57,7 +58,11 @@ class ForgeService : Service() {
         val file = intent.getStringExtra(EXTRA_URI)?.let { Uri.parse(it) }
         worker = Thread({
             when {
-                distroId == FORMAT_ID || distroId == VENTOY_ID -> runTool(distroId, stickKey, intent.getBooleanExtra(EXTRA_SECURE_BOOT, true))
+                distroId == FORMAT_ID || distroId == VENTOY_ID -> runTool(
+                    distroId, stickKey, intent.getBooleanExtra(EXTRA_SECURE_BOOT, true),
+                    intent.getStringExtra(EXTRA_FS)?.let { n -> FsType.entries.firstOrNull { it.name == n } } ?: FsType.EXFAT,
+                    intent.getStringExtra(EXTRA_LABEL) ?: PlainDrive.LABEL,
+                )
                 distroId == IMPORT_ID -> runImport(intent.getStringArrayListExtra(EXTRA_URIS).orEmpty().map { Uri.parse(it) }, stickKey)
                 distroId == TEST_ID -> runTest(stickKey)
                 distroId == CHECK_ID -> runCheck(intent.getStringExtra(EXTRA_CHECK_DISTRO), file, stickKey)
@@ -119,7 +124,7 @@ class ForgeService : Service() {
                     ImageWriter.writeStream(
                         { contentResolver.openInputStream(uri) ?: throw IOException("Couldn't open $name") },
                         size, ImageKind.decoder(kind), s.disk, null, stage, Jobs::log, { Jobs.cancelRequested },
-                        verify = !Labs.skipCheck(this),
+                        verify = !Labs.skipCheck(this), sample = Jobs::sample,
                     )
                 } catch (e: CorruptImageException) {
                     throw IOException("$name is damaged or isn't a compressed disk image. Download it again.")
@@ -142,8 +147,8 @@ class ForgeService : Service() {
         }
     }
 
-    /** Format drive (plain exFAT) or install Ventoy. */
-    private fun runTool(tool: String, stickKey: String, secureBoot: Boolean) {
+    /** Format drive (shared with Raven Disk Utility) or install Ventoy. */
+    private fun runTool(tool: String, stickKey: String, secureBoot: Boolean, fs: FsType, label: String) {
         val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HandheldForge:write")
         wake.acquire(60 * 60 * 1000L)
@@ -167,11 +172,11 @@ class ForgeService : Service() {
                 if (ventoy != null) {
                     Ventoy.install(s.disk, ventoy.second, stage, Jobs::log, cancel, secureBoot = secureBoot)
                 } else {
-                    PlainDrive.format(s.disk, stage = stage, log = Jobs::log, cancel = cancel)
+                    PlainDrive.format(s.disk, label, stage = stage, log = Jobs::log, cancel = cancel, fs = fs)
                 }
             }
             Jobs.finish(
-                Outcome.OK, ventoy?.first?.version ?: "",
+                Outcome.OK, ventoy?.first?.version ?: "${fs.label}\n${label.trim()}",
                 if (ventoy != null) setOf(if (secureBoot) FLAG_SB_ON else FLAG_SB_OFF) else emptySet(),
             )
             done(if (ventoy != null) "Ventoy ${ventoy.first.version} is installed" else "The drive is formatted")
@@ -306,7 +311,7 @@ class ForgeService : Service() {
                         open, rawSize, decode ?: { it }, s.disk,
                         // A live download is checked once it's all in, below.
                         if (decode == null && live == null) img.sha256 else null,
-                        stage, Jobs::log, cancel, verify = !Labs.skipCheck(this),
+                        stage, Jobs::log, cancel, verify = !Labs.skipCheck(this), sample = Jobs::sample,
                     )
                     live?.finish(Jobs::log)
                 } catch (e: CorruptImageException) {
@@ -417,7 +422,7 @@ class ForgeService : Service() {
             val report = sticks.open(device).use { s ->
                 s.disk.onNote = { Jobs.log(it) }
                 logDrive(s)
-                val r = DriveTest.run(s.disk, stage, Jobs::log, cancel)
+                val r = DriveTest.run(s.disk, stage, Jobs::log, cancel, sample = Jobs::sample)
                 r.lines().forEach { Jobs.log(it) }
                 Jobs.log("Formatting the drive so it's usable again")
                 PlainDrive.format(s.disk, stage = { _, _, _ -> }, log = Jobs::log, cancel = cancel)
@@ -564,14 +569,23 @@ class ForgeService : Service() {
         }
 
         /** Format drive or Ventoy. Ventoy downloads its latest release first; formatting is local. */
-        fun startTool(context: Context, tool: String, name: String, stickKey: String, stickLabel: String, secureBoot: Boolean = true) {
+        fun startTool(
+            context: Context, tool: String, name: String, stickKey: String, stickLabel: String, secureBoot: Boolean = true,
+            fs: FsType = FsType.EXFAT, label: String = PlainDrive.LABEL,
+        ) {
             Jobs.begin(name, stickLabel, local = tool == FORMAT_ID)
             val i = Intent(context, ForgeService::class.java)
                 .putExtra(EXTRA_DISTRO, tool)
                 .putExtra(EXTRA_STICK, stickKey)
                 .putExtra(EXTRA_SECURE_BOOT, secureBoot)
+                .putExtra(EXTRA_FS, fs.name)
+                .putExtra(EXTRA_LABEL, label)
             ContextCompat.startForegroundService(context, i)
         }
+
+        /** Format drive: which filesystem, and its name (shared QuickFormat choices). */
+        const val EXTRA_FS = "fs"
+        const val EXTRA_LABEL = "label"
 
         /**
          * Every file is pickable. Phones label ISOs and images inconsistently (and greyed-out

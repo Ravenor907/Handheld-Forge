@@ -1,5 +1,9 @@
 package io.github.ravenor907.handheldforge.core
 
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.image.WriteException
+import io.github.ravenor907.ravendisk.core.io.BlockDevice
+
 import java.io.IOException
 import java.io.InputStream
 import java.nio.ByteBuffer

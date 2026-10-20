@@ -1,4 +1,5 @@
 package io.github.ravenor907.handheldforge.core
+import io.github.ravenor907.ravendisk.core.io.BlockDevice
 
 import java.io.File
 import java.io.RandomAccessFile

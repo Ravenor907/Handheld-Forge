@@ -1,15 +1,14 @@
 package io.github.ravenor907.handheldforge.core
 
+import io.github.ravenor907.ravendisk.core.job.CancelledException
+import io.github.ravenor907.ravendisk.core.job.Stage
+import io.github.ravenor907.ravendisk.core.job.StageFn
+import io.github.ravenor907.ravendisk.core.job.LogFn
+
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
-
-/** Steps of a job, in order. */
-enum class Stage { LOOKUP, DOWNLOAD, VERIFY, WRITE, CHECK }
-
-typealias StageFn = (Stage, Long, Long) -> Unit
-typealias LogFn = (String) -> Unit
 
 class DownloadException(msg: String) : Exception(msg)
 

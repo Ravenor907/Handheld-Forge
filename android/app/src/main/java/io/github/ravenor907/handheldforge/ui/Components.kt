@@ -1,5 +1,7 @@
 package io.github.ravenor907.handheldforge.ui
 
+import io.github.ravenor907.ravendisk.core.job.Progress
+
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat

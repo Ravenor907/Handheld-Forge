@@ -1,4 +1,5 @@
 package io.github.ravenor907.handheldforge.core
+import io.github.ravenor907.ravendisk.core.image.ParallelBzip2InputStream
 
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream
