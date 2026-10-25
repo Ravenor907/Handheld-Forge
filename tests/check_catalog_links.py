@@ -50,15 +50,19 @@ def main() -> int:
         working = False
         for img in d.get("images", []):
             if img.get("latest_page"):
-                page = urllib.request.urlopen(urllib.request.Request(
-                    img["latest_page"], headers={"User-Agent": "HandheldForge-CI"}), timeout=30).read(4 << 20)
-                text = page.decode("utf-8", "replace")
-                builds = sorted((m.group(1), m.group(0)) for m in re.finditer(img["latest_pattern"], text))
-                if not builds:
-                    failed.append(f"{d['id']}: {img['latest_page']} names no build matching the pattern")
-                    print(f"{d['id']}: {img['latest_page']}: no build found")
-                else:
-                    print(f"{d['id']}: newest build on the page {builds[-1][0]}: {status(builds[-1][1])}")
+                try:
+                    ua = {"User-Agent": "HandheldForge-CI"}
+                    req = urllib.request.Request(img["latest_page"], headers=ua)
+                    text = urllib.request.urlopen(req, timeout=30).read(4 << 20).decode("utf-8", "replace")
+                    found = re.finditer(img["latest_pattern"], text)
+                    builds = sorted((m.group(1), m.group(0)) for m in found)
+                    note = (f"newest build on the page {builds[-1][0]}: {status(builds[-1][1])}" if builds
+                            else f"no build matching the pattern on {img['latest_page']} ({len(text)} bytes)")
+                except OSError as e:
+                    note = f"couldn't read {img['latest_page']}: {e}"
+                print(f"::notice title={d['id']} latest build::{note}")
+                if "newest build" not in note:
+                    failed.append(f"{d['id']}: {note}")
             iso = status(img["iso_url"])
             line = f"{d['id']}: {img['label']}: image {iso}"
             ok = iso.startswith("ok")
@@ -66,7 +70,7 @@ def main() -> int:
                 chk = status(img["checksum_url"])
                 line += f", checksum {chk}"
                 ok = ok and chk.startswith("ok")
-            print(line)
+            print(f"::notice title={d['id']}::{line}")
             working = working or ok
         if not working:
             failed.append(d["id"])
