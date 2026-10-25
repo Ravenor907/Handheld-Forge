@@ -5,7 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from handheld_forge.config import CatalogError, experimental_variants, get_distro, install_guide, load_catalog
+from handheld_forge.config import CatalogError, get_distro, install_guide, load_catalog
 
 
 class CatalogTests(unittest.TestCase):
@@ -28,43 +28,6 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(c.format, "iso")
         self.assertTrue(c.images[0].checksum_url.endswith(".iso.sha256"))
         self.assertIn("touchscreen", c.warning)
-
-    def test_experimental_no_password_cachyos(self):
-        cat = load_catalog()
-        variants = experimental_variants(cat)
-        self.assertEqual([d.id for d in variants], ["bazzite-deck-deck", "cachyos-handheld-copy"])
-        v = get_distro("cachyos-handheld-copy", cat)
-        self.assertTrue(v.experimental)
-        self.assertFalse(v.needs_password)
-        self.assertEqual((v.write, v.layout), ("copy", "fat"))
-        self.assertEqual(v.images, get_distro("cachyos-handheld", cat).images)  # same download
-        self.assertIn("Experimental", v.warning)
-        self.assertIn("touchscreen", v.warning)  # the controls warning still applies
-        self.assertIn("regular CachyOS option", v.install_steps[-1])
-        self.assertIsNone(v.preset_user)
-        self.assertNotIn("—", v.warning + "".join(v.install_steps))
-
-    def test_experimental_bazzite_preset_login(self):
-        cat = load_catalog()
-        v = get_distro("bazzite-deck-deck", cat)
-        self.assertTrue(v.experimental)
-        self.assertFalse(v.needs_password)  # still copied, no admin password on the desktop
-        self.assertEqual((v.preset_user.name, v.preset_user.full_name, v.preset_user.password),
-                         ("deck", "Deck", "deck123"))
-        self.assertEqual([i.label for i in v.images], ["Legacy ISO (fallback)"])
-        self.assertEqual(v.edition, "Login: deck")
-        self.assertIn("deck123", v.warning)
-        self.assertTrue(any("Installation Destination" in s for s in v.install_steps))
-        self.assertIn("regular Bazzite option", v.install_steps[-1])
-
-    def test_experimental_entries_are_checked(self):
-        base = {"id": "x", "name": "X", "enabled": True,
-                "images": [{"label": "A", "iso_url": "https://e/a.iso", "checksum_url": "https://e/a.sha"}]}
-        for bad in ({"id": "u", "edition": "e", "user": {"name": "Deck", "password": "p"}},
-                    {"id": "u", "edition": "e", "user": {"name": "deck", "password": ""}},
-                    {"id": "u", "edition": "e", "image": "missing"}):
-            with self.assertRaises(CatalogError):
-                experimental_variants(self._load([{**base, "experimental": [bad]}]))
 
     def test_install_guide(self):
         cat = load_catalog()
@@ -190,16 +153,6 @@ class GuiSmokeTests(unittest.TestCase):
             shot(w, "4b-confirm-steamos")
             w.stack.setCurrentWidget(w.choose_page)
 
-            # The no-password CachyOS sits in its own Experimental section and warns before erasing.
-            exp = next(b for b in w.os_group.buttons() if b.property("distro") == "cachyos-handheld-copy")
-            self.assertEqual(exp.subtitle, "No password")
-            exp.setChecked(True)
-            self.assertFalse(w._distro().needs_password)
-            w._ask_confirm()
-            self.assertIn("Experimental", w.confirm_warning.text())
-            self.assertNotIn("Linux will ask for your password", w.confirm_warning.text())
-            shot(w, "4c-confirm-experimental")
-            w.stack.setCurrentWidget(w.choose_page)
             next(b for b in w.os_group.buttons() if b.property("distro") == "bazzite-deck").setChecked(True)
             w._ask_confirm()
 
@@ -478,78 +431,6 @@ class GuiParityTests(unittest.TestCase):
         self.assertFalse(gui.settings.load().labs)
         w.close()
         self.app.processEvents()
-
-
-class UnlockTests(unittest.TestCase):
-    """Experimental options stay hidden until Bazzite is tapped ten times in a row."""
-
-    def setUp(self):
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from unittest import mock
-
-        from PySide6.QtWidgets import QApplication
-
-        from handheld_forge import gui
-        from handheld_forge.preflight import MachineState
-
-        self.app = QApplication.instance() or QApplication([])
-        self.gui = gui
-        self.tmp = tempfile.TemporaryDirectory()
-        self.patches = [mock.patch.dict(os.environ, {"XDG_DATA_HOME": self.tmp.name}),
-                        mock.patch.object(gui, "list_drives", return_value=[]),
-                        mock.patch.object(gui, "read_state", return_value=MachineState(80, True, True, True))]
-        for p in self.patches:
-            p.start()
-        self.clock = 100.0
-        self.patches.append(mock.patch.object(gui.time, "monotonic", side_effect=lambda: self.clock))
-        self.patches[-1].start()
-
-    def tearDown(self):
-        for p in reversed(self.patches):
-            p.stop()
-        self.tmp.cleanup()
-
-    def tap(self, w, n, gap=0.3):
-        bazzite = next(b for b in w.os_group.buttons() if b.property("distro") == "bazzite-deck")
-        for _ in range(n):
-            self.clock += gap
-            bazzite.click()
-
-    def test_ten_taps_unlock_and_it_is_remembered(self):
-        (Path(self.tmp.name) / "handheld-forge").mkdir()  # installed
-        w = self.gui.MainWindow()
-        self.assertFalse(w.exp_box.isVisibleTo(w))
-        self.assertFalse(w.hide_exp_action.isVisible())
-        self.tap(w, 4)
-        self.assertFalse(w.empty_hint.isVisibleTo(w))  # no hint for the first few taps
-        self.tap(w, 3)
-        self.assertEqual(w.empty_hint.text(), "3 more taps to show experimental options")
-        self.tap(w, 3)
-        self.assertTrue(w.exp_box.isVisibleTo(w))
-        self.assertTrue(w.hide_exp_action.isVisible())
-        self.assertIn("Experimental options are on", w.empty_hint.text())
-        w.close()
-
-        again = self.gui.MainWindow()  # next launch
-        self.assertTrue(again.exp_box.isVisibleTo(again))
-        exp = next(b for b in again.os_group.buttons() if b.property("distro") == "bazzite-deck-deck")
-        exp.setChecked(True)
-        again.hide_exp_action.trigger()
-        self.assertFalse(again.exp_box.isVisibleTo(again))
-        self.assertFalse(again._distro().experimental)  # the hidden choice was unpicked
-        self.assertFalse((Path(self.tmp.name) / "handheld-forge" / "experimental").exists())
-        again.close()
-
-    def test_a_pause_starts_the_count_again(self):
-        w = self.gui.MainWindow()
-        self.tap(w, 9)
-        self.tap(w, 1, gap=5)
-        self.assertFalse(w.exp_box.isVisibleTo(w))
-        self.tap(w, 9)
-        self.assertTrue(w.exp_box.isVisibleTo(w))
-        # Not installed (running from the code): on for this session only, nothing written.
-        self.assertFalse((Path(self.tmp.name) / "handheld-forge").exists())
-        w.close()
 
 
 if __name__ == "__main__":

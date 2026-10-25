@@ -8,6 +8,7 @@ working image at all, since later images are fallbacks by design.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -15,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "handheld_forge" / "distros.json"
-# The Android app's experimental systems, kept out of the shared catalog.
+# Labs systems (Batocera), shown once Labs is on.
 LABS = ROOT / "handheld_forge" / "labs.json"
 
 
@@ -48,6 +49,16 @@ def main() -> int:
             continue
         working = False
         for img in d.get("images", []):
+            if img.get("latest_page"):
+                page = urllib.request.urlopen(urllib.request.Request(
+                    img["latest_page"], headers={"User-Agent": "HandheldForge-CI"}), timeout=30).read(4 << 20)
+                text = page.decode("utf-8", "replace")
+                builds = sorted((m.group(1), m.group(0)) for m in re.finditer(img["latest_pattern"], text))
+                if not builds:
+                    failed.append(f"{d['id']}: {img['latest_page']} names no build matching the pattern")
+                    print(f"{d['id']}: {img['latest_page']}: no build found")
+                else:
+                    print(f"{d['id']}: newest build on the page {builds[-1][0]}: {status(builds[-1][1])}")
             iso = status(img["iso_url"])
             line = f"{d['id']}: {img['label']}: image {iso}"
             ok = iso.startswith("ok")

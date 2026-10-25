@@ -27,9 +27,7 @@ def make_drive(distro: Distro, drive: Drive, image: Path, stage=lambda *_: None,
     """Makes the drive. `live` is a download still arriving (Labs): the image is written from it
     as it comes in, and its checksum is checked once it's complete."""
     if not distro.needs_password:
-        u = distro.preset_user
-        ks = builder.user_kickstart(u.name, u.full_name, u.password) if u else None
-        builder.build_drive(drive, image, stage, log, cancel, layout=distro.layout, kickstart=ks)
+        builder.build_drive(drive, image, stage, log, cancel)
         return
     try:
         if live is not None:

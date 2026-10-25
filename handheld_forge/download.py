@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import os
+import re
 import time
 import shutil
 import threading
@@ -201,11 +202,27 @@ def remote_size(url: str) -> int | None:
     return None if meta is None else meta[0]
 
 
+def newest_build(img: ImageSource, log: LogFn = print) -> ImageSource:
+    """The newest build named on the publisher's page, or the catalog's own when there's none."""
+    if not img.latest_page:
+        return img
+    try:
+        page = fetch_text(img.latest_page, 4 * 1024 * 1024)
+        found = sorted({(m.group(1), m.group(0)) for m in re.finditer(img.latest_pattern, page)})
+    except (urllib.error.URLError, OSError, re.error) as e:
+        log(f"Couldn't read {img.latest_page} ({e}); using the known build")
+        return img
+    if not found or found[-1][1] == img.iso_url:
+        return img
+    log(f"Newest build on {img.latest_page}: {found[-1][0]}")
+    return img.at(found[-1][1])
+
+
 def resolve_image(distro: Distro, log: LogFn = print) -> ImageSource:
-    """First image in the catalog whose ISO actually exists upstream."""
+    """First image in the catalog whose ISO actually exists upstream, newest build first."""
     if not distro.enabled:
         raise DownloadError(f"{distro.name} is not available yet")
-    for img in distro.images:
+    for img in [newest_build(i, log) for i in distro.images] + [i for i in distro.images if i.latest_page]:
         try:
             if remote_size(img.iso_url) is not None:
                 log(f"Using {img.label}: {img.filename}")

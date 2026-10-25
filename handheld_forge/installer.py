@@ -272,10 +272,6 @@ def _size(path: Path) -> int:
     return sum(f.lstat().st_size for f in path.rglob("*") if f.is_file() and not f.is_symlink())
 
 
-def cache_size(p: Paths | None = None) -> int:
-    return _size((p or Paths.current()).cache)
-
-
 def _ours(d: Path) -> bool:
     """A folder we may delete: named handheld-forge, inside the user's home, not the home itself."""
     home = Path.home().resolve()

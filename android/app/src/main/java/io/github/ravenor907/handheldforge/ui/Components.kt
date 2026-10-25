@@ -53,7 +53,6 @@ import androidx.compose.ui.unit.sp
 object Forge {
     val Slate = Color(0xFF1B2026)
     val Iron = Color(0xFF252B33)
-    val IronHi = Color(0xFF2C333C)
     val Seam = Color(0xFF353D47)
     val Ash = Color(0xFF98A2AE)
     val Bone = Color(0xFFECEFF2)
@@ -300,34 +299,7 @@ fun CheckRow(title: String, detail: String, ok: Boolean, required: Boolean, onCl
 }
 
 /** A tick box the person has to tick themselves, e.g. agreeing to leave the phone alone. */
-@Composable
-fun AckBox(text: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    val shape = RoundedCornerShape(12.dp)
-    Row(
-        Modifier.fillMaxWidth().clip(shape).background(Forge.Iron)
-            .then(if (checked) Modifier.border(2.dp, Forge.molten, shape) else Modifier.border(1.dp, Forge.Seam, shape))
-            .clickable(role = Role.Checkbox) { onChange(!checked) }.padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Canvas(Modifier.size(24.dp)) {
-            val u = size.width / 24f
-            val r = CornerRadius(5 * u)
-            if (checked) {
-                drawRoundRect(Forge.molten, cornerRadius = r)
-                drawPath(
-                    Path().apply { moveTo(6 * u, 12.5f * u); lineTo(10 * u, 16.5f * u); lineTo(18 * u, 8 * u) }, Forge.Ink,
-                    style = Stroke(2.8f * u, cap = StrokeCap.Round, join = StrokeJoin.Round),
-                )
-            } else {
-                drawRoundRect(Forge.Ash, cornerRadius = r, style = Stroke(2 * u))
-            }
-        }
-        Spacer(Modifier.width(14.dp))
-        Txt(text, TextStyle(color = Forge.Bone, fontSize = 14.sp, lineHeight = 19.sp), Modifier.weight(1f))
-    }
-}
 
-/** A plain warning strip, e.g. "keep this screen open" while a job runs. */
 @Composable
 fun Banner(text: String, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(12.dp)

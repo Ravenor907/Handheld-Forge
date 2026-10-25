@@ -59,9 +59,6 @@ class Downloader(
         }
     }
 
-    /** Size from HEAD, or null if the file isn't published. */
-    fun remoteSize(url: String): Long? = remoteMeta(url)?.first
-
     /** (size, version tag from ETag/Last-Modified) from HEAD, or null if not published. */
     fun remoteMeta(url: String): Pair<Long, String>? {
         val c = open(url, "HEAD")
@@ -77,11 +74,24 @@ class Downloader(
         }
     }
 
-    fun resolve(distro: Distro, log: LogFn): Pair<ImageSource, Long> = resolveMeta(distro, log).let { it.first to it.second.first }
+    /** The newest build named on the publisher's page, or the catalog's own when there's none. */
+    fun newestBuild(img: ImageSource, log: LogFn): ImageSource {
+        val page = img.latestPage ?: return img
+        val found = try {
+            Regex(img.latestPattern!!).findAll(fetchText(page, 4 shl 20)).map { it.groupValues[1] to it.value }.toSortedSet(compareBy { it.first })
+        } catch (e: Exception) {
+            log("Couldn't read $page (${e.message}); using the known build")
+            return img
+        }
+        val newest = found.lastOrNull() ?: return img
+        if (newest.second == img.isoUrl) return img
+        log("Newest build on $page: ${newest.first}")
+        return img.at(newest.second)
+    }
 
     private fun resolveMeta(distro: Distro, log: LogFn): Pair<ImageSource, Pair<Long, String>> {
         if (!distro.enabled) throw DownloadException("${distro.name} is not available yet")
-        for (img in distro.images) {
+        for (img in distro.images.map { newestBuild(it, log) } + distro.images.filter { it.latestPage != null }) {
             try {
                 val meta = remoteMeta(img.isoUrl)
                 if (meta != null) {

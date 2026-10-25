@@ -4,6 +4,7 @@ import base64
 import hashlib
 import http.server
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -142,6 +143,26 @@ class DownloadTests(unittest.TestCase):
         (cdir / "live.iso.part.expected").write_text(hashlib.sha256(data).hexdigest())
         img = download.prepare_iso(self.distro("live.iso"), log=lambda m: None)
         self.assertEqual(img.path.read_bytes(), data)
+
+    def test_newest_build_from_the_publishers_page(self):
+        """CachyOS names each build by date: the download page's newest link wins, and the catalog's
+        own build is used when the page is unreadable or names a build that isn't there."""
+        for build in ("260628", "260801"):
+            self.publish(f"h/{build}/os-{build}.iso", build.encode() * 50, sign=False)
+            FILES[f"/h/{build}/os-{build}.iso.sha256"] = FILES.pop(f"/h/{build}/os-{build}.iso-CHECKSUM")
+        old, new = f"{self.base}/h/260628/os-260628.iso", f"{self.base}/h/260801/os-260801.iso"
+        FILES["/download"] = f'<a href="{new}">new</a> {old}'.encode()
+        pinned = ImageSource("Handheld", old, old + ".sha256", None, False, f"{self.base}/download",
+                             re.escape(self.base) + r"/h/(\d{6})/os-\1\.iso")
+        d = Distro("t", "Test OS", "", True, 1, None, [pinned])
+        logs = []
+        img = download.prepare_iso(d, log=logs.append)
+        self.assertEqual(img.source.filename, "os-260801.iso")
+        self.assertTrue(any("Newest build" in m and "260801" in m for m in logs))
+        FILES["/download"] = f"{self.base}/h/260901/os-260901.iso".encode()  # announced but not uploaded yet
+        self.assertEqual(download.prepare_iso(d, log=lambda m: None).source.filename, "os-260628.iso")
+        del FILES["/download"]
+        self.assertEqual(download.prepare_iso(d, log=lambda m: None).source.filename, "os-260628.iso")
 
     def test_falls_back_to_second_image(self):
         self.publish("legacy.iso", b"legacy" * 100, sign=False)

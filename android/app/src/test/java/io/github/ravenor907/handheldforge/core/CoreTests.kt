@@ -231,6 +231,27 @@ class DownloaderTest {
     }
 
     @Test
+    fun newestBuildFromThePublishersPage() {
+        // CachyOS names each build by date: the download page's newest link wins, and the catalog's
+        // own build is used when the page is unreadable or names a build that isn't uploaded yet.
+        for (build in listOf("260628", "260801")) {
+            publish("h/$build/os-$build.iso", build.toByteArray().let { b -> ByteArray(5000) { b[it % b.size] } }, sign = false)
+            files["/h/$build/os-$build.iso.sha256"] = files.remove("/h/$build/os-$build.iso-CHECKSUM")!!
+        }
+        val old = "https://dl/h/260628/os-260628.iso"
+        files["/download"] = "<a href=\"https://dl/h/260801/os-260801.iso\">new</a> $old".toByteArray()
+        val pinned = ImageSource("Handheld", old, "$old.sha256", null, false, "https://dl/download", """https://dl/h/(\d{6})/os-\1\.iso""")
+        val d = Distro("t", "Test OS", "", true, 1, null, listOf(pinned))
+        val logs = ArrayList<String>()
+        assertEquals("os-260801.iso", dl.prepare(d, { _, _, _ -> }, { logs.add(it) }, { false }).source.filename)
+        assertTrue(logs.any { it.contains("Newest build") && it.contains("260801") })
+        files["/download"] = "https://dl/h/260901/os-260901.iso".toByteArray()
+        assertEquals("os-260628.iso", prepare(d).source.filename)
+        files.remove("/download")
+        assertEquals("os-260628.iso", prepare(d).source.filename)
+    }
+
+    @Test
     fun corruptDownloadRejected() {
         publish("live.iso", ByteArray(5000) { 1 })
         files["/live.iso"] = ByteArray(5000) { 2 }

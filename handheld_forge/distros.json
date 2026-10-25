@@ -35,26 +35,6 @@
         "Start the installer from the live session, pick the handheld's internal drive and set up your user.",
         "If Secure Boot is on, the first restart shows a blue screen: choose Enroll MOK and type the password universalblue.",
         "When the installer says it's done, remove the USB drive and restart."
-      ],
-      "experimental": [
-        {
-          "id": "deck",
-          "edition": "Login: deck",
-          "image": "Legacy ISO (fallback)",
-          "user": {
-            "name": "deck",
-            "full_name": "Deck",
-            "password": "deck123"
-          },
-          "note": "Experimental: the installer's account is filled in for you. The login is deck and the password is deck123. It uses Bazzite's older installer, which hasn't been tried this way on a handheld yet, and Bazzite publishes no signature for it, so only its checksum is checked. Change the password after setup by typing passwd in a terminal.",
-          "install_steps": [
-            "Choose the USB drive in the boot menu, then the install option. The installer opens; use the touchscreen.",
-            "The account is already filled in: login deck, password deck123. Leave User Creation alone.",
-            "Tap Installation Destination, pick the handheld's internal drive, tap Done, then Begin Installation.",
-            "If Secure Boot is on, the first restart shows a blue screen: choose Enroll MOK and type the password universalblue.",
-            "When it's done, remove the USB drive and restart. To change the password later, open a terminal and type passwd."
-          ]
-        }
       ]
     },
     {
@@ -89,11 +69,13 @@
       "public_key": null,
       "images": [
         {
-          "label": "Handheld ISO, June 2026",
+          "label": "Handheld ISO",
           "iso_url": "https://iso.cachyos.org/handheld/260628/cachyos-handheld-linux-260628.iso",
           "checksum_url": "https://iso.cachyos.org/handheld/260628/cachyos-handheld-linux-260628.iso.sha256",
           "signature_url": null,
-          "require_signature": false
+          "require_signature": false,
+          "latest_page": "https://cachyos.org/download/",
+          "latest_pattern": "https://iso\\.cachyos\\.org/handheld/(\\d{6})/cachyos-handheld-linux-\\1\\.iso"
         }
       ],
       "write": "raw",
@@ -104,15 +86,6 @@
         "Connect to Wi-Fi from the network icon at the bottom right. The installer needs it.",
         "In the CachyOS Hello window, tap Launch installer. If you closed it, open CachyOS Hello from the app menu at the bottom left.",
         "Follow the installer, then remove the USB drive and restart."
-      ],
-      "experimental": [
-        {
-          "id": "copy",
-          "edition": "No password",
-          "write": "copy",
-          "layout": "fat",
-          "note": "Experimental: this copies CachyOS's files to the drive instead of writing it byte for byte, so it needs no password. It hasn't been tested on a handheld yet and may not start. Secure Boot must be off."
-        }
       ]
     }
   ]

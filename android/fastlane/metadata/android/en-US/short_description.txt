@@ -1,1 +1,0 @@
-Make Bazzite, SteamOS, CachyOS and Ventoy boot drives for handheld PCs.
