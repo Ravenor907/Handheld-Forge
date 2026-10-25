@@ -8,8 +8,19 @@ data class ImageSource(
     val checksumUrl: String?,
     val signatureUrl: String?,
     val requireSignature: Boolean,
+    /** Publishers with no "latest" link (CachyOS names each build by date): a page to read and a
+     * pattern whose first group is the build, newest sorting last. It must match isoUrl too, so the
+     * newest build found on the page can replace the known one in the URLs. */
+    val latestPage: String? = null,
+    val latestPattern: String? = null,
 ) {
     val filename: String get() = isoUrl.trimEnd('/').substringAfterLast('/')
+
+    val build: String? get() = latestPattern?.let { Regex(it).find(isoUrl)?.groupValues?.get(1) }
+
+    /** The same source pointed at another build. */
+    fun at(newBuild: String): ImageSource =
+        copy(isoUrl = isoUrl.replace(build!!, newBuild), checksumUrl = checksumUrl?.replace(build!!, newBuild))
 }
 
 data class Distro(
@@ -66,10 +77,14 @@ object Catalog {
                     checksumUrl = img["checksum_url"] as String?,
                     signatureUrl = img["signature_url"] as String?,
                     requireSignature = img["require_signature"] == true,
+                    latestPage = img["latest_page"] as String?,
+                    latestPattern = img["latest_pattern"] as String?,
                 )
             }
             for (img in images) {
-                for (url in listOfNotNull(img.isoUrl, img.checksumUrl, img.signatureUrl)) {
+                if ((img.latestPage == null) != (img.latestPattern == null)) throw CatalogException("$id: latest_page and latest_pattern go together")
+                if (img.latestPattern != null && img.build == null) throw CatalogException("$id: latest_pattern doesn't match its own iso_url")
+                for (url in listOfNotNull(img.isoUrl, img.checksumUrl, img.signatureUrl, img.latestPage)) {
                     if (!url.startsWith("https://")) throw CatalogException("$id: only https URLs allowed ($url)")
                 }
                 if (img.requireSignature && img.signatureUrl == null) {

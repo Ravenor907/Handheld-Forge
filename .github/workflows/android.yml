@@ -65,39 +65,6 @@ jobs:
           path: |
             ${{ env.APK }}
             android/app/build/outputs/apk/debug/app-debug.apk
-      - name: Google Play bundle (signed with the Play upload key, when it's set up)
-        working-directory: android
-        env:
-          PLAY_UPLOAD_KEY_B64: ${{ secrets.PLAY_UPLOAD_KEY_B64 }}
-          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
-        run: |
-          set -o pipefail
-          if [ -n "$PLAY_UPLOAD_KEY_B64" ]; then
-            echo "$PLAY_UPLOAD_KEY_B64" | base64 -d > "$RUNNER_TEMP/upload.p12"
-            export HF_KEYSTORE_FILE="$RUNNER_TEMP/upload.p12" HF_KEYSTORE_PASSWORD="$PLAY_UPLOAD_KEY_PASSWORD" HF_KEY_ALIAS=upload
-          else
-            echo "No Play upload key in secrets yet (docs/play-store.md): building the bundle as a check only"
-            unset HF_KEYSTORE_PASSWORD
-          fi
-          ./gradlew --no-daemon :app:bundleRelease 2>&1 | tail -5
-          rm -f "$RUNNER_TEMP/upload.p12"
-          aab=app/build/outputs/bundle/release/app-release.aab
-          curl -fsSL -o "$RUNNER_TEMP/bundletool.jar" https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar
-          java -jar "$RUNNER_TEMP/bundletool.jar" validate --bundle="$aab" > "$RUNNER_TEMP/validate.txt"
-          signer=$(keytool -printcert -jarfile "$aab" | grep -m1 "Owner" || true)
-          facts=$(java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle="$aab" \
-            | grep -oE 'targetSdkVersion="[0-9]+"|versionCode="[0-9]+"|uses-permission android:name="[A-Za-z_.]+"' | sort -u | tr '\n' ' ')
-          echo "::notice title=Play bundle::validated; $signer; $facts"
-          # Only a bundle signed with the real upload key is worth keeping.
-          [ -n "$PLAY_UPLOAD_KEY_B64" ] || rm -f "$aab"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: play-bundle
-          path: |
-            android/app/build/outputs/bundle/release/app-release.aab
-            android/app/build/outputs/mapping/release/mapping.txt
-          if-no-files-found: ignore
-
   screens:
     # Boots an emulator, opens every screen (debug builds accept a demo extra),
     # screenshots them and fails on any crash.
@@ -261,15 +228,12 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    outputs:
-      published: ${{ steps.publish.outputs.published }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: apk
       - name: Publish release if this version is new
-        id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -282,39 +246,3 @@ jobs:
           gh release create "$tag" "HandheldForge-$v.apk" -R "${{ github.repository }}" --target "$GITHUB_SHA" \
             --title "Handheld Forge for Android $v" \
             --notes "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite, SteamOS or CachyOS boot drive. Keep the app open and the phone alone until it finishes. Signed with the shared test key."
-          echo "published=true" >> "$GITHUB_OUTPUT"
-
-  play:
-    # Sends each new version to Google Play once a service account is set up (docs/play-store.md).
-    # Track and status come from repository variables PLAY_TRACK and PLAY_STATUS.
-    needs: release
-    if: needs.release.outputs.published == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Is Google Play set up?
-        id: check
-        env:
-          JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-        run: |
-          if [ -z "$JSON" ]; then
-            echo "No PLAY_SERVICE_ACCOUNT_JSON secret; upload the bundle by hand (docs/play-store.md)"
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/download-artifact@v4
-        if: steps.check.outputs.ready == 'true'
-        with:
-          name: play-bundle
-          path: bundle
-      - uses: r0adkll/upload-google-play@v1
-        if: steps.check.outputs.ready == 'true'
-        with:
-          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: io.github.ravenor907.handheldforge
-          releaseFiles: bundle/bundle/release/app-release.aab
-          mappingFile: bundle/mapping/release/mapping.txt
-          track: ${{ vars.PLAY_TRACK || 'internal' }}
-          status: ${{ vars.PLAY_STATUS || 'draft' }}
-          whatsNewDirectory: android/play/whatsnew

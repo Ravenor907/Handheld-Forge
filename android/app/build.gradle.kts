@@ -36,11 +36,10 @@ val syncCatalog = tasks.register<SyncCatalog>("syncCatalog") {
     sources.from(shared.file("distros.json"), shared.file("labs.json"), shared.dir("keys").asFileTree.matching { include("*.pub") })
 }
 
-// Signing: a release key from CI secrets if configured, otherwise the repo's
-// shared test key (so test builds still install over each other).
-val keystoreFile = System.getenv("HF_KEYSTORE_FILE")?.let { file(it) } ?: rootProject.file("signing/test-key.p12")
-val keystorePass = System.getenv("HF_KEYSTORE_PASSWORD") ?: "handheld-forge-test"
-val keyAliasName = System.getenv("HF_KEY_ALIAS") ?: "handheld-forge"
+// Signing: the repo's shared test key, so every build installs over the last one.
+val keystoreFile = rootProject.file("signing/test-key.p12")
+val keystorePass = "handheld-forge-test"
+val keyAliasName = "handheld-forge"
 
 android {
     namespace = "io.github.ravenor907.handheldforge"
@@ -50,8 +49,8 @@ android {
         applicationId = "io.github.ravenor907.handheldforge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 97
-        versionName = "0.9.7"
+        versionCode = 98
+        versionName = "0.9.8"
     }
 
     signingConfigs {

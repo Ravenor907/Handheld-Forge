@@ -7,7 +7,7 @@ import sys
 import time
 
 from . import APP_NAME, __version__
-from .config import experimental_variants, get_distro, install_guide, load_catalog, load_labs
+from .config import get_distro, install_guide, load_catalog, load_labs
 from .progress import Progress
 from .preflight import SleepBlocker, can_start, checks, read_state
 from .download import prepare_iso
@@ -49,11 +49,6 @@ def cmd_distros(_: argparse.Namespace) -> int:
     for d in catalog:
         state = ("ready, asks for password" if d.needs_password else "ready") if d.enabled else "planned"
         print(f"{d.id:<20} {state:<8} {d.name}")
-    extra = experimental_variants(catalog)
-    if extra:
-        print("\nExperimental (not tested on a handheld yet):")
-        for d in extra:
-            print(f"{d.id:<22} {d.name}, {d.edition}")
     if settings.load().labs:
         print("\nLabs:")
         for d in load_labs():

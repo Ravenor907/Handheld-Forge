@@ -259,7 +259,6 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     }
 
     val freeBytes: Long get() = freeClusters() * clusterBytes
-    val totalBytes: Long get() = clusterCount * clusterBytes
 
     private fun bit(i: Long) = (bitmap[(i / 8).toInt()].toInt() shr (i % 8).toInt()) and 1 == 1
 

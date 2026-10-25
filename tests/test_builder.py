@@ -67,19 +67,6 @@ class LabelRewriteTests(unittest.TestCase):
         out = builder.rewrite_boot_label("archisolabel=X archisosearchuuid=1 LABEL=X", "X", "u")
         self.assertIn("UUID=u", out)
 
-    def test_user_kickstart(self):
-        ks = builder.user_kickstart("deck", 'De"ck', "pa ss")
-        self.assertIn("%include /usr/share/anaconda/interactive-defaults.ks", ks)
-        self.assertIn('user --name=deck --gecos="De\\"ck" --password="pa ss" --plaintext --groups=wheel', ks)
-        self.assertNotIn("autopart", ks)  # the person always picks the disk
-        self.assertNotIn("clearpart", ks)
-
-    def test_fat_label_and_archisolabel(self):
-        self.assertEqual(builder.fat_label("CachyOS-Handheld"), "CACHYOS-HAN")
-        self.assertEqual(builder.fat_label("a b"), "A_B")
-        out = builder.rewrite_archiso_label("options archisolabel=LONG_LABEL1 quiet", "LONG_LABEL1", "AB-12")
-        self.assertEqual(out, "options archisodevice=/dev/disk/by-uuid/AB-12 quiet")
-
     def test_label_rules(self):
         self.assertTrue(builder.ext4_label_ok("Bazzite-Live"))
         self.assertFalse(builder.ext4_label_ok("Bazzite-Deck-Stable-Live"))
@@ -127,14 +114,14 @@ class BuilderTests(unittest.TestCase):
                                      stdout=subprocess.PIPE, text=True, env={**os.environ, **env})
         self.assertEqual(self.fake.stdout.readline().strip(), "READY")
 
-    def run_build(self, files, label="Bazzite-Live", layout="split", kickstart=None, **env):
+    def run_build(self, files, label="Bazzite-Live", **env):
         self.start_fake(**env)
         iso = self.base / "test.iso"
         iso.write_bytes(build_iso(files, label=label, max_extent=100_000))
         drive = Drive("/dev/sdz", "sdz", 32_000_000_000, "Fake Stick", ("sdz1",), True, "ok")
         stages = []
         builder.build_drive(drive, iso, lambda s, d, t: stages.append(s), log=lambda m: None,
-                            recheck=False, layout=layout, kickstart=kickstart)
+                            recheck=False)
         return stages
 
     def calls(self):
@@ -193,66 +180,6 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaises(builder.BuildError) as cm:
             self.run_build(layout(), FAKE_SIZE=str(600 * 1024 * 1024))
         self.assertIn("too small", str(cm.exception))
-
-    def test_experimental_fat_layout_for_archiso(self):
-        label = "CACHYOS_202606"  # longer than a FAT label allows
-        entry = (f"linux /arch/boot/x86_64/vmlinuz\n"
-                 f"options archisobasedir=arch archisolabel={label} archisosearchuuid=2026-06-28\n")
-        files = {
-            "EFI/BOOT/BOOTX64.EFI": b"sdboot" * 1000,
-            "loader/entries/01.conf": entry.encode(),
-            "arch/boot/x86_64/vmlinuz": b"K" * 70_000,
-            "arch/x86_64/airootfs.sfs": os.urandom(300_000),
-            "boot/2026-06-28.uuid": b"",
-        }
-        stages = self.run_build(files, label=label, layout="fat")
-        parts = self.parts()
-        self.assertEqual(list(parts), ["sdz1"])  # one FAT32 partition holds everything
-        p = parts["sdz1"]
-        self.assertEqual((p["fstype"], p["type"]), ("vfat", builder.ESP_TYPE))
-        self.assertEqual(p["fsopts"]["label"], "CACHYOS_202")
-        tree = self.tree(p["store"])
-        self.assertEqual(set(tree), set(files))
-        self.assertEqual(tree["arch/x86_64/airootfs.sfs"], files["arch/x86_64/airootfs.sfs"])
-        self.assertIn(f"archisodevice=/dev/disk/by-uuid/{p['uuid']}", tree["loader/entries/01.conf"].decode())
-        self.assertIn("archisosearchuuid=2026-06-28", tree["loader/entries/01.conf"].decode())
-        for s in ("prepare", "copy", "check", "eject"):
-            self.assertIn(s, stages)
-
-    def test_fat_layout_refuses_files_over_4gb(self):
-        with mock.patch.object(builder, "FAT_FILE_LIMIT", 100_000), \
-                self.assertRaises(builder.BuildError) as cm:
-            self.run_build(layout(), layout="fat")
-        self.assertIn("over 4 GB", str(cm.exception))
-        log = self.base / "calls.jsonl"
-        self.assertNotIn("Format", [c["method"] for c in self.calls()] if log.exists() else [])
-
-    def test_preset_account_for_the_installer(self):
-        label = "bazzite-deck"
-        kernel = "linuxefi /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=bazzite-deck"
-        grub = ("search --no-floppy --set=root -l 'bazzite-deck'\n"
-                f"menuentry 'Install' {{\n  {kernel} quiet\n}}\n"
-                f"menuentry 'Rescue' {{\n  {kernel} inst.rescue\n}}\n")
-        files = {"EFI/BOOT/BOOTX64.EFI": b"shim" * 1000, "EFI/BOOT/grub.cfg": grub.encode(),
-                 "boot/grub2/grub.cfg": grub.encode(), "images/install.img": os.urandom(200_000)}
-        ks = builder.user_kickstart("deck", "Deck", "deck123")
-        self.run_build(files, label=label, kickstart=ks)
-        parts = self.parts()
-        data, esp = self.tree(parts["sdz2"]["store"]), self.tree(parts["sdz1"]["store"])
-        self.assertEqual(data[builder.KICKSTART_NAME].decode(), ks)
-        for cfg in (data["EFI/BOOT/grub.cfg"], data["boot/grub2/grub.cfg"], esp["EFI/BOOT/grub.cfg"]):
-            lines = cfg.decode().splitlines()
-            install = next(x for x in lines if "quiet" in x)
-            rescue = next(x for x in lines if "inst.rescue" in x)
-            self.assertTrue(install.endswith(f"inst.ks=hd:LABEL=bazzite-deck:/{builder.KICKSTART_NAME}"))
-            self.assertNotIn("inst.ks", rescue)
-
-    def test_preset_account_refused_without_an_installer(self):
-        with self.assertRaises(builder.BuildError) as cm:
-            self.run_build(layout(), kickstart=builder.user_kickstart("deck", "Deck", "x"))
-        self.assertIn("nothing was erased", str(cm.exception))
-        self.assertFalse((self.base / "calls.jsonl").exists()
-                         and "Format" in [c["method"] for c in self.calls()])
 
     def test_iso_without_uefi_loader(self):
         with self.assertRaises(builder.BuildError):

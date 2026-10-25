@@ -37,10 +37,6 @@ def cancelled(c) -> bool:
     return c.is_set() if hasattr(c, "is_set") else bool(c())
 
 
-def size_bytes(dev: BlockDevice) -> int:
-    return dev.block_size * dev.block_count
-
-
 class FdDisk:
     """A drive opened by udisks (or any block device fd). Owns nothing: the caller closes the fd."""
 

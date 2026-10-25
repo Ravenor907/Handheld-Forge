@@ -236,7 +236,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun fix(f: Fix) = when (f) {
-        // The app's own settings page (Battery > Unrestricted). Google Play only allows the one-tap
+        // The app's own settings page (Battery > Unrestricted). Android only allows the one-tap
         // prompt for a few kinds of apps, and the foreground service already covers the job itself.
         Fix.BACKGROUND -> try {
             startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))

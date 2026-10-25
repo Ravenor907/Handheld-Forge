@@ -174,56 +174,6 @@ def render(page, html, out, transparent=True):
     print("wrote", out.relative_to(ROOT))
 
 
-STORE = ROOT / "android" / "fastlane" / "metadata" / "android" / "en-US" / "images"
-
-SHOTS = [
-    ("choose", "Tap a system.", "Get a boot drive."),
-    ("working", "It downloads, checks and writes.", "You get a snack."),
-    ("done", "Then it shows you", "how to boot it."),
-    ("confirm-ventoy", "Ventoy, with Secure Boot", "on or off."),
-    ("import", "Add ISOs to Ventoy", "from your phone."),
-    ("file", "Your own ISO,", "even compressed."),
-    ("confirm", "Checks your battery and Wi-Fi", "before it erases anything."),
-]
-
-
-def store_shot(name, top, hot, w=540, h=960):
-    return f"""
-<style>
-.s{{position:relative;width:{w}px;height:{h}px;overflow:hidden;
-  background:radial-gradient(520px 420px at 50% 112%,rgba(228,87,46,.40),transparent 62%),linear-gradient(170deg,#222830,{SLATE} 60%,#15191E)}}
-.cap{{position:absolute;left:0;right:0;top:46px;text-align:center;font-family:InterDisplay;font-weight:800;font-size:31px;line-height:1.18;letter-spacing:-.4px;padding:0 30px}}
-.ph{{position:absolute;left:50%;top:152px;width:340px;transform:translateX(-50%)}}
-</style>
-<div class="s" id="shot">{embers(40, w, h, seed=len(name))}
-  <div class="cap">{top}<br><span class="molten">{hot}</span></div>
-  <div class="phone ph"><img src="{screen(name)}"></div>
-</div>"""
-
-
-def store_icon(size=512):
-    return f"""<div id="shot" style="width:{size}px;height:{size}px;background:radial-gradient(circle at 50% 60%,#262D35,{SLATE} 70%);
-  display:flex;align-items:center;justify-content:center"><div style="width:{size * 0.70}px;filter:drop-shadow(0 0 {size * 0.05}px rgba(245,140,50,.55))">{STICK}</div></div>"""
-
-
-def feature_graphic(w=1024, h=500):
-    return f"""
-<style>
-.f{{position:relative;width:{w}px;height:{h}px;overflow:hidden;
-  background:radial-gradient(700px 420px at 5% 115%,rgba(228,87,46,.40),transparent 60%),linear-gradient(160deg,#20262D,{SLATE} 55%,#161A1F)}}
-.f .l{{position:absolute;left:60px;top:130px;width:520px}}
-.f .mark{{width:96px;filter:drop-shadow(0 0 18px rgba(245,140,50,.55))}}
-.f h1{{font-family:InterDisplay;font-weight:800;font-size:58px;letter-spacing:-1.2px;margin-top:16px}}
-.f p{{color:{ASH};font-size:21px;line-height:1.4;margin-top:12px}}
-.f .p{{position:absolute;width:200px}}
-</style>
-<div class="f" id="shot">{embers(50, w, h)}
-  <div class="l"><div class="mark">{STICK}</div><h1>Handheld <span class="molten">Forge</span></h1>
-  <p>Boot drives for your handheld PC,<br>made in one tap from your phone.</p></div>
-  <div class="phone p" style="left:600px;top:60px;transform:rotate(-7deg)"><img src="{screen('working')}"></div>
-  <div class="phone p" style="left:790px;top:30px;transform:rotate(6deg)"><img src="{screen('choose')}"></div>
-</div>"""
-
 
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
@@ -240,12 +190,4 @@ if __name__ == "__main__":
         page.set_viewport_size({"width": 500, "height": 900})
         for name in ["choose", "file", "confirm-ventoy", "working", "done-ventoy", "import", "done-import"]:
             render(page, phone(name), OUT / f"screen-{name}.png")
-        # Google Play listing (exact sizes: 512 icon, 1024 x 500 feature graphic, 1080 x 1920 screenshots).
-        (STORE / "phoneScreenshots").mkdir(parents=True, exist_ok=True)
-        page = b.new_page(viewport={"width": 1100, "height": 1000}, device_scale_factor=1)
-        render(page, store_icon(), STORE / "icon.png", transparent=False)
-        render(page, feature_graphic(), STORE / "featureGraphic.png", transparent=False)
-        page = b.new_page(viewport={"width": 600, "height": 1000}, device_scale_factor=2)
-        for i, (name, top, hot) in enumerate(SHOTS, 1):
-            render(page, store_shot(name, top, hot), STORE / "phoneScreenshots" / f"{i}.png", transparent=False)
         b.close()
