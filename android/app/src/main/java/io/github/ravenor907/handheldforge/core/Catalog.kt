@@ -9,17 +9,18 @@ data class ImageSource(
     val signatureUrl: String?,
     val requireSignature: Boolean,
     /** Publishers with no "latest" link (CachyOS names each build by date): a page to read and a
-     * pattern whose first group sorts newest-last. The newest match replaces isoUrl when it exists. */
+     * pattern whose first group is the build, newest sorting last. It must match isoUrl too, so the
+     * newest build found on the page can replace the known one in the URLs. */
     val latestPage: String? = null,
     val latestPattern: String? = null,
 ) {
     val filename: String get() = isoUrl.trimEnd('/').substringAfterLast('/')
 
-    /** The same source pointed at another build; the checksum keeps its suffix. */
-    fun at(url: String): ImageSource {
-        val keyed = checksumUrl != null && checksumUrl.startsWith(isoUrl)
-        return copy(isoUrl = url, checksumUrl = if (keyed) url + checksumUrl!!.removePrefix(isoUrl) else checksumUrl)
-    }
+    val build: String? get() = latestPattern?.let { Regex(it).find(isoUrl)?.groupValues?.get(1) }
+
+    /** The same source pointed at another build. */
+    fun at(newBuild: String): ImageSource =
+        copy(isoUrl = isoUrl.replace(build!!, newBuild), checksumUrl = checksumUrl?.replace(build!!, newBuild))
 }
 
 data class Distro(
@@ -82,6 +83,7 @@ object Catalog {
             }
             for (img in images) {
                 if ((img.latestPage == null) != (img.latestPattern == null)) throw CatalogException("$id: latest_page and latest_pattern go together")
+                if (img.latestPattern != null && img.build == null) throw CatalogException("$id: latest_pattern doesn't match its own iso_url")
                 for (url in listOfNotNull(img.isoUrl, img.checksumUrl, img.signatureUrl, img.latestPage)) {
                     if (!url.startsWith("https://")) throw CatalogException("$id: only https URLs allowed ($url)")
                 }

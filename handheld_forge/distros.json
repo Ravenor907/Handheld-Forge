@@ -75,7 +75,7 @@
           "signature_url": null,
           "require_signature": false,
           "latest_page": "https://cachyos.org/download/",
-          "latest_pattern": "https://iso\\.cachyos\\.org/handheld/(\\d{6})/cachyos-handheld-linux-\\1\\.iso"
+          "latest_pattern": "/handheld/(\\d{6})/cachyos-handheld-linux-\\1\\.iso"
         }
       ],
       "write": "raw",

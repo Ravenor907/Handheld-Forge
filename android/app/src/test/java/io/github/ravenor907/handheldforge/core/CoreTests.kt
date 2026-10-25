@@ -239,8 +239,8 @@ class DownloaderTest {
             files["/h/$build/os-$build.iso.sha256"] = files.remove("/h/$build/os-$build.iso-CHECKSUM")!!
         }
         val old = "https://dl/h/260628/os-260628.iso"
-        files["/download"] = "<a href=\"https://dl/h/260801/os-260801.iso\">new</a> $old".toByteArray()
-        val pinned = ImageSource("Handheld", old, "$old.sha256", null, false, "https://dl/download", """https://dl/h/(\d{6})/os-\1\.iso""")
+        files["/download"] = "<a href=\"https://mirror.example/x/h/260801/os-260801.iso\">new</a> $old".toByteArray()
+        val pinned = ImageSource("Handheld", old, "$old.sha256", null, false, "https://dl/download", """/h/(\d{6})/os-\1\.iso""")
         val d = Distro("t", "Test OS", "", true, 1, null, listOf(pinned))
         val logs = ArrayList<String>()
         assertEquals("os-260801.iso", dl.prepare(d, { _, _, _ -> }, { logs.add(it) }, { false }).source.filename)

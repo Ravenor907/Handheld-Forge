@@ -4,7 +4,6 @@ import base64
 import hashlib
 import http.server
 import os
-import re
 import tempfile
 import threading
 import unittest
@@ -150,10 +149,11 @@ class DownloadTests(unittest.TestCase):
         for build in ("260628", "260801"):
             self.publish(f"h/{build}/os-{build}.iso", build.encode() * 50, sign=False)
             FILES[f"/h/{build}/os-{build}.iso.sha256"] = FILES.pop(f"/h/{build}/os-{build}.iso-CHECKSUM")
-        old, new = f"{self.base}/h/260628/os-260628.iso", f"{self.base}/h/260801/os-260801.iso"
-        FILES["/download"] = f'<a href="{new}">new</a> {old}'.encode()
+        old = f"{self.base}/h/260628/os-260628.iso"
+        mirror = "https://mirror.example/x/h/260801/os-260801.iso"
+        FILES["/download"] = f'<a href="{mirror}">new</a> {old}'.encode()
         pinned = ImageSource("Handheld", old, old + ".sha256", None, False, f"{self.base}/download",
-                             re.escape(self.base) + r"/h/(\d{6})/os-\1\.iso")
+                             r"/h/(\d{6})/os-\1\.iso")
         d = Distro("t", "Test OS", "", True, 1, None, [pinned])
         logs = []
         img = download.prepare_iso(d, log=logs.append)

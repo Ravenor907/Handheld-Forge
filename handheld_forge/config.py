@@ -6,6 +6,7 @@ Adding a new OS later means adding an entry to distros.json, not new code.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -22,7 +23,8 @@ class ImageSource:
     signature_url: str | None
     require_signature: bool
     # Publishers with no "latest" link (CachyOS names each build by date): a page to read and a
-    # pattern whose first group sorts newest-last. The newest match replaces iso_url when it exists.
+    # pattern whose first group is the build, newest sorting last. It must match iso_url too, so
+    # the newest build found on the page can replace the known one in the URLs.
     latest_page: str | None = None
     latest_pattern: str | None = None
 
@@ -30,11 +32,15 @@ class ImageSource:
     def filename(self) -> str:
         return self.iso_url.rstrip("/").rsplit("/", 1)[-1]
 
-    def at(self, iso_url: str) -> ImageSource:
-        """The same source pointed at another build; the checksum keeps its suffix."""
-        keyed = bool(self.checksum_url) and self.checksum_url.startswith(self.iso_url)
-        checksum = iso_url + self.checksum_url[len(self.iso_url):] if keyed else self.checksum_url
-        return replace(self, iso_url=iso_url, checksum_url=checksum)
+    @property
+    def build(self) -> str | None:
+        m = re.search(self.latest_pattern, self.iso_url) if self.latest_pattern else None
+        return m.group(1) if m else None
+
+    def at(self, build: str) -> ImageSource:
+        """The same source pointed at another build."""
+        swap = lambda u: u.replace(self.build, build) if u else u  # noqa: E731
+        return replace(self, iso_url=swap(self.iso_url), checksum_url=swap(self.checksum_url))
 
 
 @dataclass(frozen=True)
@@ -92,6 +98,8 @@ def load_catalog(path: Path = CATALOG_PATH) -> list[Distro]:
         for img in images:
             if bool(img.latest_page) != bool(img.latest_pattern):
                 raise CatalogError(f"{raw['id']}: latest_page and latest_pattern go together")
+            if img.latest_pattern and not img.build:
+                raise CatalogError(f"{raw['id']}: latest_pattern doesn't match its own iso_url")
             for url in (img.iso_url, img.checksum_url, img.signature_url, img.latest_page):
                 if url is not None and not url.startswith("https://"):
                     raise CatalogError(f"{raw['id']}: only https URLs are allowed ({url})")

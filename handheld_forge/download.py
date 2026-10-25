@@ -208,14 +208,14 @@ def newest_build(img: ImageSource, log: LogFn = print) -> ImageSource:
         return img
     try:
         page = fetch_text(img.latest_page, 4 * 1024 * 1024)
-        found = sorted({(m.group(1), m.group(0)) for m in re.finditer(img.latest_pattern, page)})
+        newest = max((m.group(1) for m in re.finditer(img.latest_pattern, page)), default=None)
     except (urllib.error.URLError, OSError, re.error) as e:
         log(f"Couldn't read {img.latest_page} ({e}); using the known build")
         return img
-    if not found or found[-1][1] == img.iso_url:
+    if newest is None or newest <= img.build:
         return img
-    log(f"Newest build on {img.latest_page}: {found[-1][0]}")
-    return img.at(found[-1][1])
+    log(f"Newest build on {img.latest_page}: {newest}")
+    return img.at(newest)
 
 
 def resolve_image(distro: Distro, log: LogFn = print) -> ImageSource:

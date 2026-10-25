@@ -77,16 +77,15 @@ class Downloader(
     /** The newest build named on the publisher's page, or the catalog's own when there's none. */
     fun newestBuild(img: ImageSource, log: LogFn): ImageSource {
         val page = img.latestPage ?: return img
-        val found = try {
-            Regex(img.latestPattern!!).findAll(fetchText(page, 4 shl 20)).map { it.groupValues[1] to it.value }.toSortedSet(compareBy { it.first })
+        val newest = try {
+            Regex(img.latestPattern!!).findAll(fetchText(page, 4 shl 20)).map { it.groupValues[1] }.maxOrNull()
         } catch (e: Exception) {
             log("Couldn't read $page (${e.message}); using the known build")
             return img
         }
-        val newest = found.lastOrNull() ?: return img
-        if (newest.second == img.isoUrl) return img
-        log("Newest build on $page: ${newest.first}")
-        return img.at(newest.second)
+        if (newest == null || newest <= img.build!!) return img
+        log("Newest build on $page: $newest")
+        return img.at(newest)
     }
 
     private fun resolveMeta(distro: Distro, log: LogFn): Pair<ImageSource, Pair<Long, String>> {

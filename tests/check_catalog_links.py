@@ -54,12 +54,13 @@ def main() -> int:
                     ua = {"User-Agent": "HandheldForge-CI"}
                     req = urllib.request.Request(img["latest_page"], headers=ua)
                     text = urllib.request.urlopen(req, timeout=30).read(4 << 20).decode("utf-8", "replace")
-                    found = re.finditer(img["latest_pattern"], text)
-                    builds = sorted((m.group(1), m.group(0)) for m in found)
-                    seen = sorted(set(re.findall(r"https?://[^\s\"'<>]*handheld[^\s\"'<>]*", text, re.I)))[:8]
-                    note = (f"newest build on the page {builds[-1][0]}: {status(builds[-1][1])}" if builds
-                            else f"no build on {img['latest_page']} ({len(text)} bytes); "
-                                 f"handheld links there: {seen}")
+                    own = re.search(img["latest_pattern"], img["iso_url"]).group(1)
+                    newest = max((m.group(1) for m in re.finditer(img["latest_pattern"], text)), default=None)
+                    if newest is None:
+                        note = f"no build on {img['latest_page']} ({len(text)} bytes)"
+                    else:
+                        url = img["iso_url"].replace(own, newest)
+                        note = f"newest build on the page {newest} (catalog has {own}): {status(url)}"
                 except OSError as e:
                     note = f"couldn't read {img['latest_page']}: {e}"
                 print(f"::notice title={d['id']} latest build::{note}")
