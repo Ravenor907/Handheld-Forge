@@ -56,8 +56,10 @@ def main() -> int:
                     text = urllib.request.urlopen(req, timeout=30).read(4 << 20).decode("utf-8", "replace")
                     found = re.finditer(img["latest_pattern"], text)
                     builds = sorted((m.group(1), m.group(0)) for m in found)
+                    seen = sorted(set(re.findall(r"https?://[^\s\"'<>]*handheld[^\s\"'<>]*", text, re.I)))[:8]
                     note = (f"newest build on the page {builds[-1][0]}: {status(builds[-1][1])}" if builds
-                            else f"no build matching the pattern on {img['latest_page']} ({len(text)} bytes)")
+                            else f"no build on {img['latest_page']} ({len(text)} bytes); "
+                                 f"handheld links there: {seen}")
                 except OSError as e:
                     note = f"couldn't read {img['latest_page']}: {e}"
                 print(f"::notice title={d['id']} latest build::{note}")
