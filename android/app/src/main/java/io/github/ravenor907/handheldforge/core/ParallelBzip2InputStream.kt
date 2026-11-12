@@ -1,7 +1,6 @@
 package io.github.ravenor907.handheldforge.core
 
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
-import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.concurrent.ArrayBlockingQueue
@@ -63,6 +62,14 @@ class ParallelBzip2InputStream(
         }
         /** The CRC after the marker: the block's CRC, or for the end marker the stream's. */
         val crc: Long get() = if (bitLen >= 80) bits(48, 32) else -1
+
+        /** Whether the bytes after an end marker and its CRC begin another stream ("BZh1" to "BZh9"). */
+        val headerFollows: Boolean
+            get() {
+                val at = (bitOff + 80 + 7) / 8
+                return at + 4 <= bytes.size && bytes[at] == 'B'.code.toByte() && bytes[at + 1] == 'Z'.code.toByte() &&
+                    bytes[at + 2] == 'h'.code.toByte() && bytes[at + 3] in '1'.code.toByte()..'9'.code.toByte()
+            }
     }
 
     private class Piece(val chunks: List<ByteArray>, val lastLen: Int) {
@@ -74,6 +81,9 @@ class ParallelBzip2InputStream(
     private val pool: ExecutorService = Executors.newFixedThreadPool(threads) { r -> Thread(r, "bzip2").apply { isDaemon = true } }
     private val items = ArrayBlockingQueue<Item>(threads * 2 + 2)
     @Volatile private var closed = false
+
+    // 1 MB buffers whose bytes have been handed out, kept for the next blocks instead of allocating new ones.
+    private val spare = ArrayBlockingQueue<ByteArray>(threads * 2 + 2)
 
     // Memory gate for unpacked pieces waiting their turn.
     private val gate = Object()
@@ -98,6 +108,7 @@ class ParallelBzip2InputStream(
             var curStart = -1L
             var curBlock = false
             var sawAny = false
+            var headerChecked = false
             val buf = ByteArray(CHUNK)
 
             fun emit(isBlock: Boolean, s: Long, e: Long) {
@@ -119,7 +130,8 @@ class ParallelBzip2InputStream(
                 if (accLen + n > acc.size) acc = acc.copyOf(maxOf(acc.size * 2, accLen + n))
                 System.arraycopy(buf, 0, acc, accLen, n)
                 accLen += n
-                if (accBase == 0L && accLen >= 4 && j == 0L) {
+                if (!headerChecked && accLen >= 4) {
+                    headerChecked = true
                     if (acc[0] != 'B'.code.toByte() || acc[1] != 'Z'.code.toByte() || acc[2] != 'h'.code.toByte() || acc[3] !in '1'.code.toByte()..'9'.code.toByte()) {
                         throw IOException("not a bzip2 file")
                     }
@@ -202,10 +214,10 @@ class ParallelBzip2InputStream(
         var counted = 0L
         var last = 0
         try {
-            BZip2CompressorInputStream(ByteArrayInputStream(enc.finish()), false).use { d ->
+            BZip2CompressorInputStream(enc.finish(), false).use { d ->
                 while (true) {
                     if (closed) throw IOException("closed")
-                    val c = ByteArray(CHUNK)
+                    val c = spare.poll() ?: ByteArray(CHUNK)
                     if (gated) waitForMemory(seq)
                     synchronized(gate) { used += CHUNK }
                     counted += CHUNK
@@ -218,6 +230,8 @@ class ParallelBzip2InputStream(
                     if (n > 0) {
                         chunks.add(c)
                         last = n
+                    } else {
+                        spare.offer(c)
                     }
                     if (n < CHUNK) break
                 }
@@ -245,6 +259,12 @@ class ParallelBzip2InputStream(
         }
     }
 
+    /** Gives back a piece that has been read out (or isn't wanted): its memory allowance and its buffers. */
+    private fun release(p: Piece) {
+        release(p.chunks.size.toLong() * CHUNK)
+        for (c in p.chunks) if (!spare.offer(c)) break
+    }
+
     private fun allow(seq: Int) {
         synchronized(gate) {
             if (seq > bypassUpTo) bypassUpTo = seq
@@ -258,10 +278,13 @@ class ParallelBzip2InputStream(
     private var curChunk = 0
     private var curPos = 0
     private var finished = false
-    private var failure: IOException? = null
+    private var failure: Exception? = null
     private var combined = 0L
     private var blocksInStream = 0
     private var pending: Item? = null
+
+    // The last stream ended and the header of another followed it, with no block or end marker yet.
+    private var headerOpen = false
 
     /** How many pieces had to be joined with the next (a marker that turned up by chance). */
     var joins = 0
@@ -269,19 +292,24 @@ class ParallelBzip2InputStream(
 
     private fun next(): Item {
         pending?.let { pending = null; return it }
-        return items.take()
+        // Waits in short turns so a close from another thread is noticed.
+        while (true) {
+            if (closed) throw IOException("closed")
+            items.poll(200, TimeUnit.MILLISECONDS)?.let { return it }
+        }
     }
 
     /** Moves to the next unpacked piece; false at the end of the file. */
     private fun advance(): Boolean {
-        cur?.let { release(it.chunks.size.toLong() * CHUNK) }
+        cur?.let { release(it) }
         cur = null
         while (true) {
             val item = next()
-            item.error?.let { throw it as? IOException ?: IOException(it.message ?: it.javaClass.simpleName, it) }
+            // A cancel from the source stays a cancel; anything else is a read error.
+            item.error?.let { throw it as? IOException ?: it as? CancelledException ?: IOException(it.message ?: it.javaClass.simpleName, it) }
             if (item.end) {
                 pool.shutdown()
-                if (blocksInStream > 0) throw IOException("the file ends partway (no end-of-stream marker)")
+                if (blocksInStream > 0 || headerOpen) throw IOException("the file ends partway (no end-of-stream marker)")
                 return false
             }
             val r = item.range!!
@@ -291,13 +319,17 @@ class ParallelBzip2InputStream(
                 if (r.crc != combined) throw IOException("stream checksum mismatch (a block is missing or damaged)")
                 combined = 0
                 blocksInStream = 0
+                headerOpen = r.headerFollows
                 continue
             }
+            headerOpen = false
             allow(item.seq)
             val piece = try {
                 item.future!!.get()
             } catch (e: java.util.concurrent.ExecutionException) {
                 retryJoined(item, e.cause ?: e)
+            } catch (e: java.util.concurrent.CancellationException) {
+                throw IOException("closed")
             }
             combined = ((combined shl 1) or (combined ushr 31)) and 0xFFFFFFFFL xor r.crc
             blocksInStream++
@@ -325,8 +357,7 @@ class ParallelBzip2InputStream(
             if (more.future != null) {
                 allow(more.seq)
                 try {
-                    val p = more.future.get()
-                    release(p.chunks.size.toLong() * CHUNK)
+                    release(more.future.get())
                 } catch (_: Exception) {
                 }
             }
@@ -371,6 +402,9 @@ class ParallelBzip2InputStream(
         } catch (e: IOException) {
             failure = e
             throw e
+        } catch (e: CancelledException) {
+            failure = e
+            throw e
         } catch (e: InterruptedException) {
             throw IOException("interrupted", e).also { failure = it }
         }
@@ -381,7 +415,8 @@ class ParallelBzip2InputStream(
         closed = true
         synchronized(gate) { gate.notifyAll() }
         reader.interrupt()
-        pool.shutdownNow()
+        // Blocks that never started would leave a reader waiting on them for good.
+        for (r in pool.shutdownNow()) (r as? Future<*>)?.cancel(false)
         items.clear()
         raw.close()
     }
@@ -445,13 +480,35 @@ class ParallelBzip2InputStream(
             }
         }
 
-        fun finish(): ByteArray {
+        /** What was written, as a stream over the buffer itself (no copy). */
+        fun finish(): InputStream {
             if (n > 0) {
                 ensure(1)
                 out[len++] = (acc shl (8 - n)).toByte()
                 n = 0
             }
-            return out.copyOf(len)
+            return Bytes(out, len)
         }
+    }
+
+    /**
+     * ByteArrayInputStream without its lock: the decoder asks for one byte at a time, and the
+     * lock on every one of those calls costs more than the read itself.
+     */
+    private class Bytes(private val data: ByteArray, private val end: Int) : InputStream() {
+        private var at = 0
+
+        override fun read(): Int = if (at < end) data[at++].toInt() and 0xFF else -1
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            if (at >= end) return -1
+            val n = minOf(len, end - at)
+            System.arraycopy(data, at, b, off, n)
+            at += n
+            return n
+        }
+
+        override fun available(): Int = end - at
     }
 }

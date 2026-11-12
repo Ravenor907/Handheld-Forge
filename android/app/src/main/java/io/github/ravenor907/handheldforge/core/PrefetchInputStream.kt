@@ -18,16 +18,19 @@ class PrefetchInputStream(
     private class Chunk(val data: ByteArray, val len: Int, val end: Boolean = false, val error: Throwable? = null)
 
     private val queue = ArrayBlockingQueue<Chunk>(depth)
+
+    // Buffers the reader has finished with, for the worker to fill again instead of allocating new ones.
+    private val spare = ArrayBlockingQueue<ByteArray>(depth + 2)
     @Volatile private var closed = false
     private var cur: Chunk? = null
     private var pos = 0
     private var finished = false
-    private var failure: IOException? = null
+    private var failure: Exception? = null
 
     private val worker = Thread({
         try {
             while (!closed) {
-                val b = ByteArray(chunk)
+                val b = spare.poll() ?: ByteArray(chunk)
                 var n = 0
                 while (n < chunk) {
                     val r = inner.read(b, n, chunk - n)
@@ -67,6 +70,7 @@ class PrefetchInputStream(
         if (len == 0) return 0
         failure?.let { throw it }
         while (true) {
+            if (closed) throw IOException("closed")
             if (finished) return -1
             val c = cur
             if (c != null && pos < c.len) {
@@ -75,9 +79,22 @@ class PrefetchInputStream(
                 pos += n
                 return n
             }
-            val next = queue.take()
+            if (c != null) {
+                spare.offer(c.data)
+                cur = null
+            }
+            // Waits in short turns so a close from another thread is noticed.
+            val next = try {
+                queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw java.io.InterruptedIOException("interrupted")
+            }
+            // A chunk the worker got in while the stream was being closed isn't handed out.
+            if (closed) throw IOException("closed")
             next.error?.let { e ->
-                val io = e as? IOException ?: IOException(e.message ?: e.javaClass.simpleName, e)
+                // A cancel from the source stays a cancel; anything else is a read error.
+                val io = e as? IOException ?: e as? CancelledException ?: IOException(e.message ?: e.javaClass.simpleName, e)
                 failure = io
                 throw io
             }

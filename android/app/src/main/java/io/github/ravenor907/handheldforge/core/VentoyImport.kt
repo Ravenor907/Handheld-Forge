@@ -78,7 +78,8 @@ object VentoyImport {
         val plans = unique(picked)
         val known = plans.filter { it.targetSize >= 0 }
         val knownBytes = known.sumOf { it.targetSize }
-        val needClusters = known.sumOf { maxOf(1L, (it.targetSize + vol.clusterBytes - 1) / vol.clusterBytes) }
+        // An empty file takes no cluster.
+        val needClusters = known.sumOf { (it.targetSize + vol.clusterBytes - 1) / vol.clusterBytes }
         val replacing = plans.mapNotNull { vol.find(it.targetName) }
         val freeAfterDeletes = vol.freeClusters() + replacing.sumOf { (it.size + vol.clusterBytes - 1) / vol.clusterBytes }
         if (needClusters > freeAfterDeletes) {

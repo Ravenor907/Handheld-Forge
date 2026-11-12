@@ -27,6 +27,7 @@ from pathlib import Path
 from .drives import GB, Drive, find_drive
 from .iso9660 import IsoEntry, IsoReader
 from .udisks import NotAuthorized, UDisks, UDisksError, object_path_for
+from .verify import HashWorker
 
 MiB = 1024 * 1024
 ESP_SIZE = 512 * MiB
@@ -36,6 +37,7 @@ ESP_LABEL = "FORGE-EFI"
 FALLBACK_LABEL = "FORGE-LIVE"
 SYNC_EVERY = 32 * MiB
 CHUNK = 4 * MiB
+HASH_APART = 1 * MiB  # pieces this big are hashed on a worker thread; handing over smaller ones costs more
 
 StageFn = Callable[[str, int, int], None]
 LogFn = Callable[[str], None]
@@ -234,18 +236,35 @@ def _copy_tree(iso: IsoReader, entries: list[IsoEntry], esp: Path, data: Path, t
 
 def _verify(record: Record, mounts: dict[str, Path], stage: StageFn, cancel: threading.Event) -> None:
     """Re-read every copied file from a fresh mount and compare hashes."""
+    hasher = HashWorker()
+    try:
+        _verify_files(record, mounts, stage, cancel, hasher)
+    finally:
+        hasher.close()
+
+
+def _verify_files(record: Record, mounts: dict[str, Path], stage: StageFn, cancel: threading.Event,
+                  hasher: HashWorker) -> None:
     total = sum(size for by_role in record.values() for _, size in by_role.values())
     done = 0
     for rel, by_role in record.items():
         for role, (digest, _size) in by_role.items():
             h = hashlib.sha256()
+            hashing = None  # the piece being hashed while the next is read
             with open(_safe_join(mounts[role], rel), "rb") as f:
                 while chunk := f.read(CHUNK):
                     if cancel.is_set():
                         raise Cancelled()
-                    h.update(chunk)
+                    if hashing:
+                        hashing.result()
+                        hashing = None
+                    if len(chunk) >= HASH_APART:
+                        hashing = hasher.feed(h, chunk)
+                    else:
+                        h.update(chunk)
                     done += len(chunk)
                     stage("check", done, total)
+            hasher.wait()
             if h.hexdigest() != digest:
                 raise BuildError(f"{rel} did not read back correctly. The drive may be failing "
                                  "or counterfeit. Try a different one.")

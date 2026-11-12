@@ -3,6 +3,10 @@ package io.github.ravenor907.handheldforge.core
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 class WriteException(msg: String) : IOException(msg)
 
@@ -60,7 +64,6 @@ object ImageWriter {
         /** Read the drive back and compare (off only by the Labs setting). */
         verify: Boolean = true,
     ): Long {
-        val fileSize = rawSize
         val bs = dev.blockSize
         require(CHUNK % bs == 0)
         val buf = ByteArray(CHUNK)
@@ -76,29 +79,65 @@ object ImageWriter {
         if (dev is ScsiDisk) {
             log("USB: ${dev.commandBytes / 1024} KB per command, ${dev.transferSize / 1024} KB transfers" + if (dev.pipelined) ", several in flight" else "")
         }
-        var done = 0L
         val raw = CountingStream(open().buffered(CHUNK))
+        // Two helper threads: one hashes the chunk being written, one reads the next chunk into
+        // the second buffer, so neither holds up the drive.
+        val pool = Executors.newFixedThreadPool(2) { r -> Thread(r, "image-io").apply { isDaemon = true } }
+        try {
+            return writeAndCheck(raw, rawSize, decode, dev, expectedSha256, stage, log, cancel, verify, buf, md, pool)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    private fun writeAndCheck(
+        raw: CountingStream,
+        fileSize: Long,
+        decode: (java.io.InputStream) -> java.io.InputStream,
+        dev: BlockDevice,
+        expectedSha256: String?,
+        stage: StageFn,
+        log: LogFn,
+        cancel: () -> Boolean,
+        verify: Boolean,
+        buf: ByteArray,
+        md: MessageDigest,
+        pool: ExecutorService,
+    ): Long {
+        val bs = dev.blockSize
+        var done = 0L
         val timer = Timer()
+        var cur = buf
+        var next = ByteArray(CHUNK)
         // Unpacking runs ahead on other threads while the USB writes go on (bzip2 has its own).
-        decoding { ahead(decode(raw), raw) }.use { input ->
+        start(decode, raw).use { input ->
+            fun fill(b: ByteArray): Int {
+                var got = 0
+                while (got < CHUNK) {
+                    val n = decoding { input.read(b, got, CHUNK - got) }
+                    if (n < 0) break
+                    got += n
+                }
+                return got
+            }
+            var filling = pool.submit<Int> { fill(buf) }
             while (true) {
                 if (cancel()) throw CancelledException()
-                var got = 0
-                timer.reading {
-                    while (got < CHUNK) {
-                        val n = decoding { input.read(buf, got, CHUNK - got) }
-                        if (n < 0) break
-                        got += n
-                    }
-                }
+                val got = timer.reading { filling.await() }
                 if (got == 0) break
-                md.update(buf, 0, got)
+                val chunk = cur
+                cur = next
+                next = chunk
+                // A short chunk is the last one; otherwise start on the one after it now.
+                if (got == CHUNK) filling = cur.let { b -> pool.submit<Int> { fill(b) } }
+                val hashing = pool.submit { md.update(chunk, 0, got) }
                 val padded = roundUp(got, bs)
-                if (padded > got) java.util.Arrays.fill(buf, got, padded, 0)
+                if (padded > got) java.util.Arrays.fill(chunk, got, padded, 0)
                 if (done / bs + padded / bs > dev.blockCount) {
                     throw WriteException("This drive is too small for the image.")
                 }
-                timer.writing { dev.write(done / bs, padded / bs, buf) }
+                timer.writing { dev.write(done / bs, padded / bs, chunk) }
+                hashing.await()
                 done += got
                 stage(Stage.WRITE, raw.count, fileSize)
                 if (got < CHUNK) break
@@ -119,18 +158,27 @@ object ImageWriter {
         }
 
         log("Reading the drive back to confirm")
+        // Both buffers still hold chunks of the image. Flip them so a read that delivers nothing can't pass for one.
+        for (b in arrayOf(cur, next)) for (i in b.indices) b[i] = (b[i].toInt() xor 0xFF).toByte()
         val readStart = System.nanoTime()
         val check = MessageDigest.getInstance("SHA-256")
         var read = 0L
+        // The buffers take turns: one is hashed while the next chunk is read into the other.
+        var hashing: Future<*>? = null
         while (read < size) {
             if (cancel()) throw CancelledException()
             val want = minOf(CHUNK.toLong(), size - read).toInt()
             val padded = roundUp(want, bs)
-            dev.read(read / bs, padded / bs, buf)
-            check.update(buf, 0, want)
+            dev.read(read / bs, padded / bs, cur)
+            hashing?.await()
+            val chunk = cur
+            hashing = pool.submit { check.update(chunk, 0, want) }
+            cur = next
+            next = chunk
             read += want
             stage(Stage.CHECK, read, size)
         }
+        hashing?.await()
         if (check.digest().toHex() != written) {
             throw WriteException(
                 "The drive didn't store the image correctly. It may be failing or counterfeit. Try another drive.",
@@ -138,6 +186,13 @@ object ImageWriter {
         }
         log("Every byte on the drive matches the image (read back at ${Timer.rate(size, System.nanoTime() - readStart)})")
         return size
+    }
+
+    /** Waits for a helper thread's result; what it threw is thrown here as it was. */
+    private fun <T> Future<T>.await(): T = try {
+        get()
+    } catch (e: ExecutionException) {
+        throw e.cause ?: e
     }
 
     /**
@@ -160,7 +215,7 @@ object ImageWriter {
         var at = 0L
         val raw = CountingStream(open().buffered(CHUNK))
         val start = System.nanoTime()
-        decoding { ahead(decode(raw), raw) }.use { input ->
+        start(decode, raw).use { input ->
             while (true) {
                 if (cancel()) throw CancelledException()
                 var got = 0
@@ -229,6 +284,16 @@ object ImageWriter {
 
     fun ahead(decoded: java.io.InputStream, raw: java.io.InputStream): java.io.InputStream =
         if (decoded === raw || decoded is ParallelBzip2InputStream) decoded else PrefetchInputStream(decoded)
+
+    /** Opens the decoder over [raw]; if it refuses to start, [raw] is closed. */
+    private fun start(decode: (java.io.InputStream) -> java.io.InputStream, raw: java.io.InputStream): java.io.InputStream = decoding {
+        try {
+            ahead(decode(raw), raw)
+        } catch (e: Throwable) {
+            runCatching { raw.close() }
+            throw e
+        }
+    }
 
     /** Decoders report bad input as IOException or, for some malformed data, a RuntimeException. */
     private inline fun <T> decoding(block: () -> T): T = try {

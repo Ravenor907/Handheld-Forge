@@ -13,19 +13,25 @@ back from the drive, bypassing the page cache, and compared with what was writte
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import lzma
 import mmap
 import os
+import struct
 import threading
 import time
+import zipfile
 import zlib
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .blockdev import BLKSSZGET
 from .drives import Drive, find_drive
 from .imagekind import ImageKind, decoder
 from .udisks import BLOCK, NotAuthorized, UDisks, UDisksError, object_path_for
+from .verify import HashWorker
 
 CHUNK = 4 * 1024 * 1024
 ALIGN = 4096  # O_DIRECT needs page-aligned buffers and sizes; 4 KiB covers 512 B and 4 KiB sectors
@@ -93,6 +99,15 @@ def _round_up(n: int) -> int:
     return (n + ALIGN - 1) // ALIGN * ALIGN
 
 
+def _sector_size(fd: int) -> int:
+    """The drive's logical sector size; 512 for a plain file (tests)."""
+    try:
+        size = struct.unpack("i", fcntl.ioctl(fd, BLKSSZGET, b"\0\0\0\0"))[0]
+    except OSError:
+        return 512
+    return size if size > 0 else 512
+
+
 def _kind(compressed) -> ImageKind:
     if isinstance(compressed, ImageKind):
         return compressed
@@ -118,6 +133,17 @@ class _Timer:
                 f"{drive}% of the time waiting on the drive, {100 - drive}% on the image: {who}")
 
 
+def _fill(src, view, counted) -> tuple[int, int]:
+    """Reads into view until it's full or the image ends: (bytes read, bytes of the file used so far)."""
+    got = 0
+    while got < CHUNK:
+        n = src.readinto(view[got:CHUNK])
+        if not n:
+            break
+        got += n
+    return got, counted.count
+
+
 def write_image(fd: int, image, compressed=False, stage: StageFn = lambda *_: None,
                 log: LogFn = print, cancel: threading.Event | None = None, verify: bool = True,
                 raw_size: int | None = None, expected_sha256: str | None = None) -> int:
@@ -132,54 +158,102 @@ def write_image(fd: int, image, compressed=False, stage: StageFn = lambda *_: No
     else:
         path = Path(image)
         opener, file_size = (lambda: path.open("rb")), path.stat().st_size
-    buf = mmap.mmap(-1, CHUNK)  # page aligned, as O_DIRECT requires
-    view = memoryview(buf)
+    # Two buffers used in turn (page aligned, as O_DIRECT requires): while one is hashed and written,
+    # the next piece of the image is read into the other.
+    bufs = [mmap.mmap(-1, CHUNK), mmap.mmap(-1, CHUNK)]
+    views = [memoryview(b) for b in bufs]
+    hasher = HashWorker()
+    try:
+        done = _write_and_check(fd, opener, kind, file_size, dev_size, views, hasher, stage, log, cancel,
+                                verify, expected_sha256, not callable(image))
+    finally:
+        hasher.close()
+    for v in views:
+        v.release()
+    for b in bufs:
+        b.close()
+    return done
 
-    # A stale backup partition table at the end of the drive can confuse firmware.
-    tail = min(TAIL, dev_size // ALIGN * ALIGN)
+
+def _write_and_check(fd: int, opener, kind: ImageKind, file_size: int, dev_size: int, views, hasher,
+                     stage: StageFn, log: LogFn, cancel: threading.Event, verify: bool,
+                     expected_sha256: str | None, read_ahead: bool) -> int:
+    """write_image's work. With read_ahead, the next piece of the image is read (and unpacked) on a
+    worker thread while this one goes to the drive. A stream that's still downloading is read in
+    step instead, so nothing is left waiting on the network if the write stops early."""
+    view = views[0]
+
+    # A stale backup partition table at the end of the drive can confuse firmware. The cleared part
+    # runs to the drive's last whole sector, which on a drive that isn't a multiple of 4 KiB lies
+    # past the last 4 KiB boundary.
+    sector = _sector_size(fd)
+    end = dev_size // sector * sector
+    start = max(0, dev_size // ALIGN * ALIGN - TAIL)
+    tail = end - start
     if tail:
         view[:tail] = bytes(tail)
-        os.pwrite(fd, view[:tail], dev_size // ALIGN * ALIGN - tail)
+        os.pwrite(fd, view[:tail], start)
 
     md = hashlib.sha256()
     done = 0
     timer = _Timer()
+    hashing = [None, None]  # each buffer's hash job; the buffer is free again once it's done
     with opener() as raw:
         counted = _Counting(raw)
         try:
             src = decoder(kind, counted)
-        except (OSError, EOFError, ValueError) as e:
+        except (OSError, EOFError, ValueError, zipfile.BadZipFile, NotImplementedError, RuntimeError) as e:
+            # zipfile's own errors include a packing method it lacks and a password-protected entry
             raise CorruptImage(f"The image file is damaged: {e}") from e
+        reader = ThreadPoolExecutor(1, thread_name_prefix="image") if read_ahead else None
         with src:
-            while True:
-                if cancel.is_set():
-                    raise Cancelled()
-                got = 0
-                t = time.monotonic()
-                try:
-                    while got < CHUNK:
-                        n = src.readinto(view[got:CHUNK])
-                        if not n:
-                            break
-                        got += n
-                except (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError) as e:
-                    raise CorruptImage(f"The image file is damaged: {e}") from e
-                timer.read += time.monotonic() - t
-                if not got:
-                    break
-                md.update(view[:got])
-                padded = _round_up(got)
-                if padded > got:
-                    view[got:padded] = bytes(padded - got)
-                if done + padded > dev_size:
-                    raise RawWriteError("This drive is too small for the image.")
-                t = time.monotonic()
-                os.pwrite(fd, view[:padded], done)
-                timer.write += time.monotonic() - t
-                done += got
-                stage("write", counted.count, file_size or counted.count)
-                if got < CHUNK:
-                    break
+            try:
+                i = 0
+                coming = reader.submit(_fill, src, view, counted) if reader else None
+                while True:
+                    if cancel.is_set():
+                        raise Cancelled()
+                    view = views[i]
+                    t = time.monotonic()
+                    try:
+                        if coming:
+                            got, count = coming.result()
+                        else:
+                            if hashing[i]:
+                                hashing[i].result()
+                            got, count = _fill(src, view, counted)
+                    except (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError,
+                            zipfile.BadZipFile) as e:
+                        raise CorruptImage(f"The image file is damaged: {e}") from e
+                    timer.read += time.monotonic() - t
+                    if not got:
+                        break
+                    hashing[i] = hasher.feed(md, view[:got])
+                    if coming and got == CHUNK:
+                        if hashing[1 - i]:
+                            hashing[1 - i].result()
+                        coming = reader.submit(_fill, src, views[1 - i], counted)
+                    padded = _round_up(got)
+                    if padded > got:
+                        view[got:padded] = bytes(padded - got)
+                    if done + padded > dev_size:
+                        # The drive may end inside this 4 KiB: pad to its own sector size instead.
+                        padded = (got + sector - 1) // sector * sector
+                        if done + padded > dev_size:
+                            raise RawWriteError("This drive is too small for the image.")
+                    t = time.monotonic()
+                    os.pwrite(fd, view[:padded], done)
+                    timer.write += time.monotonic() - t
+                    done += got
+                    total = file_size or count
+                    stage("write", min(count, total), total)  # a zip's directory is read on top of the image
+                    if got < CHUNK:
+                        break
+                    i = 1 - i
+            finally:
+                if reader:  # nothing may still be reading the image when it's closed
+                    reader.shutdown(wait=True)
+    hasher.wait()
     written = md.hexdigest()
     if expected_sha256 and written != expected_sha256:
         raise RawWriteError("The image changed while it was being written. Try again.")
@@ -191,26 +265,29 @@ def write_image(fd: int, image, compressed=False, stage: StageFn = lambda *_: No
     log(timer.summary(done))
     if not verify:
         log("Skipped reading the drive back (Labs setting)")
-        view.release()
-        buf.close()
         return done
 
     log("Reading the drive back to confirm")
     check = hashlib.sha256()
+    hashing = [None, None]
+    i = 0
     read = 0
     r0 = time.monotonic()
     while read < done:
         if cancel.is_set():
             raise Cancelled()
         want = min(CHUNK, done - read)
+        view = views[i]
+        if hashing[i]:
+            hashing[i].result()
         n = os.preadv(fd, [view[:_round_up(want)]], read)
         if n < want:
             raise RawWriteError("The drive stopped answering while it was read back.")
-        check.update(view[:want])
+        hashing[i] = hasher.feed(check, view[:want])
         read += want
         stage("check", read, done)
-    view.release()
-    buf.close()
+        i = 1 - i
+    hasher.wait()
     if check.hexdigest() != written:
         raise RawWriteError("The drive didn't store the image correctly. It may be failing or "
                             "counterfeit. Try another drive.")

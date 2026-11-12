@@ -17,7 +17,7 @@ import io
 import os
 import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 
 BLOCK_MAGIC = 0x314159265359
 END_MAGIC = 0x177245385090
@@ -40,6 +40,42 @@ def _cores() -> list[tuple[int, bytes]]:
 _CORES = _cores()
 
 
+def _fold(cores: list[tuple[int, bytes]]) -> tuple[bytes, bytes]:
+    """A translation table and a 5-byte needle: every core's first 5 bytes, once translated, read as the
+    needle. One translate and one search then stand in for a search per core; what they turn up is only
+    a candidate, checked against the real cores."""
+    group = list(range(256))
+
+    def rep(b: int) -> int:
+        while group[b] != b:
+            b = group[b]
+        return b
+
+    for i in range(5):
+        for _, core in cores[1:]:
+            group[rep(core[i])] = rep(cores[0][1][i])
+    table = bytes(rep(b) for b in range(256))
+    return table, cores[0][1][:5].translate(table)
+
+
+# The block markers and the end markers are folded apart: together their bytes run into one big class.
+_FOLDED = [(*_fold(_CORES[:8]), _CORES[:8]), (*_fold(_CORES[8:]), _CORES[8:])]
+
+
+def _find_cores(window) -> list[tuple[int, int]]:
+    """Every (index, k) where the core for bit offset k sits whole in window at that byte index."""
+    out = []
+    for table, needle, cores in _FOLDED:
+        folded = window.translate(table)
+        i = folded.find(needle)
+        while i >= 0:
+            for k, core in cores:
+                if window.startswith(core, i):
+                    out.append((i, k))
+            i = folded.find(needle, i + 1)
+    return out
+
+
 class _Range:
     __slots__ = ("is_block", "data", "bit_off", "bit_len")
 
@@ -52,7 +88,11 @@ class _Range:
         last = (self.bit_off + start + n + 7) // 8
         v = int.from_bytes(self.data[first:last], "big")
         drop = last * 8 - (self.bit_off + start + n)
-        return (v >> drop) & ((1 << n) - 1)
+        if drop:
+            v >>= drop
+        if (self.bit_off + start) % 8:  # bits of the first byte that come before the ones asked for
+            v &= (1 << n) - 1
+        return v
 
     @property
     def crc(self) -> int:
@@ -61,16 +101,35 @@ class _Range:
 
 def _stream(ranges: list[_Range]) -> bytes:
     """A one-block .bz2 made of these consecutive bit ranges."""
+    if len(ranges) == 1:
+        one = _stream_one(ranges[0])
+        if one is not None:
+            return one
     v = int.from_bytes(b"BZh9", "big")
     total = 32
     for r in ranges:
         v = (v << r.bit_len) | r.bits(0, r.bit_len)
         total += r.bit_len
-    v = (v << 48) | END_MAGIC
-    v = (v << 32) | ranges[0].crc
     total += 80
     pad = -total % 8
-    return (v << pad).to_bytes((total + pad) // 8, "big")
+    v = (v << (80 + pad)) | (((END_MAGIC << 32) | ranges[0].crc) << pad)
+    return v.to_bytes((total + pad) // 8, "big")
+
+
+def _stream_one(r: _Range) -> bytes | None:
+    """The usual case of _stream, one whole range, with far less big-number work: the header is laid
+    against the range's first bit and the stray bits around the range are cleared while it's still
+    bytes, so one shift moves everything into place. None if the range isn't shaped for it."""
+    data, off, n = r.data, r.bit_off, r.bit_len
+    if n < 80 or off > 7 or len(data) != (off + n + 7) // 8:
+        return None
+    drop = len(data) * 8 - off - n
+    pad = -n % 8
+    head = ((0x425A6839 << (8 - off)) | (data[0] & (0xFF >> off))).to_bytes(5, "big")
+    with memoryview(data) as whole:
+        body = b"".join((head, whole[1:-1], bytes((data[-1] & (0xFF << drop) & 0xFF,))))
+    v = (int.from_bytes(body, "big") << (80 + pad - drop)) | (((END_MAGIC << 32) | r.crc) << pad)
+    return v.to_bytes((112 + n + pad) // 8, "big")
 
 
 class ParallelBz2Reader(io.RawIOBase):
@@ -103,7 +162,8 @@ class ParallelBz2Reader(io.RawIOBase):
                 continue
 
     def _emit(self, buf: bytearray, base: int, is_block: bool, s: int, e: int) -> None:
-        data = bytes(buf[s // 8 - base : (e + 7) // 8 - base])
+        with memoryview(buf) as whole:  # one copy; released at once so buf can change size again
+            data = bytes(whole[s // 8 - base : (e + 7) // 8 - base])
         r = _Range(is_block, data, s % 8, e - s)
         fut = self.pool.submit(lambda: bz2.decompress(_stream([r]))) if is_block else None
         self._put(("range", r, fut))
@@ -130,15 +190,12 @@ class ParallelBz2Reader(io.RawIOBase):
                 end = base + len(buf) - (0 if eof else 8)
                 found = []
                 lo = max(0, scanned - 8 - base)
-                window = bytes(buf[lo : end - base]) if end > base + lo else b""
-                for k, core in _CORES:
-                    i = window.find(core)
-                    while i >= 0:
-                        byte = base + lo + i
-                        start = byte * 8 if k == 0 else (byte - 1) * 8 + k
-                        if start >= 0 and start + 48 <= (base + len(buf)) * 8:
-                            found.append(start)
-                        i = window.find(core, i + 1)
+                window = buf[lo : end - base] if end > base + lo else b""
+                for i, k in _find_cores(window):
+                    byte = base + lo + i
+                    start = byte * 8 if k == 0 else (byte - 1) * 8 + k
+                    if start >= 0 and start + 48 <= (base + len(buf)) * 8:
+                        found.append(start)
                 for f in fakes:
                     if base * 8 <= f < end * 8:
                         found.append(f)
@@ -184,7 +241,12 @@ class ParallelBz2Reader(io.RawIOBase):
         if self._pending is not None:
             item, self._pending = self._pending, None
             return item
-        return self.items.get()
+        if self.closed_flag.is_set():
+            raise ValueError("I/O operation on closed file")
+        item = self.items.get()
+        if item[0] == "closed":  # close() on another thread, posted to end this wait
+            raise ValueError("I/O operation on closed file")
+        return item
 
     def _advance(self) -> bool:
         while True:
@@ -206,6 +268,8 @@ class ParallelBz2Reader(io.RawIOBase):
                 continue
             try:
                 data = fut.result()
+            except CancelledError:  # close() on another thread dropped the block's job
+                raise ValueError("I/O operation on closed file") from None
             except Exception as e:  # noqa: BLE001
                 data = self._retry(r, e)
             self._combined = (((self._combined << 1) | (self._combined >> 31)) & 0xFFFFFFFF) ^ r.crc
@@ -225,7 +289,7 @@ class ParallelBz2Reader(io.RawIOBase):
             if fut is not None:
                 try:
                     fut.result()
-                except Exception:  # noqa: BLE001, S110 - its own result isn't wanted
+                except (Exception, CancelledError):  # noqa: BLE001, S110 - its own result isn't wanted
                     pass
             ranges.append(r)
             try:
@@ -247,7 +311,8 @@ class ParallelBz2Reader(io.RawIOBase):
                 self._done = True
                 return 0
         n = min(len(b), len(self._cur) - self._pos)
-        b[:n] = self._cur[self._pos : self._pos + n]
+        with memoryview(self._cur) as cur:
+            b[:n] = cur[self._pos : self._pos + n]
         self._pos += n
         return n
 
@@ -259,5 +324,9 @@ class ParallelBz2Reader(io.RawIOBase):
                 while True:
                     self.items.get_nowait()
             except queue.Empty:
+                pass
+            try:  # releases a readinto() waiting on another thread for the next block
+                self.items.put_nowait(("closed", None, None))
+            except queue.Full:
                 pass
         super().close()

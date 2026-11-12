@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
+from itertools import islice
 
 
 @dataclass
@@ -188,10 +189,16 @@ class Fat16:
         e = self.find(path)
         if e is None:
             raise OSError(f"{path} not found")
+        need = (len(data) + self.cluster_bytes - 1) // self.cluster_bytes
+        # Room is checked before anything changes: the old file's clusters count, as they're freed first.
+        old = set(self.chain(e.first_cluster)) if e.first_cluster >= 2 else set()
+        more = need - len(old)
+        spare = (c for c in range(2, self.cluster_count + 2) if self.fat(c) == 0 and c not in old)
+        if more > 0 and len(list(islice(spare, more))) < more:
+            raise OSError(f"Not enough room in the FAT partition for {path}")
         if e.first_cluster >= 2:
             self._free_chain(e.first_cluster)
-        need = (len(data) + self.cluster_bytes - 1) // self.cluster_bytes
-        free = [c for c in range(2, self.cluster_count + 2) if self.fat(c) == 0][:need]
+        free = list(islice((c for c in range(2, self.cluster_count + 2) if self.fat(c) == 0), need))
         if len(free) < need:
             raise OSError(f"Not enough room in the FAT partition for {path}")
         for i, c in enumerate(free):

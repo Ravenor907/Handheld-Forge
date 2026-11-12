@@ -52,17 +52,17 @@ class FdDisk:
         self._view = memoryview(self._buf)
 
     def read(self, lba: int, count: int) -> bytes:
-        out = bytearray()
+        parts = []
         bs = self.block_size
         while count > 0:
             n = min(count, CHUNK // bs)
             got = os.preadv(self.fd, [self._view[: n * bs]], lba * bs)
             if got < n * bs:
                 raise OSError(f"The drive stopped answering at sector {lba}")
-            out += self._view[: n * bs]
+            parts.append(bytes(self._view[: n * bs]))
             lba += n
             count -= n
-        return bytes(out)
+        return parts[0] if len(parts) == 1 else b"".join(parts)
 
     def write(self, lba: int, data) -> None:
         bs = self.block_size

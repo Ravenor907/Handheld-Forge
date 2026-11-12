@@ -11,6 +11,7 @@ import base64
 import hashlib
 import re
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 CHUNK = 4 * 1024 * 1024
@@ -21,6 +22,28 @@ ProgressFn = Callable[[int, int], None]  # (done_bytes, total_bytes)
 
 class VerificationError(Exception):
     pass
+
+
+class HashWorker:
+    """One worker thread that feeds hashes, so hashing overlaps reading and writing (hashlib lets go
+    of the GIL for anything big). Jobs run in the order given. The data handed to feed() must stay
+    unchanged until its job is done: wait for the returned future before a buffer is used again."""
+
+    def __init__(self) -> None:
+        self._pool = ThreadPoolExecutor(1, thread_name_prefix="hash")
+        self._last: Future | None = None
+
+    def feed(self, md, data) -> Future:
+        self._last = self._pool.submit(md.update, data)
+        return self._last
+
+    def wait(self) -> None:
+        """Returns once everything fed so far is hashed."""
+        if self._last is not None:
+            self._last.result()
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True)
 
 
 def sha256_file(path: Path, progress: ProgressFn | None = None) -> str:

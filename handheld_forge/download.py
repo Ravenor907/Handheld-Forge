@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import Distro, ImageSource
-from .verify import CHUNK, VerificationError, parse_checksum, sha256_file, verify_signature
+from .verify import CHUNK, HashWorker, VerificationError, parse_checksum, sha256_file, verify_signature
 
 USER_AGENT = f"HandheldForge/{__version__} (+https://github.com/Ravenor907/Handheld-Forge)"
 TIMEOUT = 30
@@ -152,8 +152,8 @@ class _Tail:
                 out += chunk
             return bytes(out)
         b = bytearray(n)
-        got = self.readinto(b)
-        return bytes(b[:got])
+        del b[self.readinto(b) :]
+        return bytes(b)
 
     def close(self) -> None:
         self.f.close()
@@ -233,13 +233,53 @@ def resolve_image(distro: Distro, log: LogFn = print) -> ImageSource:
     raise DownloadError(f"No downloadable image found for {distro.name}")
 
 
-def _download(url: str, part: Path, stage: StageFn, cancel: threading.Event) -> None:
+class _Hashed:
+    """The SHA256 of a download, taken as the bytes arrive (on a worker thread), so the finished file
+    needn't be read again to check it. It only counts for a file written from its first byte in this
+    run: a .part picked up from an earlier run is left to be hashed whole from the disk afterwards."""
+
+    def __init__(self) -> None:
+        self.worker = HashWorker()
+        self.md = hashlib.sha256()
+        self.count = 0  # bytes hashed so far, or -1 once the file holds bytes this never saw
+        self.last = None
+
+    def start_at(self, have: int) -> None:
+        """Called before each try with how many bytes of the file are kept."""
+        self.worker.wait()
+        if have == 0:
+            self.md, self.count = hashlib.sha256(), 0
+        elif have != self.count:
+            self.count = -1
+
+    def update(self, chunk: bytes) -> None:
+        if self.count < 0:
+            return
+        if self.last is not None:
+            self.last.result()  # at most one chunk waits its turn while another is hashed
+        self.last = self.worker.feed(self.md, chunk)
+        self.count += len(chunk)
+
+    def digest_of(self, part: Path) -> str | None:
+        """The file's SHA256 if every byte of it went through here, else None."""
+        self.worker.wait()
+        return self.md.hexdigest() if self.count == part.stat().st_size else None
+
+    def close(self) -> None:
+        self.worker.close()
+
+
+def _download(url: str, part: Path, stage: StageFn, cancel: threading.Event,
+              hashed: _Hashed | None = None) -> None:
     """Download with resume; retries dropped connections like the Android app does."""
     attempt = 0
     while True:
         before = part.stat().st_size if part.exists() else 0
         try:
-            _download_once(url, part, stage, cancel)
+            if hashed is None:
+                _download_once(url, part, stage, cancel)
+            else:
+                _download_once(url, part, stage, cancel, hashed)
             return
         except urllib.error.HTTPError as e:
             if 400 <= e.code < 500 and e.code not in (408, 429):
@@ -260,7 +300,8 @@ def _backoff(attempt: int) -> float:
     return min(2 * attempt, 15)
 
 
-def _download_once(url: str, part: Path, stage: StageFn, cancel: threading.Event) -> None:
+def _download_once(url: str, part: Path, stage: StageFn, cancel: threading.Event,
+                   hashed: _Hashed | None = None) -> None:
     have = part.stat().st_size if part.exists() else 0
     headers = {"Range": f"bytes={have}-"} if have else {}
     try:
@@ -274,12 +315,16 @@ def _download_once(url: str, part: Path, stage: StageFn, cancel: threading.Event
             have = 0
         length = int(resp.headers.get("Content-Length") or 0)
         total = have + length if length else 0
+        if hashed is not None:
+            hashed.start_at(have)
         with part.open("ab" if have else "wb") as f:
             done = have
             while chunk := resp.read(CHUNK):
                 if cancel.is_set():
                     raise Cancelled()
                 f.write(chunk)
+                if hashed is not None:
+                    hashed.update(chunk)
                 done += len(chunk)
                 stage("download", done, total)
         if total and done < total:
@@ -360,10 +405,22 @@ def prepare_iso(
         return PreparedImage(part, expected, img, False, from_cache=False, live=live)
 
     log(f"Downloading {img.iso_url}")
-    _download(img.iso_url, part, stage, cancel)
+    hashed = _Hashed() if checksummed else None
+    try:
+        if hashed:
+            _download(img.iso_url, part, stage, cancel, hashed)
+        else:
+            _download(img.iso_url, part, stage, cancel)
+        seen = hashed.digest_of(part) if hashed else None
+    finally:
+        if hashed:
+            hashed.close()
 
     stage("verify", 0, 0)
-    if checksummed:
+    if seen is not None:  # hashed while it arrived
+        actual = seen
+        stage("verify", part.stat().st_size, part.stat().st_size)
+    elif checksummed:
         actual = sha256_file(part, lambda d, t: stage("verify", d, t))
     else:
         actual = expected if not size or part.stat().st_size == size else "size-mismatch"

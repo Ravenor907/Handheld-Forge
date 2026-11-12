@@ -28,9 +28,14 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     private var bitmapCluster = 0L
     private var bitmapBytes = 0L
     private lateinit var bitmap: ByteArray
+    private lateinit var bitmapChain: List<Long>
+    private var rootChain: List<Long>? = null
     private lateinit var upcase: CharArray
     val clusterBytes get() = sectorsPerCluster.toLong() * bs
     var label = ""; private set
+
+    /** Set when a failed [writeEntrySet] may have left its file entry on the drive. */
+    private var entryLeftBehind = false
 
     data class FileInfo(
         val name: String,
@@ -43,6 +48,12 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
 
     companion object {
         private const val FIRST = 2L
+
+        /** The most a folder may hold, per the exFAT specification. */
+        private const val MAX_DIR_BYTES = 256L shl 20
+
+        /** How many failed writes cleaning up after a failed change may cost before giving up. */
+        private const val UNDO_FAILURES = 4
 
         fun open(dev: BlockDevice, partitionStart: Long): ExFatVolume = ExFatVolume(dev, partitionStart).also { it.load() }
 
@@ -64,35 +75,76 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     private fun readBytes(sectorInVolume: Long, length: Int): ByteArray {
         val sectors = (length + bs - 1) / bs
         val buf = ByteArray(sectors * bs)
+        readInto(sectorInVolume, sectors, buf, 0)
+        return if (buf.size == length) buf else buf.copyOf(length)
+    }
+
+    private fun readInto(sectorInVolume: Long, sectors: Int, buf: ByteArray, offset: Int) {
         var at = 0
         while (at < sectors) {
             val n = minOf(sectors - at, 2048)
-            dev.read(partitionStart + sectorInVolume + at, n, buf, at * bs)
+            dev.read(partitionStart + sectorInVolume + at, n, buf, offset + at * bs)
             at += n
         }
-        return if (buf.size == length) buf else buf.copyOf(length)
     }
 
     private fun writeSectors(sectorInVolume: Long, data: ByteArray) {
         require(data.size % bs == 0)
+        writeFrom(sectorInVolume, data.size / bs, data, 0)
+    }
+
+    private fun writeFrom(sectorInVolume: Long, sectors: Int, data: ByteArray, offset: Int) {
         var at = 0
-        val sectors = data.size / bs
         while (at < sectors) {
             val n = minOf(sectors - at, 2048)
-            dev.write(partitionStart + sectorInVolume + at, n, data, at * bs)
+            dev.write(partitionStart + sectorInVolume + at, n, data, offset + at * bs)
             at += n
         }
     }
 
     private fun sectorOf(cluster: Long) = heapOffset + (cluster - FIRST) * sectorsPerCluster
 
-    private fun fatEntry(cluster: Long): Long {
-        val byteOff = cluster * 4
-        val sector = fatOffset + byteOff / bs
-        val s = readBytes(sector, bs)
-        return ByteBuffer.wrap(s).order(ByteOrder.LITTLE_ENDIAN).getInt((byteOff % bs).toInt()).toLong() and 0xFFFFFFFFL
+    private fun damaged(what: String): Nothing =
+        throw IOException("The drive's file system is damaged ($what); run a disk check on a computer.")
+
+    /**
+     * How many clusters a contiguous file or folder of [size] bytes starting at [first] holds,
+     * after checking that the whole run lies inside the volume.
+     */
+    private fun runLength(first: Long, size: Long, name: String): Long {
+        if (size < 0) damaged("$name has an impossible size")
+        val n = if (size == 0L) 1L else (size - 1) / clusterBytes + 1
+        if (first < FIRST || n > clusterCount || first - FIRST > clusterCount - n) damaged("$name reaches past the end of the volume")
+        return n
     }
 
+    /**
+     * Steps that put things back after a failed write. A USB error is often momentary, so a step
+     * that fails is tried again, until [UNDO_FAILURES] attempts in all have failed.
+     */
+    private inner class Undo {
+        private var left = UNDO_FAILURES
+
+        /** True once [step] went through. */
+        fun run(step: () -> Unit): Boolean {
+            while (left > 0) {
+                try {
+                    step()
+                    return true
+                } catch (e: IOException) {
+                    left--
+                }
+            }
+            return false
+        }
+    }
+
+    private fun fatEntry(cluster: Long): Long {
+        val s = readBytes(fatOffset + cluster * 4 / bs, bs)
+        return ByteBuffer.wrap(s).order(ByteOrder.LITTLE_ENDIAN).getInt(((cluster * 4) % bs).toInt()).toLong() and 0xFFFFFFFFL
+    }
+
+    /** Writes FAT entries. Sectors go out in the order their first entry appears in [values]. */
     private fun setFatEntries(values: Map<Long, Long>) {
         // Group by FAT sector so each sector is read and written once.
         for ((sector, entries) in values.entries.groupBy { fatOffset + it.key * 4 / bs }) {
@@ -103,27 +155,74 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         }
     }
 
-    private fun chain(first: Long, contiguous: Boolean, length: Long): List<Long> {
+    /**
+     * The clusters of a file or folder. A chain in the FAT is followed to its end, or for at most
+     * [max] clusters.
+     */
+    private fun chain(first: Long, contiguous: Boolean, length: Long, max: Long = Long.MAX_VALUE): List<Long> {
         if (first < FIRST) return emptyList()
         if (contiguous) {
-            val n = maxOf(1L, (length + clusterBytes - 1) / clusterBytes)
+            val n = runLength(first, length, "a file")
             return (first until first + n).toList()
         }
         val out = ArrayList<Long>()
+        // The FAT is read in aligned windows that grow (1, 8, then 64 sectors) while the chain goes
+        // on, never past the sector holding the last cluster's entry. The 64-sector windows are
+        // kept (up to 2 MB of them), so a chain that jumps back and forth doesn't read them again.
+        val lastFatSector = fatOffset + (clusterCount + FIRST - 1) * 4 / bs
+        var win = ByteArray(0)
+        var winSector = 0L
+        var winSectors = 0
+        var nextSectors = 1
+        var kept: HashMap<Long, ByteArray>? = null
         var c = first
-        while (c in FIRST until clusterCount + FIRST) {
+        while (c in FIRST until clusterCount + FIRST && out.size < max) {
             if (out.size > clusterCount) throw IOException("The drive's file table loops; run a disk check on a computer.")
             out.add(c)
-            c = fatEntry(c)
+            val byteOff = c * 4
+            val sector = fatOffset + byteOff / bs
+            if (sector < winSector || sector >= winSector + winSectors) {
+                winSector = fatOffset + (sector - fatOffset) / nextSectors * nextSectors
+                winSectors = minOf(nextSectors.toLong(), lastFatSector - winSector + 1).toInt()
+                if (nextSectors == 64) {
+                    val map = kept ?: HashMap<Long, ByteArray>().also { kept = it }
+                    win = map[winSector] ?: readBytes(winSector, winSectors * bs).also {
+                        if (map.size >= 64) map.clear()
+                        map[winSector] = it
+                    }
+                } else {
+                    win = readBytes(winSector, winSectors * bs)
+                }
+                nextSectors = minOf(nextSectors * 8, 64)
+            }
+            val o = ((sector - winSector) * bs + byteOff % bs).toInt()
+            c = ((win[o].toInt() and 0xFF) or ((win[o + 1].toInt() and 0xFF) shl 8) or
+                ((win[o + 2].toInt() and 0xFF) shl 16) or ((win[o + 3].toInt() and 0xFF) shl 24)).toLong() and 0xFFFFFFFFL
         }
         return out
     }
 
+    /** A file's first [length] bytes; only the clusters that hold them are read. */
     private fun readChain(first: Long, contiguous: Boolean, length: Long): ByteArray {
-        val clusters = chain(first, contiguous, length)
-        val out = ByteArray((clusters.size * clusterBytes).toInt())
-        clusters.forEachIndexed { i, c ->
-            readBytes(sectorOf(c), clusterBytes.toInt()).copyInto(out, (i * clusterBytes).toInt())
+        if (length < 0) damaged("a file has an impossible size")
+        val need = if (length == 0L) 0L else (length - 1) / clusterBytes + 1
+        return readClusters(if (need == 0L) emptyList() else chain(first, contiguous, length, need), length)
+    }
+
+    /** The clusters' contents, cut to [length] bytes; a negative [length] means all of them. */
+    private fun readClusters(clusters: List<Long>, length: Long): ByteArray {
+        val cb = clusterBytes.toInt()
+        val total = clusters.size * clusterBytes
+        if (length > total) damaged("a file's chain of clusters ends before the file does")
+        if (total > Int.MAX_VALUE - 16) throw IOException("A file or folder on the drive is too large to load.")
+        val out = ByteArray(total.toInt())
+        // Clusters that follow each other on the disk are read in one go, straight into place.
+        var i = 0
+        while (i < clusters.size) {
+            var j = i + 1
+            while (j < clusters.size && clusters[j] == clusters[j - 1] + 1) j++
+            readInto(sectorOf(clusters[i]), (j - i) * sectorsPerCluster, out, i * cb)
+            i = j
         }
         return if (length in 0 until out.size) out.copyOf(length.toInt()) else out
     }
@@ -141,7 +240,20 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         heapOffset = b.getInt(88).toLong() and 0xFFFFFFFFL
         clusterCount = b.getInt(92).toLong() and 0xFFFFFFFFL
         rootCluster = b.getInt(96).toLong() and 0xFFFFFFFFL
-        sectorsPerCluster = 1 shl (boot[109].toInt() and 0xFF)
+        // The specification allows clusters of up to 32 MB.
+        val clusterShift = boot[109].toInt() and 0xFF
+        if (clusterShift > 25 - Integer.numberOfTrailingZeros(bs)) damaged("its cluster size is impossible")
+        sectorsPerCluster = 1 shl clusterShift
+        // Everything read or written later lies in the FAT or the cluster heap, so checking the
+        // two here keeps every later access inside the volume and the drive.
+        val volumeSectors = minOf(b.getLong(72), dev.blockCount - partitionStart)
+        if (clusterCount < 1 || heapOffset > volumeSectors || clusterCount > (volumeSectors - heapOffset) / sectorsPerCluster) {
+            damaged("it says it has more clusters than fit on the volume")
+        }
+        if (fatOffset < 24 || fatOffset >= heapOffset || (clusterCount + FIRST) * 4 > (heapOffset - fatOffset) * bs) {
+            damaged("its file table is not where it should be")
+        }
+        if (rootCluster < FIRST || rootCluster >= clusterCount + FIRST) damaged("its main folder is outside the volume")
         val root = rootEntries()
         var upcaseCluster = 0L
         var upcaseLen = 0L
@@ -158,12 +270,19 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
                 }
                 0x83 -> {
                     val n = e[1].toInt() and 0xFF
+                    if (n > 15) damaged("its label is longer than a label can be")
                     label = String(CharArray(n) { bb.getShort(2 + it * 2).toInt().toChar() })
                 }
             }
         }
         if (bitmapCluster == 0L || upcaseCluster == 0L) throw IOException("This exFAT volume is missing its bitmap or up-case table.")
-        bitmap = readChain(bitmapCluster, false, bitmapBytes)
+        // The bitmap needs a bit for every cluster, and its clusters must hold that many.
+        val bitmapNeeded = (clusterCount + 7) / 8
+        if (bitmapBytes < bitmapNeeded) damaged("its map of used space is too short")
+        bitmapChain = chain(bitmapCluster, false, bitmapBytes, (bitmapBytes - 1) / clusterBytes + 1)
+        if (bitmapChain.size * clusterBytes < bitmapNeeded) damaged("its map of used space is too short")
+        bitmap = readClusters(bitmapChain, minOf(bitmapBytes, bitmapChain.size * clusterBytes))
+        if (upcaseLen < 2 || upcaseLen > (1L shl 20)) damaged("its up-case table has an impossible size")
         upcase = expandUpcase(readChain(upcaseCluster, false, upcaseLen))
     }
 
@@ -185,16 +304,40 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     /** A directory's clusters and its raw bytes; [folder] is null for the root. */
     private class Dir(val clusters: List<Long>, val bytes: ByteArray, val folder: FileInfo? = null)
 
-    private fun rootEntries(): Dir = readDir(chain(rootCluster, false, -1), null)
+    /** The root folder's cluster chain is kept between calls; [growRoot] is the only thing that changes it. */
+    private fun rootEntries(): Dir = readDir(rootChain ?: chain(rootCluster, false, -1).also { rootChain = it }, null)
 
     private fun readDir(clusters: List<Long>, folder: FileInfo?): Dir {
-        val bytes = ByteArray((clusters.size * clusterBytes).toInt())
-        clusters.forEachIndexed { i, c -> readBytes(sectorOf(c), clusterBytes.toInt()).copyInto(bytes, (i * clusterBytes).toInt()) }
-        return Dir(clusters, bytes, folder)
+        if (clusters.size * clusterBytes > MAX_DIR_BYTES) throw IOException("A folder on the drive is too large to load.")
+        return Dir(clusters, readClusters(clusters, -1), folder)
     }
 
-    private fun dirOf(folder: FileInfo?): Dir =
-        if (folder == null) rootEntries() else readDir(chain(folder.firstCluster, folder.contiguous, folder.size), folder)
+    private fun dirOf(folder: FileInfo?): Dir {
+        if (folder == null) return rootEntries()
+        checkCurrent(folder)
+        if (folder.contiguous && runLength(folder.firstCluster, folder.size, "the ${folder.name} folder") * clusterBytes > MAX_DIR_BYTES) {
+            throw IOException("A folder on the drive is too large to load.")
+        }
+        return readDir(chain(folder.firstCluster, folder.contiguous, folder.size), folder)
+    }
+
+    /**
+     * Checks that [folder] still describes what is on the drive. Its entry is rewritten when the
+     * folder grows, so a [FileInfo] looked up before that no longer covers the whole folder.
+     */
+    private fun checkCurrent(folder: FileInfo) {
+        if (folder.entryOffsets.size < 3) damaged("the ${folder.name} folder has no entry")
+        val file = folder.entryOffsets[0]
+        val stream = folder.entryOffsets[1]
+        val s0 = readBytes(file / bs, bs)
+        val s1 = if (stream / bs == file / bs) s0 else readBytes(stream / bs, bs)
+        val o = (stream % bs).toInt()
+        val bb = ByteBuffer.wrap(s1).order(ByteOrder.LITTLE_ENDIAN)
+        val same = (s0[(file % bs).toInt()].toInt() and 0xFF) == 0x85 && (s1[o].toInt() and 0xFF) == 0xC0 &&
+            (s1[o + 1].toInt() and 0x02 != 0) == folder.contiguous &&
+            (bb.getInt(o + 20).toLong() and 0xFFFFFFFFL) == folder.firstCluster && bb.getLong(o + 24) == folder.size
+        if (!same) throw IOException("The ${folder.name} folder changed on the drive since it was looked up. Try again.")
+    }
 
     private inline fun forEachEntry(d: Dir, f: (Int, ByteArray) -> Unit) {
         var o = 0
@@ -226,24 +369,30 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
             if (type == 0) break
             if (type == 0x85) {
                 val count = d.bytes[o + 1].toInt() and 0xFF
+                if (o + 32 * (count + 1) > d.bytes.size) damaged("an entry in a folder runs past the folder's end")
                 val attrs = ByteBuffer.wrap(d.bytes).order(ByteOrder.LITTLE_ENDIAN).getShort(o + 4).toInt()
                 val s = o + 32
-                if (s + 32 <= d.bytes.size && (d.bytes[s].toInt() and 0xFF) == 0xC0 && count >= 2) {
-                    val bb = ByteBuffer.wrap(d.bytes).order(ByteOrder.LITTLE_ENDIAN)
-                    val flags = d.bytes[s + 1].toInt()
-                    val nameLen = d.bytes[s + 3].toInt() and 0xFF
-                    val first = bb.getInt(s + 20).toLong() and 0xFFFFFFFFL
-                    val size = bb.getLong(s + 24)
-                    val sb = StringBuilder()
-                    for (k in 2..count) {
-                        val e = o + k * 32
-                        if (e + 32 > d.bytes.size || (d.bytes[e].toInt() and 0xFF) != 0xC1) break
-                        for (j in 0 until 15) if (sb.length < nameLen) sb.append(bb.getShort(e + 2 + j * 2).toInt().toChar())
-                    }
-                    out.add(
-                        FileInfo(sb.toString(), size, first, flags and 0x02 != 0, (0..count).map { dirOffsetOnVolume(d, o + it * 32) }, attrs and 0x10 != 0),
-                    )
+                // A whole set is a file entry, a stream entry, then name entries. A file entry
+                // without them is passed over on its own, so the entries after it are still seen.
+                var whole = count >= 2 && (d.bytes[s].toInt() and 0xFF) == 0xC0
+                if (whole) for (k in 2..count) if ((d.bytes[o + k * 32].toInt() and 0xFF) != 0xC1) { whole = false; break }
+                if (!whole) {
+                    o += 32
+                    continue
                 }
+                val bb = ByteBuffer.wrap(d.bytes).order(ByteOrder.LITTLE_ENDIAN)
+                val flags = d.bytes[s + 1].toInt()
+                val nameLen = d.bytes[s + 3].toInt() and 0xFF
+                val first = bb.getInt(s + 20).toLong() and 0xFFFFFFFFL
+                val size = bb.getLong(s + 24)
+                val sb = StringBuilder()
+                for (k in 2..count) {
+                    val e = o + k * 32
+                    for (j in 0 until 15) if (sb.length < nameLen) sb.append(bb.getShort(e + 2 + j * 2).toInt().toChar())
+                }
+                out.add(
+                    FileInfo(sb.toString(), size, first, flags and 0x02 != 0, (0..count).map { dirOffsetOnVolume(d, o + it * 32) }, attrs and 0x10 != 0),
+                )
                 o += 32 * (count + 1)
                 continue
             }
@@ -253,8 +402,18 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     }
 
     fun freeClusters(): Long {
+        // Counted 64 clusters at a time; the last few one by one.
         var used = 0L
-        for (i in 0 until clusterCount) if (bit(i)) used++
+        val bb = ByteBuffer.wrap(bitmap)
+        var i = 0L
+        while (i + 64 <= clusterCount) {
+            used += java.lang.Long.bitCount(bb.getLong((i ushr 3).toInt()))
+            i += 64
+        }
+        while (i < clusterCount) {
+            if (bit(i)) used++
+            i++
+        }
         return clusterCount - used
     }
 
@@ -263,31 +422,53 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     private fun bit(i: Long) = (bitmap[(i / 8).toInt()].toInt() shr (i % 8).toInt()) and 1 == 1
 
     private fun setBits(first: Long, count: Long, on: Boolean) {
-        for (c in first until first + count) {
-            val i = c - FIRST
+        var i = first - FIRST
+        val end = i + count
+        while (i < end) {
+            if (i and 7 == 0L && end - i >= 8) {
+                // Whole bytes at once.
+                val from = (i / 8).toInt()
+                val to = (end / 8).toInt()
+                java.util.Arrays.fill(bitmap, from, to, if (on) 0xFF.toByte() else 0)
+                i = to * 8L
+                continue
+            }
             val idx = (i / 8).toInt()
             val m = 1 shl (i % 8).toInt()
             bitmap[idx] = (if (on) bitmap[idx].toInt() or m else bitmap[idx].toInt() and m.inv()).toByte()
+            i++
         }
     }
 
     /** Writes back the bitmap sectors covering clusters [first, first+count). */
     private fun flushBitmap(first: Long, count: Long) {
         if (count <= 0) return
-        val bitmapClusters = chain(bitmapCluster, false, bitmapBytes)
-        val startByte = (first - FIRST) / 8
-        val endByte = (first - FIRST + count - 1) / 8
-        var sectorByte = startByte / bs * bs
-        while (sectorByte <= endByte) {
-            val cl = bitmapClusters[(sectorByte / clusterBytes).toInt()]
-            val sector = sectorOf(cl) + (sectorByte % clusterBytes) / bs
-            val chunk = ByteArray(bs)
-            val n = minOf(bs.toLong(), bitmap.size - sectorByte).toInt()
-            System.arraycopy(bitmap, sectorByte.toInt(), chunk, 0, n)
-            // Keep whatever is past the bitmap's end in that sector.
-            if (n < bs) readBytes(sector, bs).copyInto(chunk, n, n, bs)
+        flushBitmapSectors((first - FIRST) / 8 / bs, (first - FIRST + count - 1) / 8 / bs)
+    }
+
+    /** Where the bitmap's sector [k] (counted from the bitmap's start) is on the volume. */
+    private fun bitmapSector(k: Long): Long {
+        val sectorByte = k * bs
+        return sectorOf(bitmapChain[(sectorByte / clusterBytes).toInt()]) + (sectorByte % clusterBytes) / bs
+    }
+
+    /** Writes back the bitmap's sectors [from]..[to]; ones that follow each other on the disk go out in one write. */
+    private fun flushBitmapSectors(from: Long, to: Long) {
+        var k = from
+        while (k <= to) {
+            val sector = bitmapSector(k)
+            var n = 1
+            while (k + n <= to && n < 2048 && bitmapSector(k + n) == sector + n) n++
+            val chunk = ByteArray(n * bs)
+            val have = minOf(chunk.size.toLong(), bitmap.size - k * bs).toInt()
+            System.arraycopy(bitmap, (k * bs).toInt(), chunk, 0, have)
+            if (have < chunk.size) {
+                // Keep whatever is past the bitmap's end in its last sector.
+                val last = (n - 1) * bs
+                readBytes(sector + n - 1, bs).copyInto(chunk, have, have - last, bs)
+            }
             writeSectors(sector, chunk)
-            sectorByte += bs
+            k += n
         }
     }
 
@@ -295,13 +476,31 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     private fun findRun(n: Long): Long? {
         var run = 0L
         var start = 0L
-        for (i in 0 until clusterCount) {
+        val bb = ByteBuffer.wrap(bitmap)
+        var i = 0L
+        while (i < clusterCount) {
+            // 64 clusters at a time where they're all used, or all free and the run can't end among them.
+            if (i and 7 == 0L && i + 64 <= clusterCount) {
+                val w = bb.getLong((i ushr 3).toInt())
+                if (w == -1L) {
+                    run = 0
+                    i += 64
+                    continue
+                }
+                if (w == 0L && run + 64 < n) {
+                    if (run == 0L) start = i
+                    run += 64
+                    i += 64
+                    continue
+                }
+            }
             if (bit(i)) {
                 run = 0
             } else {
                 if (run == 0L) start = i
                 if (++run == n) return start + FIRST
             }
+            i++
         }
         return null
     }
@@ -316,12 +515,12 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         try {
             for (f in removing) {
                 if (f.firstCluster < FIRST) continue
-                if (f.contiguous) setBits(f.firstCluster, maxOf(1L, (f.size + clusterBytes - 1) / clusterBytes), false)
+                if (f.contiguous) setBits(f.firstCluster, runLength(f.firstCluster, f.size, f.name), false)
                 else chain(f.firstCluster, false, f.size).forEach { setBits(it, 1, false) }
             }
             for (size in sizes) {
-                if (size == 0L) continue
-                val n = (size + clusterBytes - 1) / clusterBytes
+                if (size <= 0L) continue
+                val n = (size - 1) / clusterBytes + 1
                 val at = findRun(n) ?: return size
                 setBits(at, n, true)
             }
@@ -340,7 +539,25 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         var bestStart = 0L
         var run = 0L
         var start = 0L
-        for (i in 0 until clusterCount) {
+        val bb = ByteBuffer.wrap(bitmap)
+        var i = 0L
+        while (i < clusterCount) {
+            // 64 clusters at a time where they're all used or all free.
+            if (i and 7 == 0L && i + 64 <= clusterCount) {
+                val w = bb.getLong((i ushr 3).toInt())
+                if (w == -1L) {
+                    run = 0
+                    i += 64
+                    continue
+                }
+                if (w == 0L) {
+                    if (run == 0L) start = i
+                    run += 64
+                    if (run > best) { best = run; bestStart = start }
+                    i += 64
+                    continue
+                }
+            }
             if (bit(i)) {
                 run = 0
             } else {
@@ -348,6 +565,7 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
                 run++
                 if (run > best) { best = run; bestStart = start }
             }
+            i++
         }
         return (bestStart + FIRST) to best
     }
@@ -422,34 +640,86 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         writeSectors(sectorOf(c), ByteArray(clusterBytes.toInt()))
         setBits(c, 1, true)
         flushBitmap(c, 1)
-        writeEntrySet(clean, c, clusterBytes, null, folder = true)
+        try {
+            writeEntrySet(clean, c, clusterBytes, null, folder = true)
+        } catch (e: IOException) {
+            release(c, 1)
+            throw e
+        }
         dev.sync()
         return lookup(clean) ?: throw IOException("Couldn't create the $clean folder.")
     }
 
     // ---------------------------------------------------------------- changes
 
-    /** Deletes a file in the root folder: entries marked unused, clusters freed in the bitmap. */
+    /**
+     * Deletes a file: entries marked unused, clusters freed in the bitmap. The sector holding
+     * the file entry is written first, so the file is gone from that one write on; a failure
+     * later leaves at worst unused name entries or clusters still marked used.
+     */
     fun delete(f: FileInfo) {
-        for (off in f.entryOffsets) {
-            val sector = off / bs
+        if (f.entryOffsets.isEmpty()) damaged("${f.name} has no entry")
+        // What to free is worked out before anything is written.
+        val run = if (f.firstCluster >= FIRST && f.contiguous) runLength(f.firstCluster, f.size, f.name) else 0L
+        val chained = if (f.firstCluster >= FIRST && !f.contiguous) chain(f.firstCluster, false, f.size) else emptyList()
+        // Entries that share a sector are cleared with one read and one write of it.
+        var failure: IOException? = null
+        var unfinished = false
+        val undo = Undo()
+        var k = 0
+        while (k < f.entryOffsets.size) {
+            val sector = f.entryOffsets[k] / bs
             val s = readBytes(sector, bs)
-            val i = (off % bs).toInt()
-            s[i] = (s[i].toInt() and 0x7F).toByte() // InUse bit off
-            writeSectors(sector, s)
+            if (k == 0 && (s[(f.entryOffsets[0] % bs).toInt()].toInt() and 0xFF) != 0x85) {
+                throw IOException("${f.name} is no longer where it was on the drive. Try again.")
+            }
+            while (k < f.entryOffsets.size && f.entryOffsets[k] / bs == sector) {
+                val i = (f.entryOffsets[k] % bs).toInt()
+                s[i] = (s[i].toInt() and 0x7F).toByte() // InUse bit off
+                k++
+            }
+            val written = if (failure == null) {
+                try {
+                    writeSectors(sector, s)
+                    true
+                } catch (e: IOException) {
+                    // Nothing has changed if this was the file entry's sector. After it, the
+                    // file is already gone, so the rest is finished where the drive allows.
+                    if (sector == f.entryOffsets[0] / bs) throw e
+                    failure = e
+                    undo.run { writeSectors(sector, s) }
+                }
+            } else {
+                undo.run { writeSectors(sector, s) }
+            }
+            if (!written) {
+                unfinished = true
+                break
+            }
         }
         if (f.firstCluster >= FIRST) {
-            val clusters = if (f.contiguous) {
-                val n = maxOf(1L, (f.size + clusterBytes - 1) / clusterBytes)
-                listOf(f.firstCluster to n)
+            if (f.contiguous) {
+                val n = run
+                setBits(f.firstCluster, n, false)
+                flushBitmap(f.firstCluster, n)
             } else {
-                chain(f.firstCluster, false, f.size).map { it to 1L }
-            }
-            for ((c, n) in clusters) {
-                setBits(c, n, false)
-                flushBitmap(c, n)
+                // Every cluster of the chain is freed in memory, then each bitmap sector that changed is written once.
+                val dirty = BooleanArray((bitmap.size + bs - 1) / bs)
+                for (c in chained) {
+                    setBits(c, 1, false)
+                    dirty[((c - FIRST) / 8 / bs).toInt()] = true
+                }
+                var from = 0
+                while (from < dirty.size) {
+                    if (!dirty[from]) { from++; continue }
+                    var to = from
+                    while (to + 1 < dirty.size && dirty[to + 1]) to++
+                    flushBitmapSectors(from.toLong(), to.toLong())
+                    from = to + 1
+                }
             }
         }
+        if (unfinished) failure?.let { throw it }
     }
 
     /**
@@ -484,7 +754,8 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         // 1. Data.
         val md = MessageDigest.getInstance("SHA-256")
         val chunkSectors = 2048
-        val buf = ByteArray(chunkSectors * bs)
+        // A small file doesn't need the full chunk: just its own size, rounded up to whole sectors.
+        val buf = ByteArray(minOf(chunkSectors.toLong() * bs, (size + bs - 1) / bs * bs).toInt())
         var written = 0L
         var sector = sectorOf(first)
         while (written < size) {
@@ -525,11 +796,24 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         try {
             writeEntrySet(name, first, size, folder)
         } catch (e: IOException) {
-            setBits(first, clusters, false)
-            runCatching { flushBitmap(first, clusters) }
+            release(first, clusters)
             throw e
         }
         dev.sync()
+    }
+
+    /**
+     * Gives back clusters claimed for an entry set that couldn't be written, unless its file entry
+     * may be on the drive after all: clusters an entry points at are never marked free.
+     */
+    private fun release(first: Long, clusters: Long) {
+        if (entryLeftBehind) return
+        setBits(first, clusters, false)
+        try {
+            flushBitmap(first, clusters)
+        } catch (e: IOException) {
+            // Still marked used on the drive: wasted space at worst.
+        }
     }
 
     /**
@@ -594,14 +878,26 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
     /** Reads a file back from the drive and compares it with the hash [add] returned. */
     fun verify(f: FileInfo, expected: ByteArray, progress: (Long, Long) -> Unit, cancel: () -> Boolean) {
         val md = MessageDigest.getInstance("SHA-256")
-        val clusters = chain(f.firstCluster, f.contiguous, f.size)
         var left = f.size
         var done = 0L
-        // Contiguous files are read in big runs; chained ones a cluster at a time.
+        // Contiguous files are one big run; chained ones are read in the runs their clusters form.
         val runs = ArrayList<Pair<Long, Long>>()
-        for (c in clusters) {
-            val last = runs.lastOrNull()
-            if (last != null && last.first + last.second == c) runs[runs.lastIndex] = last.first to last.second + 1 else runs.add(c to 1L)
+        if (f.size < 0) damaged("${f.name} has an impossible size")
+        if (f.contiguous) {
+            if (f.firstCluster >= FIRST) runs.add(f.firstCluster to runLength(f.firstCluster, f.size, f.name))
+        } else {
+            var start = 0L
+            var count = 0L
+            for (c in chain(f.firstCluster, false, f.size)) {
+                if (count > 0 && start + count == c) {
+                    count++
+                } else {
+                    if (count > 0) runs.add(start to count)
+                    start = c
+                    count = 1
+                }
+            }
+            if (count > 0) runs.add(start to count)
         }
         val buf = ByteArray(2048 * bs)
         for ((start, count) in runs) {
@@ -620,6 +916,7 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
                 progress(done, f.size)
             }
         }
+        if (left > 0) damaged("${f.name}'s chain of clusters ends before the file does")
         if (!MessageDigest.isEqual(md.digest(), expected)) {
             throw WriteException("${f.name} didn't read back correctly from the drive. The drive may be failing or counterfeit.")
         }
@@ -654,6 +951,7 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         bb.putShort(2, setChecksum(set).toShort())
 
         // A run of free slots: unused (InUse bit clear) or past the end marker.
+        entryLeftBehind = false
         var d = dirOf(parent)
         var slot = findSlots(d, count)
         if (slot == null) {
@@ -665,17 +963,48 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
             }
             slot = findSlots(d, count) ?: throw IOException("Couldn't make room in the drive's folder.")
         }
-        // Write the set sector by sector (it may cross a sector or cluster boundary).
-        var i = 0
-        while (i < set.size) {
-            val off = dirOffsetOnVolume(d, slot + i)
-            val sector = off / bs
-            val s = readBytes(sector, bs)
-            var j = (off % bs).toInt()
-            while (j < bs && i < set.size) {
-                s[j++] = set[i++]
+        // Put the set into the folder's bytes (just read from the drive) and write back the sectors
+        // it touches; it may cross a sector or cluster boundary. The sector holding the file entry
+        // goes last: until it is written the slots still read as free, so the set is only seen
+        // once it is whole.
+        val dir = d
+        val before = dir.bytes.copyOfRange(slot, slot + set.size)
+        set.copyInto(dir.bytes, slot)
+        val head = slot / bs * bs
+        val rest = head + bs
+        val end = slot + set.size
+        var headTried = false
+        try {
+            writeDirBytes(dir, rest, end)
+            headTried = true
+            writeDirBytes(dir, head, rest)
+        } catch (e: IOException) {
+            // Put the slots back as they were, the file entry's sector first.
+            before.copyInto(dir.bytes, slot)
+            val undo = Undo()
+            if (headTried && !undo.run { writeDirBytes(dir, head, rest) }) {
+                // The failed write may have landed all the same. Look, if the drive still answers.
+                val at = dirOffsetOnVolume(dir, slot)
+                entryLeftBehind = try {
+                    (readBytes(at / bs, bs)[(at % bs).toInt()].toInt() and 0xFF) == 0x85
+                } catch (e2: IOException) {
+                    true
+                }
             }
-            writeSectors(sector, s)
+            undo.run { writeDirBytes(dir, rest, end) }
+            throw e
+        }
+    }
+
+    /** Writes back the sectors holding a folder's bytes [from] until [to]; ones that follow each other on the disk go out in one write. */
+    private fun writeDirBytes(d: Dir, from: Int, to: Int) {
+        var o = from
+        while (o < to) {
+            val sector = dirOffsetOnVolume(d, o) / bs
+            var n = 1
+            while (o + n * bs < to && dirOffsetOnVolume(d, o + n * bs) / bs == sector + n) n++
+            writeFrom(sector, n, d.bytes, o)
+            o += n * bs
         }
     }
 
@@ -707,32 +1036,60 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
      */
     private fun growFolder(f: FileInfo): FileInfo {
         val clusters = chain(f.firstCluster, f.contiguous, f.size)
+        if (clusters.isEmpty()) damaged("the ${f.name} folder has no clusters")
         val c = findRun(1) ?: throw IOException("The drive is full.")
         writeSectors(sectorOf(c), ByteArray(clusterBytes.toInt()))
         setBits(c, 1, true)
         flushBitmap(c, 1)
         val stillContiguous = f.contiguous && c == clusters.last() + 1
-        if (!stillContiguous) {
-            val links = HashMap<Long, Long>()
-            if (f.contiguous) clusters.zipWithNext().forEach { (a, b) -> links[a] = b }
-            links[clusters.last()] = c
-            links[c] = 0xFFFFFFFFL
-            setFatEntries(links)
-        }
-        // Rewrite the folder's entry set: new length, flags, checksum.
+        // The folder's entry set with its new length, flags and checksum. Only the file entry
+        // (checksum) and the stream entry (length, flags) change, so only their sectors are written.
+        val sectors = LinkedHashMap<Long, ByteArray>()
+        for (off in f.entryOffsets) sectors.getOrPut(off / bs) { readBytes(off / bs, bs) }
         val set = ByteArray(f.entryOffsets.size * 32)
-        f.entryOffsets.forEachIndexed { i, off -> readBytes(off / bs, bs).copyInto(set, i * 32, (off % bs).toInt(), (off % bs).toInt() + 32) }
+        f.entryOffsets.forEachIndexed { i, off -> sectors.getValue(off / bs).copyInto(set, i * 32, (off % bs).toInt(), (off % bs).toInt() + 32) }
         val bb = ByteBuffer.wrap(set).order(ByteOrder.LITTLE_ENDIAN)
         val newSize = f.size + clusterBytes
         set[33] = if (stillContiguous) 0x03 else 0x01
         bb.putLong(40, newSize)
         bb.putLong(56, newSize)
         bb.putShort(2, setChecksum(set).toShort())
-        f.entryOffsets.forEachIndexed { i, off ->
-            val sector = off / bs
-            val sec = readBytes(sector, bs)
-            set.copyInto(sec, (off % bs).toInt(), i * 32, i * 32 + 32)
-            writeSectors(sector, sec)
+        val fileSector = f.entryOffsets[0] / bs
+        val streamSector = f.entryOffsets[1] / bs
+        val oldFile = sectors.getValue(fileSector).copyOf()
+        val oldStream = sectors.getValue(streamSector).copyOf()
+        for (i in 0..1) set.copyInto(sectors.getValue(f.entryOffsets[i] / bs), (f.entryOffsets[i] % bs).toInt(), i * 32, i * 32 + 32)
+
+        // A folder already chained through the FAT gets longer the moment its last cluster is
+        // linked to the new one, so that link is taken back if the entry set can't follow it.
+        val oldLink = if (f.contiguous) 0L else fatEntry(clusters.last())
+        var linked = false
+        var streamTried = false
+        var fileTried = false
+        try {
+            if (!stillContiguous) {
+                // The new cluster's end mark goes first and the link to it last; while the folder
+                // is still marked contiguous the FAT isn't looked at.
+                val links = LinkedHashMap<Long, Long>()
+                links[c] = 0xFFFFFFFFL
+                if (f.contiguous) clusters.zipWithNext().forEach { (a, b) -> links[a] = b }
+                links[clusters.last()] = c
+                linked = !f.contiguous
+                setFatEntries(links)
+            }
+            // The stream entry's sector, then the file entry's if it is another one.
+            streamTried = true
+            writeSectors(streamSector, sectors.getValue(streamSector))
+            if (fileSector != streamSector) {
+                fileTried = true
+                writeSectors(fileSector, sectors.getValue(fileSector))
+            }
+        } catch (e: IOException) {
+            val undo = Undo()
+            if (fileTried) undo.run { writeSectors(fileSector, oldFile) }
+            if (streamTried) undo.run { writeSectors(streamSector, oldStream) }
+            if (linked) undo.run { setFatEntries(mapOf(clusters.last() to oldLink)) }
+            throw e
         }
         dev.sync()
         return entries(null).firstOrNull { it.entryOffsets.first() == f.entryOffsets.first() }
@@ -754,7 +1111,13 @@ class ExFatVolume private constructor(private val dev: BlockDevice, val partitio
         writeSectors(sectorOf(c), ByteArray(clusterBytes.toInt()))
         setBits(c, 1, true)
         flushBitmap(c, 1)
-        setFatEntries(mapOf(d.clusters.last() to c, c to 0xFFFFFFFFL))
+        rootChain = null
+        // The new cluster's end mark first, then the link that makes it part of the folder: the
+        // chain is whole after either write, and a failure leaves at worst the cluster unused.
+        val links = LinkedHashMap<Long, Long>()
+        links[c] = 0xFFFFFFFFL
+        links[d.clusters.last()] = c
+        setFatEntries(links)
     }
 
     /** exFAT timestamp: DOS date and time fields, in UTC. */

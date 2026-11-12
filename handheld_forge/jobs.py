@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import lzma
 import os
 import re
 import subprocess
 import threading
 import time
+import zipfile
+import zlib
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +32,7 @@ from .drives import Drive
 from .imagekind import SNIFF_BYTES, ImageKind, decoder, sniff
 from .rawwrite import Cancelled, RawWriteError
 from .udisks import UDisks, UDisksError, object_path_for
+from .verify import HashWorker
 
 StageFn = Callable[[str, int, int], None]
 LogFn = Callable[[str], None]
@@ -35,6 +40,8 @@ CHUNK = 4 << 20
 BOOTABLE = {"iso", "img", "wim", "vhd", "vhdx", "efi", "vtoy"}  # what Ventoy lists in its menu
 PACKED = {"xz", "gz", "bz2", "zip"}
 DOS_TYPE_EXFAT = "0x07"
+# What a damaged compressed file raises while it's opened or unpacked.
+_DAMAGED = (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError, zipfile.BadZipFile)
 _BAD_NAME = re.compile(r'[\x00-\x1f"*/:<>?\\|]')
 
 
@@ -133,6 +140,8 @@ def format_drive(
     password when exFAT tools are installed; otherwise the app formats it itself (password)."""
     ud = udisks or UDisks()
     log_drive(drive, log)
+    if drive.size > exfat.MBR_MAX_SECTORS * 512:
+        raise RawWriteError(exfat.TOO_BIG)
     block = object_path_for(drive.name)
     if ud.is_system_device(block):
         raise RawWriteError("Your system marks this drive as internal. Refusing to touch it.")
@@ -183,6 +192,8 @@ def install_ventoy(
     log_drive(drive, log)
     if drive.size < ventoy.MIN_BYTES:
         raise RawWriteError("Ventoy needs a drive of at least 1 GB.")
+    if drive.size > exfat.MBR_MAX_SECTORS * 512:
+        raise RawWriteError(exfat.TOO_BIG)
     rel, files = fetch(cache_dir() / "ventoy", stage, log, cancel)
 
     def work(fd: int) -> None:
@@ -382,12 +393,27 @@ def _read_back(path: Path, size: int, want: str, stage: StageFn, before: int, to
         _drop_cache(fd)
         h = hashlib.sha256()
         done = 0
-        while chunk := os.read(fd, CHUNK):
-            if cancelled(cancel):
-                raise Cancelled()
-            h.update(chunk)
-            done += len(chunk)
-            stage("check", before + done, total)
+        # Two buffers used in turn: one is hashed on a worker thread while the next read fills the other.
+        bufs = [bytearray(CHUNK), bytearray(CHUNK)]
+        hashing = [None, None]
+        hasher = HashWorker()
+        try:
+            i = 0
+            while True:
+                if hashing[i]:
+                    hashing[i].result()
+                n = os.readv(fd, [bufs[i]])
+                if not n:
+                    break
+                if cancelled(cancel):
+                    raise Cancelled()
+                hashing[i] = hasher.feed(h, memoryview(bufs[i])[:n])
+                done += n
+                stage("check", before + done, total)
+                i = 1 - i
+            hasher.wait()
+        finally:
+            hasher.close()
     finally:
         os.close(fd)
     if done != size or h.hexdigest() != want:
@@ -442,9 +468,27 @@ def _import(mp: Path, picked, stage, log, cancel, verify, boot_next) -> list[str
         )
     order = known + [p for p in plans if p.size < 0]
     total_in = sum(p.source.stat().st_size for p in order)
-    done_in = 0
     results: dict[str, tuple[int, str]] = {}
     stage("write", 0, total_in)
+    # Two buffers used in turn: while one piece is hashed and written, the next is read (and unpacked)
+    # into the other on a worker thread.
+    views = [memoryview(bytearray(CHUNK)), memoryview(bytearray(CHUNK))]
+    hasher = HashWorker()
+    try:
+        _copy_all(mp, order, views, hasher, results, total_in, stage, log, cancel)
+    finally:
+        hasher.close()
+    os.sync()
+    return _finish_import(mp, plans, results, stage, log, cancel, verify, boot_next)
+
+
+def _damaged(p: ImportPlan, e: BaseException) -> str:
+    return f"{p.source.name} is damaged or didn't finish downloading ({e}). Download it again."
+
+
+def _copy_all(mp: Path, order, views, hasher, results, total_in: int, stage, log, cancel) -> None:
+    """Copies or unpacks each planned file onto the drive, noting its size and hash in results."""
+    done_in = 0
     for p in order:
         dest = mp / p.target
         tmp = mp / f".{p.target}.part"
@@ -457,37 +501,52 @@ def _import(mp: Path, picked, stage, log, cancel, verify, boot_next) -> list[str
         md = hashlib.sha256()
         wrote = 0
         last_log = 0
+        hashing = [None, None]  # each buffer's hash job; the buffer is free again once it's done
         try:
             with p.source.open("rb") as raw:
                 counted = rawwrite._Counting(raw)
-                src = decoder(p.kind, counted) if p.unpacks else counted
-                out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
                 try:
+                    src = decoder(p.kind, counted) if p.unpacks else counted
+                except (zlib.error, lzma.LZMAError, zipfile.BadZipFile, NotImplementedError,
+                        RuntimeError) as e:  # zipfile: damaged, a packing method it lacks, a password
+                    raise OSError(_damaged(p, e)) from None
+                out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                reader = ThreadPoolExecutor(1, thread_name_prefix="image")
+                try:
+                    i = 0
+                    coming = reader.submit(rawwrite._fill, src, views[0], counted)
                     while True:
                         if cancelled(cancel):
                             raise Cancelled()
                         try:
-                            chunk = src.read(CHUNK)
-                        except (OSError, EOFError, ValueError) as e:
-                            raise OSError(
-                                f"{p.source.name} is damaged or didn't finish downloading ({e}). "
-                                "Download it again."
-                            ) from None
-                        if not chunk:
+                            got, count = coming.result()
+                        except _DAMAGED as e:
+                            raise OSError(_damaged(p, e)) from None
+                        if not got:
                             break
-                        md.update(chunk)
-                        view = memoryview(chunk)
+                        hashing[i] = hasher.feed(md, views[i][:got])
+                        if got == CHUNK:
+                            if hashing[1 - i]:
+                                hashing[1 - i].result()
+                            coming = reader.submit(rawwrite._fill, src, views[1 - i], counted)
+                        view = views[i][:got]
                         while view:
                             n = os.write(out, view)
                             view = view[n:]
-                        wrote += len(chunk)
-                        stage("write", before + counted.count, total_in)
+                        wrote += got
+                        stage("write", min(before + count, total_in), total_in)
                         if p.unpacks and wrote - last_log >= 1_000_000_000:
                             last_log = wrote
                             log(f"{wrote / 1e9:.1f} GB unpacked onto the drive so far")
+                        if got < CHUNK:
+                            break
+                        i = 1 - i
                     os.fsync(out)
                 finally:
+                    reader.shutdown(wait=True)  # nothing may still be reading the file when it's closed
+                    hasher.wait()  # nor hashing a buffer the next file is about to reuse
                     os.close(out)
+                    src.close()  # stops a decoder's own threads (bzip2), whichever way this ended
             tmp.replace(dest)
         except OSError as e:
             tmp.unlink(missing_ok=True)
@@ -506,8 +565,10 @@ def _import(mp: Path, picked, stage, log, cancel, verify, boot_next) -> list[str
         log(f"{p.target}: {wrote / 1e9:.2f} GB in {_clock(took)} ({_rate(wrote, took)})")
         done_in += p.source.stat().st_size
         stage("write", done_in, total_in)
-    os.sync()
 
+
+def _finish_import(mp: Path, plans, results, stage, log, cancel, verify, boot_next) -> list[str]:
+    """Sets what starts on its own, then reads every image back from the drive."""
     names = [p.target for p in plans]
     if boot_next is not None:
         ventoy_config.set_boot_next(mp, boot_next or None)

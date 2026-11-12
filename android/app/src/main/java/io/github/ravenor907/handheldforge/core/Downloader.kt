@@ -177,11 +177,29 @@ class Downloader(
         }
 
         log("Downloading ${img.isoUrl}")
-        download(img.isoUrl, part, stage, cancel)
+        val hash = if (checksummed) PartHash(signature, key) else null
+        download(img.isoUrl, part, stage, cancel, hash)
 
         stage(Stage.VERIFY, 0, 0)
-        val (actual, signed) = if (checksummed) {
-            Verify.hashAndVerify(part, signature, key, cancel) { d, t -> stage(Stage.VERIFY, d, t) }
+        val (actual, signed) = if (hash != null) {
+            val size = part.length()
+            try {
+                if (hash.hashed == size) {
+                    // Every byte of the file went through the hash on its way in: no need to read it back.
+                    hash.finish { Verify.recheckFile(part, signature, key, cancel) { d, t -> stage(Stage.VERIFY, d, t) } }
+                        .also { if (size > 0) stage(Stage.VERIFY, size, size) }
+                } else {
+                    Verify.hashAndVerify(part, signature, key, cancel) { d, t -> stage(Stage.VERIFY, d, t) }
+                }
+            } catch (e: VerificationException) {
+                // The signature didn't pass. Good bytes are kept for when the signature is right;
+                // bytes that aren't the published ones go, so the next try downloads them again.
+                if (Verify.hashAndVerify(part, null, null, cancel).first != expected) {
+                    part.delete()
+                    partStamp.delete()
+                }
+                throw e
+            }
         } else {
             (if (part.length() == remote) expected else "size-mismatch") to false
         }
@@ -206,12 +224,16 @@ class Downloader(
     }
 
     /** Downloads [url] into [part], resuming what's already there and retrying dropped connections. */
-    fun download(url: String, part: File, stage: StageFn, cancel: () -> Boolean) {
+    fun download(url: String, part: File, stage: StageFn, cancel: () -> Boolean) = download(url, part, stage, cancel, null)
+
+    private fun download(url: String, part: File, stage: StageFn, cancel: () -> Boolean, hash: PartHash?) {
         var attempt = 0
         while (true) {
             val before = if (part.exists()) part.length() else 0L
+            // A resumed file is hashed from byte 0: what's already saved goes in before the rest arrives.
+            hash?.catchUp(part, before, cancel)
             try {
-                downloadOnce(url, part, stage, cancel)
+                downloadOnce(url, part, stage, cancel, hash)
                 return
             } catch (e: IOException) {
                 // Phones drop Wi-Fi, especially when the screen goes off or another app takes
@@ -229,7 +251,7 @@ class Downloader(
         }
     }
 
-    private fun downloadOnce(url: String, part: File, stage: StageFn, cancel: () -> Boolean) {
+    private fun downloadOnce(url: String, part: File, stage: StageFn, cancel: () -> Boolean, hash: PartHash?) {
         var have = if (part.exists()) part.length() else 0L
         val c = open(url, range = have)
         try {
@@ -237,6 +259,7 @@ class Downloader(
             if (code == 416 && have > 0) return // already complete
             if (code !in 200..299) throw HttpStatus(code)
             if (have > 0 && code != 206) have = 0 // server ignored the range: start over
+            if (have == 0L) hash?.restart()
             val length = c.contentLengthLong
             val total = if (length > 0) have + length else 0L
             FileOutputStream(part, have > 0).use { out ->
@@ -249,6 +272,7 @@ class Downloader(
                         val n = input.read(buf)
                         if (n < 0) break
                         out.write(buf, 0, n)
+                        hash?.update(buf, 0, n)
                         done += n
                         if (done - lastReport > (4 shl 20) || done == total) {
                             stage(Stage.DOWNLOAD, done, total)
@@ -267,6 +291,47 @@ class Downloader(
 private const val MAX_STALLED_TRIES = 8
 
 /**
+ * The hash (and signature check) of a download's .part file, fed as the bytes are saved so the
+ * finished file isn't read a second time. [hashed] counts the bytes of the file, from byte 0,
+ * that have gone in; the result only stands when that is the whole file.
+ */
+private class PartHash(private val signature: String?, private val key: java.security.PublicKey?) {
+    private var running = Verify.Running(signature, key)
+    var hashed = 0L
+        private set
+
+    /** The file is being rewritten from byte 0. */
+    fun restart() {
+        if (hashed == 0L) return
+        running = Verify.Running(signature, key)
+        hashed = 0
+    }
+
+    fun update(b: ByteArray, off: Int, len: Int) {
+        running.update(b, off, len)
+        hashed += len
+    }
+
+    /** Feeds in the bytes of [part] up to [have] that haven't been through the hash yet. */
+    fun catchUp(part: File, have: Long, cancel: () -> Boolean) {
+        if (have < hashed) restart()
+        if (hashed == have) return
+        val buf = ByteArray(Verify.HASH_BUFFER)
+        java.io.RandomAccessFile(part, "r").use { f ->
+            f.seek(hashed)
+            while (hashed < have) {
+                if (cancel()) throw CancelledException()
+                val n = f.read(buf, 0, minOf(buf.size.toLong(), have - hashed).toInt())
+                if (n < 0) break
+                update(buf, 0, n)
+            }
+        }
+    }
+
+    fun finish(recheck: () -> Pair<String, Boolean>): Pair<String, Boolean> = running.finish(recheck)
+}
+
+/**
  * A download read while it arrives: whatever's already in [part] first, then the rest from the
  * server, saved to [part] as it goes (so it resumes and is kept for next time) and hashed on the
  * way through. Dropped connections are retried from where they stopped, like a normal download.
@@ -278,8 +343,8 @@ class LiveDownload internal constructor(
     val total: Long,
     private val expected: String,
     private val checksummed: Boolean,
-    signature: String?,
-    key: java.security.PublicKey?,
+    private val signature: String?,
+    private val key: java.security.PublicKey?,
     private val cancel: () -> Boolean,
     private val keep: (signed: Boolean) -> Unit,
 ) {
@@ -301,8 +366,10 @@ class LiveDownload internal constructor(
         val buf = ByteArray(1 shl 20)
         while (s.read(buf) >= 0) Unit
         s.close()
+        // A stale partial file longer than the image: only the bytes that were read and checked are kept.
+        if (s.position == total && part.length() > total) java.io.RandomAccessFile(part, "rw").use { it.setLength(total) }
         val (hex, signed) = try {
-            verifier.finish()
+            verifier.finish { Verify.recheckFile(part, signature, key, cancel) }
         } catch (e: VerificationException) {
             part.delete()
             throw e

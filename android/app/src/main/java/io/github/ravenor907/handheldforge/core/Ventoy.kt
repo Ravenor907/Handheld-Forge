@@ -6,6 +6,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -160,12 +161,13 @@ object Ventoy {
         if (dev.blockSize != 512) throw WriteException("This drive uses ${dev.blockSize}-byte sectors; Ventoy needs 512-byte sectors.")
         if (dev.sizeBytes < MIN_BYTES) throw WriteException("Ventoy needs a drive of at least 1 GB.")
         val p = plan(dev.blockCount)
+        if (!Mbr.fits(PART1_START, p.part1Sectors) || !Mbr.fits(p.part2Start, PART2_SECTORS)) {
+            throw WriteException("This drive is over 2 TB, which this app can't set up.")
+        }
         val core = ImageKind.decoder(ImageKind.XZ)(ByteArrayInputStream(files.coreImgXz)).readBytes()
         if (core.size > 2047 * 512) throw WriteException("This Ventoy release's boot code is larger than expected; it can't be installed here.")
-        val part2 = ImageKind.decoder(ImageKind.XZ)(ByteArrayInputStream(files.diskImgXz)).readBytes()
-        if (part2.size.toLong() != PART2_SECTORS * 512) {
-            throw WriteException("This Ventoy release's EFI partition isn't the expected 32 MB; it can't be installed here.")
-        }
+        val part2 = readExactly(ImageKind.decoder(ImageKind.XZ)(ByteArrayInputStream(files.diskImgXz)), (PART2_SECTORS * 512).toInt())
+            ?: throw WriteException("This Ventoy release's EFI partition isn't the expected 32 MB; it can't be installed here.")
         if (!secureBoot) {
             if (!secureBootEnabled(part2)) throw WriteException("This Ventoy release has no Secure Boot files to remove.")
             disableSecureBoot(part2)
@@ -195,7 +197,8 @@ object Ventoy {
         log("Clearing the old layout from ${dev.name}")
         Wipe.ends(dev)
         log("Formatting the Ventoy partition as exFAT (%.1f GB)".format(p.part1Sectors * 512 / 1e9))
-        ExFat.format(dev, PART1_START, p.part1Sectors, LABEL, p.sectorsPerCluster) { _, _ -> }
+        val serial = SecureRandom().nextInt()
+        val exfat = ExFat.format(dev, PART1_START, p.part1Sectors, LABEL, p.sectorsPerCluster, serial) { _, _ -> }
         log("Writing Ventoy's EFI partition")
         put(p.part2Start, part2)
         log("Writing Ventoy's boot code")
@@ -214,28 +217,59 @@ object Ventoy {
         dev.sync()
 
         log("Reading Ventoy back from the drive to confirm")
-        val checkTotal = written.sumOf { it.second.size.toLong() }
+        val exfatBytes = ExFat.verifySectors(exfat) * 512
+        val checkTotal = written.sumOf { it.second.size.toLong() } + exfatBytes
         var checked = 0L
+        // Read back a chunk at a time into one buffer and compare bytes directly.
+        val back = ByteArray(2048 * 512)
         for ((lba, data) in written) {
-            val back = ByteArray(data.size)
+            var same = true
             var at = 0
             while (at < data.size / 512) {
                 if (cancel()) throw CancelledException()
                 val n = minOf(data.size / 512 - at, 2048)
-                dev.read(lba + at, n, back, at * 512)
+                dev.read(lba + at, n, back, 0)
+                if (same && ByteBuffer.wrap(back, 0, n * 512) != ByteBuffer.wrap(data, at * 512, n * 512)) same = false
                 at += n
                 stage(Stage.CHECK, checked + at * 512L, checkTotal)
             }
-            if (!MessageDigest.isEqual(digest(back), digest(data))) {
+            if (!same) {
                 throw WriteException("The drive didn't keep what was written. It may be failing or counterfeit; try another drive.")
             }
             checked += data.size
         }
-        stage(Stage.CHECK, checkTotal, checkTotal)
+        // The exFAT structures are worked out again and compared with what the drive holds.
+        val exfatSame = ExFat.verify(dev, PART1_START, p.part1Sectors, LABEL, p.sectorsPerCluster, serial) { sectors ->
+            if (cancel()) throw CancelledException()
+            stage(Stage.CHECK, minOf(checked + sectors * 512, checkTotal), checkTotal)
+        }
+        if (!exfatSame) {
+            throw WriteException("The drive didn't keep what was written. It may be failing or counterfeit; try another drive.")
+        }
         log("Ventoy is installed")
     }
 
-    private fun digest(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b)
+    /**
+     * Reads [input] to its end straight into an array of the [expected] size, with no buffers
+     * growing along the way. Null if it holds fewer or more bytes than that.
+     */
+    private fun readExactly(input: InputStream, expected: Int): ByteArray? {
+        val out = ByteArray(expected)
+        var n = 0
+        while (n < expected) {
+            val r = input.read(out, n, expected - n)
+            if (r < 0) return null
+            n += r
+        }
+        var extra = false
+        val rest = ByteArray(8192)
+        while (true) {
+            val r = input.read(rest)
+            if (r < 0) break
+            if (r > 0) extra = true
+        }
+        return if (extra) null else out
+    }
 
     fun sha256(f: File): String {
         val md = MessageDigest.getInstance("SHA-256")

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .blockdev import cancelled
-from .exfat import format_volume, wipe_ends, write_mbr_table
+from .exfat import MBR_MAX_SECTORS, TOO_BIG, format_volume, wipe_ends, write_mbr_table
 from .fat16 import Fat16
 
 API_LATEST = "https://api.github.com/repos/ventoy/Ventoy/releases/latest"
@@ -192,26 +192,29 @@ def install(
     secure_boot: bool = True,
     random_bytes=secrets.token_bytes,
 ) -> None:
-    """Lays Ventoy out on dev, then reads back everything except the empty exFAT space."""
+    """Lays Ventoy out on dev, then reads back everything except the cleared and empty exFAT space."""
     from .rawwrite import Cancelled, RawWriteError
 
     if dev.block_size != 512:
         raise RawWriteError(f"This drive uses {dev.block_size}-byte sectors; Ventoy needs 512-byte sectors.")
     if dev.block_count * 512 < MIN_BYTES:
         raise RawWriteError("Ventoy needs a drive of at least 1 GB.")
+    if dev.block_count > MBR_MAX_SECTORS:
+        raise RawWriteError(TOO_BIG)
     p = plan(dev.block_count)
     core = lzma.decompress(files.core_img_xz)
     if len(core) > 2047 * 512:
         raise RawWriteError(
             "This Ventoy release's boot code is larger than expected; it can't be installed here."
         )
-    part2 = bytearray(lzma.decompress(files.disk_img_xz))
+    part2 = lzma.decompress(files.disk_img_xz)
     if len(part2) != PART2_SECTORS * 512:
         raise RawWriteError(
             "This Ventoy release's EFI partition isn't the expected 32 MB; it can't be installed here."
         )
     if not secure_boot:
-        if not secure_boot_enabled(part2):
+        part2 = bytearray(part2)  # only this case edits the image
+        if Fat16(part2).find("/EFI/BOOT/grubx64_real.efi") is None:
             raise RawWriteError("This Ventoy release has no Secure Boot files to remove.")
         disable_secure_boot(part2)
         log("Secure Boot support off: BOOTX64.EFI is Ventoy's GRUB, the shim and key are removed")
@@ -225,22 +228,23 @@ def install(
     def put(lba: int, data: bytes) -> None:
         nonlocal done
         step = 2048 * 512
-        for at in range(0, len(data), step):
-            if cancelled(cancel):
-                raise Cancelled()
-            piece = data[at : at + step]
-            dev.write(lba + at // 512, piece)
-            done += len(piece) // 512
-            stage("write", min(done, total), total)
+        with memoryview(data) as view:  # pieces are handed over without copying them out first
+            for at in range(0, len(data), step):
+                if cancelled(cancel):
+                    raise Cancelled()
+                piece = view[at : at + step]
+                dev.write(lba + at // 512, piece)
+                done += len(piece) // 512
+                stage("write", min(done, total), total)
         written.append((lba, data))
 
     stage("write", 0, total)
     log(f"Clearing the old layout from {dev.name}")
     wipe_ends(dev)
     log(f"Formatting the Ventoy partition as exFAT ({p.part1_sectors * 512 / 1e9:.1f} GB)")
-    format_volume(dev, PART1_START, p.part1_sectors, LABEL, p.sectors_per_cluster)
+    format_volume(dev, PART1_START, p.part1_sectors, LABEL, p.sectors_per_cluster, written=written)
     log("Writing Ventoy's EFI partition")
-    put(p.part2_start, bytes(part2))
+    put(p.part2_start, part2)
     log("Writing Ventoy's boot code")
     put(1, core.ljust((len(core) + 511) // 512 * 512, b"\0"))
 
@@ -258,14 +262,17 @@ def install(
     check_total = sum(len(d) for _, d in written)
     checked = 0
     for lba, data in written:
-        back = bytearray()
+        back = 0
+        same = True
         for at in range(0, len(data) // 512, 2048):
             if cancelled(cancel):
                 raise Cancelled()
             n = min(len(data) // 512 - at, 2048)
-            back += dev.read(lba + at, n)
-            stage("check", checked + len(back), check_total)
-        if hashlib.sha256(back).digest() != hashlib.sha256(data).digest():
+            piece = dev.read(lba + at, n)
+            same = same and piece == data[at * 512 : (at + n) * 512]
+            back += len(piece)
+            stage("check", checked + back, check_total)
+        if not same or back != len(data):
             raise RawWriteError(
                 "The drive didn't keep what was written. It may be failing or counterfeit; try another drive."
             )

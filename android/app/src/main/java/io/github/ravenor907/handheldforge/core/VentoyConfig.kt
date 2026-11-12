@@ -25,10 +25,20 @@ object VentoyConfig {
 
     /** Sets (or with null, clears) the image to boot next, keeping the rest of ventoy.json. */
     fun setBootNext(vol: ExFatVolume, image: String?) {
-        val old = vol.readFile(PATH)?.toString(Charsets.UTF_8)
+        val old = vol.readFile(PATH)?.let { text(it) }
         val new = withBootNext(old, image)
         if (new == old) return
         if (new == null) vol.deleteFile(PATH) else vol.writeFile(PATH, new.toByteArray(Charsets.UTF_8))
+    }
+
+    /** The file's bytes as text. Bytes that aren't UTF-8 would be lost in a rewrite, so they are refused. */
+    private fun text(bytes: ByteArray): String = try {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            .decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+    } catch (e: java.nio.charset.CharacterCodingException) {
+        throw IOException("ventoy.json on the drive isn't saved as UTF-8 text. Fix or remove it on a computer, then try again.")
     }
 
     /** The image set to boot next (a name in the drive's root), or null. */
@@ -50,8 +60,17 @@ object VentoyConfig {
             is List<*> -> c
             else -> throw IOException("ventoy.json on the drive has a \"control\" setting that isn't a list. Fix or remove it on a computer.")
         }
-        val kept = old.filter { e -> (e as? Map<*, *>)?.keys?.none { it in OURS } ?: true }
-        val control = ArrayList<Any?>(kept)
+        // Our settings are taken out; an entry that also holds other settings keeps those.
+        val control = ArrayList<Any?>()
+        for (e in old) {
+            if (e is Map<*, *> && e.keys.any { it in OURS }) {
+                val others = LinkedHashMap<Any?, Any?>()
+                for ((k, v) in e) if (k !in OURS) others[k] = v
+                if (others.isNotEmpty()) control.add(others)
+            } else {
+                control.add(e)
+            }
+        }
         if (image != null) {
             control.add(linkedMapOf(DEFAULT to "/$image"))
             control.add(linkedMapOf(TIMEOUT to "$TIMEOUT_SECONDS"))
@@ -120,8 +139,11 @@ object JsonText {
         return sb.append('"').toString()
     }
 
+    private const val MAX_DEPTH = 64
+
     private class Parser(val s: String) {
         var i = 0
+        private var depth = 0
 
         fun fail(msg: String): Nothing {
             val line = s.substring(0, minOf(i, s.length)).count { it == '\n' } + 1
@@ -152,9 +174,27 @@ object JsonText {
             return v
         }
 
+        private fun digit() = i < s.length && s[i] in '0'..'9'
+
+        /** A number as JSON defines it: -, digits (no extra leading zero), then an optional fraction and exponent. */
         private fun num(): Num {
             val start = i
-            while (i < s.length && (s[i].isDigit() || s[i] in "+-.eE")) i++
+            if (s[i] == '-') i++
+            if (!digit()) fail("bad number")
+            if (s[i] == '0') i++ else while (digit()) i++
+            if (i < s.length && s[i] == '.') {
+                i++
+                if (!digit()) fail("bad number")
+                while (digit()) i++
+            }
+            if (i < s.length && (s[i] == 'e' || s[i] == 'E')) {
+                i++
+                if (i < s.length && (s[i] == '+' || s[i] == '-')) i++
+                if (!digit()) fail("bad number")
+                while (digit()) i++
+            }
+            // Anything else stuck to the number ("1.2.3", "0x10") makes it not a number.
+            if (i < s.length && (s[i].isLetterOrDigit() || s[i] in "+-.")) fail("bad number")
             return Num(s.substring(start, i))
         }
 
@@ -177,18 +217,44 @@ object JsonText {
                             't' -> sb.append('\t')
                             'u' -> {
                                 if (i + 4 > s.length) fail("bad \\u escape")
-                                sb.append(s.substring(i, i + 4).toIntOrNull(16)?.toChar() ?: fail("bad \\u escape"))
+                                var code = 0
+                                for (k in 0 until 4) {
+                                    val h = Character.digit(s[i + k], 16)
+                                    if (h < 0 || s[i + k].code > 0x7F) fail("bad \\u escape")
+                                    code = code * 16 + h
+                                }
+                                sb.append(code.toChar())
                                 i += 4
                             }
                             else -> fail("bad escape \\$e")
                         }
                     }
-                    else -> sb.append(c)
+                    else -> {
+                        if (c.code < 0x20) {
+                            i--
+                            fail("line break or control character inside quotes")
+                        }
+                        sb.append(c)
+                    }
                 }
             }
         }
 
+        private fun deeper() {
+            if (++depth > MAX_DEPTH) fail("too many levels of brackets")
+        }
+
         private fun obj(): LinkedHashMap<String, Any?> {
+            deeper()
+            return members().also { depth-- }
+        }
+
+        private fun arr(): ArrayList<Any?> {
+            deeper()
+            return items().also { depth-- }
+        }
+
+        private fun members(): LinkedHashMap<String, Any?> {
             i++
             val m = LinkedHashMap<String, Any?>()
             ws()
@@ -197,6 +263,8 @@ object JsonText {
                 ws()
                 if (i >= s.length || s[i] != '"') fail("expected a name in quotes")
                 val k = str()
+                // Only one of two settings with the same name could be kept.
+                if (k in m) fail("\"$k\" appears twice in one object")
                 ws()
                 if (i >= s.length || s[i] != ':') fail("expected ':'")
                 i++
@@ -211,7 +279,7 @@ object JsonText {
             }
         }
 
-        private fun arr(): ArrayList<Any?> {
+        private fun items(): ArrayList<Any?> {
             i++
             val a = ArrayList<Any?>()
             ws()

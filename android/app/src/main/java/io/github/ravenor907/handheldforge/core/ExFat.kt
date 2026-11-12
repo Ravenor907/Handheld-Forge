@@ -86,8 +86,9 @@ object ExFat {
         val l = layout(partitionOffset, volumeSectors, sectorsPerCluster)
         val total = l.fatLength + l.usedClusters * l.sectorsPerCluster + 24
         var done = 0L
-        fun put(sectorInVolume: Long, data: ByteArray) {
-            val sectors = data.size / SECTOR
+        structures(l, label, serial, cleared = { s, zero, n ->
+            dev.write(partitionOffset + s, n, zero, 0)
+        }) { sectorInVolume, data, sectors ->
             var at = 0
             while (at < sectors) {
                 val n = minOf(sectors - at, 2048)
@@ -97,7 +98,70 @@ object ExFat {
                 progress(done, total)
             }
         }
+        return l
+    }
 
+    /**
+     * Reads back everything [format] wrote with the same arguments and compares it. False if any
+     * byte differs. [step] is called with the sectors read so far, and may throw to stop.
+     */
+    fun verify(
+        dev: BlockDevice,
+        partitionOffset: Long,
+        volumeSectors: Long,
+        label: String,
+        sectorsPerCluster: Int,
+        serial: Int,
+        step: (Long) -> Unit = { },
+    ): Boolean {
+        val l = layout(partitionOffset, volumeSectors, sectorsPerCluster)
+        val back = ByteArray(2048 * SECTOR)
+        var same = true
+        var read = 0L
+        fun check(sectorInVolume: Long, data: ByteArray, sectors: Int) {
+            var at = 0
+            while (at < sectors) {
+                val n = minOf(sectors - at, 2048)
+                dev.read(partitionOffset + sectorInVolume + at, n, back, 0)
+                if (same && ByteBuffer.wrap(back, 0, n * SECTOR) != ByteBuffer.wrap(data, at * SECTOR, n * SECTOR)) same = false
+                at += n
+                read += n
+                step(read)
+            }
+        }
+        // Structures were written over some of the cleared sectors afterwards: the boot region and
+        // its backup at the start and, on a very small volume, the first clusters inside the last
+        // 1 MB. Those sectors are compared as structures, not as zeros.
+        val usedFrom = l.heapOffset
+        val usedTo = l.heapOffset + l.usedClusters * l.sectorsPerCluster
+        structures(l, label, serial, cleared = { s, zero, n ->
+            val end = s + n
+            var from = s
+            if (from < 24) from = minOf(24L, end)
+            if (from in usedFrom until usedTo) from = minOf(usedTo, end)
+            if (from < end) check(from, zero, (end - from).toInt())
+        }) { sectorInVolume, data, sectors -> check(sectorInVolume, data, sectors) }
+        return same
+    }
+
+    /** About how many sectors [verify] reads for this layout (exact unless the volume is very small). */
+    fun verifySectors(l: Layout): Long =
+        (l.fatOffset - 24) + (l.heapOffset - l.fatOffset - l.fatLength) + (l.volumeLength - maxOf(l.heapOffset, l.volumeLength - 2048)) +
+            l.fatLength + l.usedClusters * l.sectorsPerCluster + 24
+
+    /**
+     * Everything a format puts on the volume, in the order it is written: [cleared] gets each
+     * stretch that is zeroed (first sector, a buffer of zeros, sector count), [put] each piece of
+     * a structure (first sector, buffer, sector count). The buffers are reused between calls.
+     */
+    private fun structures(
+        l: Layout,
+        label: String,
+        serial: Int,
+        cleared: (Long, ByteArray, Int) -> Unit,
+        put: (Long, ByteArray, Int) -> Unit,
+    ) {
+        val volumeSectors = l.volumeLength
         // Clear what the structures below don't cover: the boot region, the gap before the FAT, the
         // gap before the cluster heap, and the volume's last 1 MB. Old filesystem markers there (an
         // ISO's at 32 KB, a UDF anchor at the end) make Linux see two filesystems and give up.
@@ -110,7 +174,7 @@ object ExFat {
             var s = start
             while (s < end) {
                 val n = minOf(2048L, end - s).toInt()
-                dev.write(partitionOffset + s, n, zero, 0)
+                cleared(s, zero, n)
                 s += n
             }
         }
@@ -119,13 +183,20 @@ object ExFat {
         val chunk = 2048 * SECTOR
         var fatWritten = 0L
         val fatBytes = l.fatLength * SECTOR
+        // One buffer serves every chunk (the zeros above, all zero again by now): only the few
+        // entries set below are ever non-zero, and they're cleared once their chunk is written.
+        val buf = zero
+        val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
         while (fatWritten < fatBytes) {
-            val buf = ByteArray(minOf(chunk.toLong(), fatBytes - fatWritten).toInt())
-            val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
+            val len = minOf(chunk.toLong(), fatBytes - fatWritten).toInt()
             val firstEntry = fatWritten / 4
+            var lastSet = -1
             fun set(cluster: Long, value: Int) {
                 val i = cluster - firstEntry
-                if (i >= 0 && i * 4 < buf.size) bb.putInt((i * 4).toInt(), value)
+                if (i >= 0 && i * 4 < len) {
+                    bb.putInt((i * 4).toInt(), value)
+                    lastSet = maxOf(lastSet, (i * 4).toInt())
+                }
             }
             set(0, 0xFFFFFFF8.toInt())
             set(1, 0xFFFFFFFF.toInt())
@@ -135,17 +206,19 @@ object ExFat {
             chain(l.bitmapCluster, l.upcaseCluster - l.bitmapCluster)
             chain(l.upcaseCluster, l.rootCluster - l.upcaseCluster)
             chain(l.rootCluster, 1)
-            put(l.fatOffset + fatWritten / SECTOR, buf)
-            fatWritten += buf.size
+            put(l.fatOffset + fatWritten / SECTOR, buf, len / SECTOR)
+            if (lastSet >= 0) java.util.Arrays.fill(buf, 0, lastSet + 4, 0)
+            fatWritten += len
         }
 
         // Allocation bitmap: the clusters used by the bitmap, up-case table and root directory.
         val bitmap = ByteArray((l.clustersFor(l.bitmapBytes) * l.clusterBytes).toInt())
         for (i in 0 until l.usedClusters) bitmap[(i / 8).toInt()] = (bitmap[(i / 8).toInt()].toInt() or (1 shl (i % 8).toInt())).toByte()
-        put(l.sectorOf(l.bitmapCluster), bitmap)
+        put(l.sectorOf(l.bitmapCluster), bitmap, bitmap.size / SECTOR)
 
         val upcase = upcaseTable()
-        put(l.sectorOf(l.upcaseCluster), upcase.copyOf((l.clustersFor(l.upcaseBytes) * l.clusterBytes).toInt()))
+        val upcasePadded = upcase.copyOf((l.clustersFor(l.upcaseBytes) * l.clusterBytes).toInt())
+        put(l.sectorOf(l.upcaseCluster), upcasePadded, upcasePadded.size / SECTOR)
 
         // Root directory: volume label, allocation bitmap, up-case table.
         val root = ByteArray(l.clusterBytes)
@@ -160,13 +233,12 @@ object ExFat {
         rb.putInt(2 * ENTRY + 4, checksum(upcase))
         rb.putInt(2 * ENTRY + 20, l.upcaseCluster.toInt())
         rb.putLong(2 * ENTRY + 24, l.upcaseBytes)
-        put(l.sectorOf(l.rootCluster), root)
+        put(l.sectorOf(l.rootCluster), root, root.size / SECTOR)
 
         // Boot region last, so the volume only looks valid once everything else is in place.
         val boot = bootRegion(l, serial)
-        put(12, boot) // backup
-        put(0, boot)
-        return l
+        put(12, boot, boot.size / SECTOR) // backup
+        put(0, boot, boot.size / SECTOR)
     }
 
     /** The 12-sector boot region: boot sector, 8 extended boot sectors, OEM, reserved, checksum. */
@@ -260,6 +332,7 @@ object Mbr {
     /** Writes the four 16-byte entries and the 0x55AA signature into [sector0]. Bytes 0..445 are left alone. */
     fun writeTable(sector0: ByteArray, parts: List<Part>) {
         require(parts.size <= 4)
+        require(parts.all { fits(it.start, it.sectors) }) { "A partition past 2 TB doesn't fit in this kind of partition table." }
         val b = ByteBuffer.wrap(sector0).order(ByteOrder.LITTLE_ENDIAN)
         for (i in 0 until 64) sector0[446 + i] = 0
         parts.forEachIndexed { i, p ->
@@ -273,6 +346,9 @@ object Mbr {
         }
         sector0[510] = 0x55; sector0[511] = 0xAA.toByte()
     }
+
+    /** Whether a partition's first sector and length fit the 32-bit fields of a table entry. */
+    fun fits(start: Long, sectors: Long) = start in 0..0xFFFFFFFFL && sectors in 0..0xFFFFFFFFL
 
     /** CHS address with the usual 255 heads / 63 sectors geometry; far sectors use the "too big" marker. */
     private fun chs(lba: Long): ByteArray {
@@ -294,12 +370,13 @@ object PlainDrive {
         require(dev.blockSize == 512) { "This drive uses ${dev.blockSize}-byte sectors, which formatting doesn't support yet." }
         val total = dev.blockCount
         require(total > START + 8192) { "This drive is too small to format." }
+        // Partition ends on a 1 MB boundary so the volume stays aligned.
+        val sectors = (total - START) / 2048 * 2048
+        require(Mbr.fits(START, sectors)) { "This drive is over 2 TB, which this app can't set up." }
         stage(Stage.WRITE, 0, 0)
         log("Clearing the old layout from ${dev.name}")
         Wipe.ends(dev)
         if (cancel()) throw CancelledException()
-        // Partition ends on a 1 MB boundary so the volume stays aligned.
-        val sectors = (total - START) / 2048 * 2048
         log("Formatting exFAT, ${"%.1f".format(sectors * 512 / 1e9)} GB, label \"$label\"")
         ExFat.format(dev, START, sectors, label) { d, t -> stage(Stage.WRITE, d, t) }
         val mbr = ByteArray(512)

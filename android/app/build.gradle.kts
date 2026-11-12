@@ -49,8 +49,8 @@ android {
         applicationId = "io.github.ravenor907.handheldforge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 98
-        versionName = "0.9.8"
+        versionCode = 99
+        versionName = "0.9.9"
     }
 
     signingConfigs {

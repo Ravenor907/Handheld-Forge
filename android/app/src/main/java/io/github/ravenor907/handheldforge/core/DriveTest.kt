@@ -1,7 +1,6 @@
 package io.github.ravenor907.handheldforge.core
 
 import java.nio.ByteBuffer
-import java.util.SplittableRandom
 
 /**
  * Measures a drive's real write and read speed and checks it holds what it claims (Labs).
@@ -73,19 +72,58 @@ object DriveTest {
         private fun minutes(seconds: Double) = if (seconds < 90) "%.0f seconds".format(seconds) else "%.0f minutes".format(seconds / 60)
     }
 
+    // The generator below is java.util.SplittableRandom's (same constants, same output), written
+    // out so the loops make no calls and allocate nothing.
+    private const val GAMMA = -0x61c8864680b583ebL
+
+    private fun mix32(x: Long): Int {
+        val z = (x xor (x ushr 33)) * 0x62a9d9ed799705f5L
+        return (((z xor (z ushr 28)) * -0x34db2f5a3773ca4dL) ushr 32).toInt()
+    }
+
     fun pattern(buf: ByteArray, len: Int, byteOffset: Long, seed: Long) {
         val bb = ByteBuffer.wrap(buf)
         var o = 0
         while (o < len) {
             // A fresh generator per 64 KB, keyed by address: blocks are independent and verifiable alone.
-            val r = SplittableRandom(seed xor ((byteOffset + o) * -0x61c8864680b583ebL))
+            var s = seed xor ((byteOffset + o) * -0x61c8864680b583ebL)
             val end = minOf(len, o + 65536)
             while (o + 8 <= end) {
-                bb.putLong(o, r.nextLong())
+                s += GAMMA
+                var z = (s xor (s ushr 30)) * -0x40a7b892e31b1a47L
+                z = (z xor (z ushr 27)) * -0x6b2fb644ecceee15L
+                bb.putLong(o, z xor (z ushr 31))
                 o += 8
             }
-            while (o < end) buf[o++] = r.nextInt().toByte()
+            while (o < end) {
+                s += GAMMA
+                buf[o++] = mix32(s).toByte()
+            }
         }
+    }
+
+    /** Whether the first [len] bytes of [data] are exactly what [pattern] would put there, without writing it out. */
+    fun matches(data: ByteArray, len: Int, byteOffset: Long, seed: Long): Boolean {
+        val bb = ByteBuffer.wrap(data)
+        var o = 0
+        while (o < len) {
+            var s = seed xor ((byteOffset + o) * -0x61c8864680b583ebL)
+            val end = minOf(len, o + 65536)
+            var diff = 0L
+            while (o + 8 <= end) {
+                s += GAMMA
+                var z = (s xor (s ushr 30)) * -0x40a7b892e31b1a47L
+                z = (z xor (z ushr 27)) * -0x6b2fb644ecceee15L
+                diff = diff or (bb.getLong(o) xor z xor (z ushr 31))
+                o += 8
+            }
+            if (diff != 0L) return false
+            while (o < end) {
+                s += GAMMA
+                if (data[o++] != mix32(s).toByte()) return false
+            }
+        }
+        return true
     }
 
     fun run(
@@ -164,8 +202,9 @@ object DriveTest {
             if (cancel()) throw CancelledException()
             val n = minOf(CHUNK.toLong(), written - read).toInt()
             dev.read(read / bs, n / bs, check)
-            pattern(buf, n, read, seed)
-            if (!buf.contentEquals(check) || n < CHUNK) {
+            // The pattern is only written out, to count the bad bytes, for a chunk that doesn't match.
+            if (!matches(check, n, read, seed)) {
+                pattern(buf, n, read, seed)
                 for (k in 0 until n) if (buf[k] != check[k]) badBytes++
             }
             read += n
@@ -174,13 +213,11 @@ object DriveTest {
         val readMBs = written / 1e6 / ((System.nanoTime() - r0) / 1e9)
         var badSpots = 0
         var firstBad: Long? = null
-        val spotBuf = ByteArray(SPOT.toInt())
         val spotCheck = ByteArray(SPOT.toInt())
         for ((i, p) in positions.withIndex()) {
             if (cancel()) throw CancelledException()
             dev.read(p / bs, (SPOT / bs).toInt(), spotCheck)
-            pattern(spotBuf, SPOT.toInt(), p, seed.inv())
-            if (!spotBuf.contentEquals(spotCheck)) {
+            if (!matches(spotCheck, SPOT.toInt(), p, seed.inv())) {
                 badSpots++
                 if (firstBad == null) firstBad = p
             }

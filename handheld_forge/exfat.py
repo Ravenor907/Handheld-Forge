@@ -14,6 +14,8 @@ from .blockdev import cancelled
 SECTOR = 512
 FIRST_CLUSTER = 2
 ENTRY = 32
+MBR_MAX_SECTORS = 1 << 32  # the partition table used here counts sectors in 32 bits: 2 TiB
+TOO_BIG = "This drive is over 2 TB, which this app can't set up."
 
 
 def upcase_table() -> bytes:
@@ -145,8 +147,11 @@ def format_volume(
     spc: int | None = None,
     serial: int | None = None,
     progress=lambda d, t: None,
+    written: list[tuple[int, bytes]] | None = None,
 ) -> Layout:
-    """Formats volume_sectors sectors starting at partition_offset (512-byte sectors) as exFAT."""
+    """Formats volume_sectors sectors starting at partition_offset (512-byte sectors) as exFAT.
+    With `written`, every structure put on the drive (not the cleared gaps) is also noted there as
+    (drive sector, bytes), for reading back."""
     if dev.block_size != SECTOR:
         raise ValueError("exFAT here needs 512-byte sectors")
     if not 1 <= len(label) <= 11:
@@ -162,6 +167,8 @@ def format_volume(
         for at in range(0, len(data), step):
             piece = data[at : at + step]
             dev.write(partition_offset + sector_in_volume + at // SECTOR, piece)
+            if written is not None:
+                written.append((partition_offset + sector_in_volume + at // SECTOR, piece))
             done += len(piece) // SECTOR
             progress(done, total)
 
@@ -271,6 +278,8 @@ def plain_format(dev, label: str = PLAIN_LABEL, stage=lambda *_: None, log=print
         )
     if dev.block_count <= PLAIN_START + 8192:
         raise ValueError("This drive is too small to format.")
+    if dev.block_count > MBR_MAX_SECTORS:
+        raise ValueError(TOO_BIG)
     stage("write", 0, 0)
     log(f"Clearing the old layout from {dev.name}")
     wipe_ends(dev)

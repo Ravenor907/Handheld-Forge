@@ -10,6 +10,10 @@ import java.nio.ByteOrder
  * long file names, in the root directory and subdirectories. Every FAT copy is kept in step.
  */
 class Fat16(val image: ByteArray) {
+    init {
+        if (image.size < 512) throw IOException("Not a FAT12/16 filesystem")
+    }
+
     private val b = ByteBuffer.wrap(image).order(ByteOrder.LITTLE_ENDIAN)
     val bytesPerSector = b.getShort(11).toInt() and 0xFFFF
     val sectorsPerCluster = image[13].toInt() and 0xFF
@@ -22,7 +26,8 @@ class Fat16(val image: ByteArray) {
     private val rootBytes = rootEntries * 32
     private val dataStart = rootStart + ((rootBytes + bytesPerSector - 1) / bytesPerSector) * bytesPerSector
     private val clusterBytes = sectorsPerCluster * bytesPerSector
-    val clusterCount = ((totalSectors * bytesPerSector - dataStart) / clusterBytes).toInt()
+    private val dataBytes = totalSectors * bytesPerSector - dataStart
+    val clusterCount = if (clusterBytes == 0 || dataBytes < 0) 0 else minOf(dataBytes / clusterBytes, 65525L).toInt()
     private val fat12 = clusterCount < 4085
     private val eoc = if (fat12) 0xFF8 else 0xFFF8
 
@@ -31,6 +36,12 @@ class Fat16(val image: ByteArray) {
             throw IOException("Not a FAT12/16 filesystem")
         }
         if (clusterCount >= 65525) throw IOException("FAT32 isn't supported here")
+        // Every later offset is worked out from these numbers, so they are checked once here:
+        // the areas must lie inside the image and each FAT must have an entry for every cluster.
+        val fatBytesNeeded = if (fat12) (clusterCount + 2) * 3L / 2 + 1 else (clusterCount + 2) * 2L
+        if (reserved == 0 || dataBytes < 0 || totalSectors * bytesPerSector > image.size || fatSectors.toLong() * bytesPerSector < fatBytesNeeded) {
+            throw IOException("The FAT partition is damaged")
+        }
     }
 
     /** Volume label from the boot sector (FAT12/16 extended BPB). */
@@ -157,6 +168,7 @@ class Fat16(val image: ByteArray) {
 
     fun read(path: String): ByteArray {
         val e = find(path) ?: throw IOException("$path not found")
+        if (e.size > image.size) throw IOException("$path is larger than the partition it is in")
         val out = ByteArray(e.size.toInt())
         var at = 0
         for (c in chain(e.firstCluster)) {
