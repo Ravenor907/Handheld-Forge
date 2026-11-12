@@ -1608,7 +1608,7 @@ class BreakWriteTest {
         override fun engineGetParameter(param: String?): Any? = null
     }
 
-    private class BrokenProvider : java.security.Provider("BrokenRaw", "1", "raw ECDSA that never verifies") {
+    private class BrokenProvider : java.security.Provider("BrokenRaw", 1.0, "raw ECDSA that never verifies") {
         init {
             put("Signature.NONEwithECDSA", BrokenRawEcdsa::class.java.name)
         }
