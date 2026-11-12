@@ -47,6 +47,14 @@ class BreakWriteTest {
         val keys: KeyPair by lazy {
             KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         }
+
+        /** The images are big; later test classes run in the same JVM and need the room. */
+        @org.junit.AfterClass
+        @JvmStatic
+        fun release() {
+            packed.clear()
+            images.clear()
+        }
     }
 
     // ------------------------------------------------------------------ helpers
