@@ -11,17 +11,21 @@
       "images": [
         {
           "label": "Handheld build (x86-64-v3)",
-          "iso_url": "https://updates.batocera.org/x86-64-v3/stable/last/batocera-zen3-x86-64-v3-43.1-20260529.img.gz",
+          "iso_url": "https://updates.batocera.org/x86-64-v3/stable/last/batocera-zen3-x86-64-v3-44-20261116.img.gz",
           "checksum_url": null,
           "signature_url": null,
-          "require_signature": false
+          "require_signature": false,
+          "latest_page": "https://mirrors.o2switch.fr/batocera/x86-64-v3/stable/last/",
+          "latest_pattern": "batocera-zen3-x86-64-v3-(\\d+(?:\\.\\d+)?-\\d{8})\\.img\\.gz"
         },
         {
           "label": "Handheld build, mirror",
-          "iso_url": "https://mirrors.o2switch.fr/batocera/x86-64-v3/stable/last/batocera-zen3-x86-64-v3-43.1-20260529.img.gz",
+          "iso_url": "https://mirrors.o2switch.fr/batocera/x86-64-v3/stable/last/batocera-zen3-x86-64-v3-44-20261116.img.gz",
           "checksum_url": null,
           "signature_url": null,
-          "require_signature": false
+          "require_signature": false,
+          "latest_page": "https://mirrors.o2switch.fr/batocera/x86-64-v3/stable/last/",
+          "latest_pattern": "batocera-zen3-x86-64-v3-(\\d+(?:\\.\\d+)?-\\d{8})\\.img\\.gz"
         }
       ],
       "format": "raw-gz",
