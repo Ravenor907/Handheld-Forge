@@ -29,6 +29,7 @@ import io.github.ravenor907.handheldforge.core.DownloadException
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Downloader
 import io.github.ravenor907.handheldforge.core.ImageKind
+import io.github.ravenor907.handheldforge.core.ImageStore
 import io.github.ravenor907.handheldforge.core.ImageWriter
 import io.github.ravenor907.handheldforge.core.Progress
 import io.github.ravenor907.handheldforge.core.Ventoy
@@ -156,7 +157,7 @@ class ForgeService : Service() {
             val cancel = { Jobs.cancelRequested }
             val ventoy = if (tool == VENTOY_ID) {
                 val dl = Downloader(isoDir(this), readKey = { "" }, userAgent = "HandheldForge-Android/${BuildConfigCompat.versionName(this)}")
-                Ventoy.fetchLatest(dl, File(isoDir(this), "ventoy"), stage, Jobs::log, cancel)
+                Ventoy.fetchLatest(dl, File(isoDir(this), ImageStore.VENTOY), stage, Jobs::log, cancel)
             } else {
                 null
             }
@@ -168,6 +169,17 @@ class ForgeService : Service() {
                     Ventoy.install(s.disk, ventoy.second, stage, Jobs::log, cancel, secureBoot = secureBoot)
                 } else {
                     PlainDrive.format(s.disk, stage = stage, log = Jobs::log, cancel = cancel)
+                }
+            }
+            if (ventoy != null) {
+                // Ventoy's download has done its job once it's on the drive (unless it's kept).
+                val store = Storage.store(this)
+                val dir = File(isoDir(this), ImageStore.VENTOY)
+                store.used(ImageStore.VENTOY, dir)
+                store.afterWrite(ImageStore.VENTOY, dir).takeIf { it > 0 }?.let {
+                    val note = ImageStore.freedNote(it, "the Ventoy download now that it's installed")
+                    Jobs.log(note)
+                    Storage.noteFromJob(this, note)
                 }
             }
             Jobs.finish(
@@ -289,6 +301,15 @@ class ForgeService : Service() {
             val img = downloader.prepare(distro, stage, Jobs::log, cancel, stream = Labs.streamWrite(this))
             if (cancel()) throw CancelledException()
             val live = img.live
+            val store = Storage.store(this)
+            val saved = File(isoDir(this), img.source.filename)
+            store.used(distro.id, saved)
+            val notes = mutableListOf<String>()
+            // A new version replaces the old one once it's verified: never two copies of one system.
+            fun dropOlder() = store.replaceOlder(distro.id, saved).takeIf { it > 0 }?.let {
+                notes += ImageStore.freedNote(it, "the older ${distro.name} image")
+            }
+            if (live == null) dropOlder()
 
             val again = sticks.device(stickKey)
                 ?: throw IOException("The USB drive was unplugged during the download. Plug it back in and try again.")
@@ -309,13 +330,20 @@ class ForgeService : Service() {
                         stage, Jobs::log, cancel, verify = !Labs.skipCheck(this),
                     )
                     live?.finish(Jobs::log)
+                    if (live != null) dropOlder()
                 } catch (e: CorruptImageException) {
                     Jobs.log(e.message ?: "")
                     img.file.delete() // fetch a fresh copy next time
                     throw IOException("The download was corrupted, so it was deleted. Try again.")
                 }
             }
-            Jobs.finish(Outcome.OK, "")
+            // The drive is made, so the download has done its job (unless it's kept).
+            store.afterWrite(distro.id, saved).takeIf { it > 0 }?.let {
+                notes += ImageStore.freedNote(it, "the downloaded image now that the drive is made")
+            }
+            notes.forEach(Jobs::log)
+            notes.lastOrNull()?.let { Storage.noteFromJob(this, it) }
+            Jobs.finish(Outcome.OK, notes.joinToString("\n"))
             done("${distro.name} is ready to boot")
         } catch (e: CancelledException) {
             val wasWriting = (Jobs.state.value as? JobState.Running)?.stage?.let { it >= Stage.WRITE } == true
@@ -469,6 +497,11 @@ class ForgeService : Service() {
                     userAgent = "HandheldForge-Android/${BuildConfigCompat.versionName(this)}",
                 )
                 val img = downloader.prepare(distro, stage, Jobs::log, cancel)
+                val store = Storage.store(this)
+                store.used(distro.id, img.file)
+                store.replaceOlder(distro.id, img.file).takeIf { it > 0 }?.let {
+                    Jobs.log(ImageStore.freedNote(it, "the older ${distro.name} image"))
+                }
                 Triple({ img.file.inputStream() }, img.file.length(), decoderFor(distro) ?: { it })
             }
             val sticks = UsbSticks(this)

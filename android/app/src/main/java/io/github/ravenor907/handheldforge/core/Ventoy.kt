@@ -112,6 +112,8 @@ object Ventoy {
         } else {
             log("Already have Ventoy ${rel.version}")
         }
+        // Only the newest release is kept: older downloads (and their leftovers) go.
+        cacheDir.listFiles()?.filter { it.name != tar.name }?.forEach { it.deleteRecursively() }
         stage(Stage.VERIFY, 1, 1)
         return rel to tar.inputStream().use { extract(it) }
     }
