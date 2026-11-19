@@ -94,7 +94,7 @@ There's also an Android app in [`android/`](../android/). It makes the same boot
 - **Download:** [the latest APK is on the Releases page](https://github.com/Ravenor907/Handheld-Forge/releases). Android will ask you to allow installs from your browser or file manager the first time.
 - **No root.** The app talks to the stick directly over USB, writes the verified image, then reads the whole drive back to confirm it.
 - **One Android prompt.** The first time you plug a stick in, Android asks whether Handheld Forge may access it. Tick "always" and it won't ask again for that stick. That's Android's own USB permission; every app gets it.
-- **Space:** about 10 GB free on the phone for the download.
+- **Space:** about 10 GB free on the phone for the download. Nothing sits there afterwards: once a drive is made, its download is deleted (turn on **Keep the download** before erasing to keep it), an image not used for 14 days is deleted, a newer version replaces the old one once it's verified, and old partial downloads and leftovers are cleared when the app opens. **Downloaded images** on the main screen shows the space used, a Keep switch for each and **Remove all downloaded images**. Each clean-up says how much it freed; anything deleted downloads again when needed.
 - **Leave the phone alone while it works.** Android pauses or cuts off apps it thinks you've stopped using, which can stop the download or leave the drive half written. Before it erases anything, the app checks a short list and asks you to agree to leave it be:
   - Battery at 30% or more, or charging (required: the phone also powers the drive)
   - Connected to the internet (required)
