@@ -9,7 +9,7 @@ Short version: Handheld Forge doesn't collect anything about you. No account, no
 - **Downloads.** When you make a boot drive, the app downloads the system you picked straight from its publisher: Bazzite (download.bazzite.gg), SteamOS (steamdeck-images.steamos.cloud), CachyOS (iso.cachyos.org) or Ventoy (github.com and api.github.com). Like any download, those servers see your IP address and the app's name and version. Their own privacy policies apply to them. The app sends them nothing else.
 - **Files you pick.** If you choose a file from your phone, the app reads only that file, and only to write it to your USB drive. It never leaves your phone.
 - **USB drives.** The app reads and writes the USB drive you choose, and nothing else.
-- **Downloads cache.** Downloaded images are kept in the app's own storage so they don't have to be downloaded again. Clearing the app's storage or uninstalling deletes them.
+- **Downloads cache.** Downloaded images are kept in the app's own storage only until a drive is made from them (unless you turn on Keep), or for 14 days unused. Clearing the app's storage or uninstalling deletes them.
 
 The app has no servers of its own and no way to receive data from you. Nothing is shared with or sold to anyone.
 

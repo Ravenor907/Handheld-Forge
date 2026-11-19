@@ -14,7 +14,9 @@ import time
 import urllib.error
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve, QObject, QPointF, QRectF, QSize, Qt, QThread, QTimer, QVariantAnimation, Signal,
+)
 from PySide6.QtGui import (
     QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut,
 )
@@ -24,7 +26,7 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, __version__, jobs, settings
+from . import APP_NAME, __version__, jobs, settings, store
 from .builder import BuildError
 from .builder import Cancelled as BuildCancelled
 from .maker import make_drive
@@ -95,7 +97,7 @@ QLabel[role="banner"] {{
 QWidget#ack {{ background: {IRON.name()}; border: 1px solid {SEAM.name()}; border-radius: 10px; }}
 QWidget#ack QLabel, QWidget#ack QCheckBox {{ background: transparent; font-size: 14px; }}
 QWidget#card {{ background: {IRON.name()}; border-radius: 14px; }}
-QWidget#card QLabel {{ background: transparent; }}
+QWidget#card QLabel, QWidget#card QWidget {{ background: transparent; }}
 QLabel[role="cardtitle"] {{ font-size: 16px; font-weight: 600; }}
 QLabel[role="small"] {{ color: {ASH.name()}; font-size: 13px; }}
 QLabel[role="warn"] {{ color: {MOLTEN_A.name()}; font-size: 13px; }}
@@ -434,7 +436,7 @@ class StepTrack(QWidget):
 
 
 class Switch(QAbstractButton):
-    """The on/off pill from the Android app's Labs screen."""
+    """The on/off pill from the Android app: the knob glides across and the track fades to molten."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -442,18 +444,43 @@ class Switch(QAbstractButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setFixedSize(48, 28)
+        self._t = 0.0  # 0 off, 1 on; follows the checked state
+        self._glide = QVariantAnimation(self, duration=180, easingCurve=QEasingCurve.OutCubic)
+        self._glide.valueChanged.connect(self._at)
+        self.toggled.connect(self._toggled)
+
+    def _at(self, t: float) -> None:
+        self._t = float(t)
+        self.update()
+
+    def _toggled(self, on: bool) -> None:
+        self._glide.stop()
+        if not self.isVisible():  # nothing to watch: just be there
+            self._at(1.0 if on else 0.0)
+            return
+        self._glide.setStartValue(self._t)
+        self._glide.setEndValue(1.0 if on else 0.0)
+        self._glide.start()
 
     def paintEvent(self, _) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        t = self._t
         p.setPen(QPen(BONE, 1.5) if self.hasFocus() else Qt.NoPen)
-        p.setBrush(molten(r) if self.isChecked() else SEAM)
+        p.setBrush(SEAM)
         p.drawRoundedRect(r, 14, 14)
-        x = r.right() - 25 if self.isChecked() else r.left() + 3
+        if t > 0:
+            p.setOpacity(t)
+            p.setPen(Qt.NoPen)
+            p.setBrush(molten(r))
+            p.drawRoundedRect(r, 14, 14)
+            p.setOpacity(1)
+        x = r.left() + 3 + (r.width() - 28) * t
         knob = QRectF(x, r.top() + 3, 22, 22)
         p.setPen(Qt.NoPen)
-        p.setBrush(INK if self.isChecked() else ASH)
+        mix = zip(ASH.getRgbF(), INK.getRgbF(), strict=True)
+        p.setBrush(QColor.fromRgbF(*(a + (b - a) * t for a, b in mix)))
         p.drawEllipse(knob)
 
 
@@ -513,6 +540,173 @@ def gb(n: int) -> str:
     return f"{n / 1e9:.1f} GB"
 
 
+class Chevron(QWidget):
+    """The little arrow on the storage line: turns over when the list opens."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedSize(18, 18)
+        self._turn = 0.0
+        self._anim = QVariantAnimation(self, duration=220, easingCurve=QEasingCurve.OutCubic)
+        self._anim.valueChanged.connect(lambda v: (setattr(self, "_turn", float(v)), self.update()))
+
+    def set_open(self, on: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._turn)
+        self._anim.setEndValue(180.0 if on else 0.0)
+        self._anim.start()
+
+    def paintEvent(self, _) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.translate(9, 9)
+        p.rotate(self._turn)
+        path = QPainterPath()
+        path.moveTo(-5, -2.5)
+        path.lineTo(0, 2.5)
+        path.lineTo(5, -2.5)
+        p.setPen(QPen(ASH, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(path)
+
+
+class StorageLine(QWidget):
+    """Space taken by downloaded images, on the main screen, as on Android. Click it to see each one
+    with a Keep switch and a button that removes them all. Shown only when there's something to say."""
+
+    keep = Signal(str, bool)  # owner, on
+    remove_all = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("card")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)  # the drive list gives way, not this
+        self.open = False
+        self._shape: list[tuple[str, int, str]] = []
+        self._rows: list[tuple[str, Switch, QLabel, int, QWidget]] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.head = QWidget()
+        self.head.setCursor(Qt.PointingHandCursor)
+        head = QHBoxLayout(self.head)
+        head.setContentsMargins(16, 10, 14, 10)
+        self.total = label("", "cardtitle")
+        self.chevron = Chevron()
+        head.addWidget(self.total, 1)
+        head.addWidget(self.chevron, 0, Qt.AlignVCenter)
+        self.head.mousePressEvent = lambda e: self.toggle() if e.button() == Qt.LeftButton else None
+        lay.addWidget(self.head)
+        self.note = label("", "small")
+        self.note.setContentsMargins(16, 0, 16, 10)
+        lay.addWidget(self.note)
+        # The list slides open and shut (its height animates), so nothing jumps.
+        # On a short window it opens as far as there's room, and the rows scroll.
+        self.body = QScrollArea()
+        self.body.setWidgetResizable(True)
+        self.body.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.body.setFixedHeight(0)
+        inner = QWidget()
+        self.body.setWidget(inner)
+        self.rows = QVBoxLayout(inner)
+        self.rows.setContentsMargins(0, 0, 0, 12)
+        self.rows.setSpacing(0)
+        self.remove_btn = quiet_button("Remove all downloaded images")
+        self.remove_btn.clicked.connect(self._remove_all)
+        self.rows.addSpacing(6)
+        wrap = QHBoxLayout()
+        wrap.setContentsMargins(12, 0, 12, 0)
+        wrap.addWidget(self.remove_btn)
+        self.rows.addLayout(wrap)
+        lay.addWidget(self.body)
+        self._slide = QVariantAnimation(self, duration=240, easingCurve=QEasingCurve.OutCubic)
+        self._slide.valueChanged.connect(lambda v: self.body.setFixedHeight(int(v)))
+        self.setVisible(False)
+
+    def set_state(self, entries: list[store.Entry], note: str, names: dict[str, str]) -> None:
+        total = sum(e.bytes for e in entries)
+        self.total.setText("Downloaded images: " + (store.size(total) if entries else "none"))
+        self.note.setText(note)
+        self.note.setVisible(bool(note))
+        self.chevron.setVisible(bool(entries))
+        self.head.setCursor(Qt.PointingHandCursor if entries else Qt.ArrowCursor)
+        shape = [(str(e.path), e.bytes, e.owner) for e in entries]
+        if shape != self._shape:  # rebuild only when the files change, so a switch mid-glide isn't replaced
+            self._shape = shape
+            for *_, row in self._rows:
+                self.rows.removeWidget(row)
+                row.hide()
+                row.deleteLater()
+            self._rows = []
+            for i, e in enumerate(entries):
+                self._add_row(i, e, names)
+        for owner, sw, detail, n, _ in self._rows:
+            on = any(e.keep for e in entries if e.owner == owner)
+            if sw.isChecked() != on:
+                sw.blockSignals(True)
+                sw.setChecked(on)
+                sw.blockSignals(False)
+                sw._toggled(on)
+            detail.setText(self._detail(n, on))
+        if not entries and self.open:
+            self.toggle()
+        self.setVisible(bool(entries or note))
+        if self.open:  # rows came or went: fit them
+            self._slide.stop()
+            self.body.setFixedHeight(self._open_height())
+
+    @staticmethod
+    def _detail(n: int, keep: bool) -> str:
+        return store.size(n) + (", kept" if keep else ", deleted after the next drive")
+
+    def _add_row(self, i: int, e: store.Entry, names: dict[str, str]) -> None:
+        row = QWidget()
+        row.setCursor(Qt.PointingHandCursor)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(16, 6, 14, 6)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        name = names.get(e.owner) or ("Ventoy" if e.owner == store.VENTOY else e.path.name)
+        title = label(name)
+        title.setStyleSheet("font-size: 15px;")
+        detail = label(self._detail(e.bytes, e.keep), "small")
+        col.addWidget(title)
+        col.addWidget(detail)
+        lay.addLayout(col, 1)
+        lay.addWidget(label("Keep", "small"))
+        lay.addSpacing(6)
+        sw = Switch()
+        sw.setChecked(e.keep)
+        sw.toggled.connect(lambda on, o=e.owner: self.keep.emit(o, on))
+        lay.addWidget(sw, 0, Qt.AlignVCenter)
+        row.mousePressEvent = lambda ev, w=sw: w.toggle() if ev.button() == Qt.LeftButton else None
+        self.rows.insertWidget(i, row)
+        self._rows.append((e.owner, sw, detail, e.bytes, row))
+
+    def toggle(self) -> None:
+        if not self._shape and not self.open:
+            return
+        self.open = not self.open
+        self.chevron.set_open(self.open)
+        self._slide.stop()
+        self._slide.setStartValue(self.body.height())
+        self._slide.setEndValue(self._open_height() if self.open else 0)
+        self._slide.start()
+
+    def _open_height(self) -> int:
+        want = self.body.widget().sizeHint().height()
+        page = self.parentWidget()
+        if page is None or not page.isVisible():
+            return want
+        room = self.body.height() + max(0, page.height() - page.minimumSizeHint().height())
+        return max(min(want, room), min(want, 90))
+
+    def _remove_all(self) -> None:
+        if self.open:
+            self.toggle()
+        self.remove_all.emit()
+
+
 # ---------------------------------------------------------------- worker
 
 SYSTEM, FILE, VENTOY, FORMAT = "system", "file", "ventoy", "format"
@@ -544,7 +738,9 @@ class Worker(QObject):
         self.distro, self.drive, self.job, self.args = distro, drive, job, args
         self.cancel = threading.Event()
         self.result = None  # what the job returned (Ventoy's version, a test report, names added)
+        self.notes: list[str] = []  # what the download clean-up freed
         self.settings = settings.load()
+        self.catalog = list(args.pop("catalog", ()))
 
     def _run_job(self):
         s, st, lg, c = self.settings, self.stage.emit, self.log.emit, self.cancel
@@ -553,13 +749,29 @@ class Worker(QObject):
             img = prepare_iso(self.distro, st, lg, c, stream=stream)
             if c.is_set():
                 raise DownloadCancelled()
+            saved = img.path.parent / img.source.filename  # where it ends up, also when written live
+            images = store.for_catalog(self.catalog or [self.distro], saved.parent)
+            if img.live is None:  # a newer version replaces the old one once it's verified
+                self.notes += store.after_download(images, self.distro, saved)
             jobs.log_drive(self.drive, lg)
             make_drive(self.distro, self.drive, img.path, st, lg, c, verify=s.verify, live=img.live)
+            if img.live is not None:
+                self.notes += store.after_download(images, self.distro, saved)
+            self.notes += store.after_drive(images, self.distro.id, saved,
+                                            "the downloaded image now that the drive is made")
+            for n in self.notes:
+                lg(n)
             return None
         if self.job == FILE:
             return jobs.write_own_file(self.drive, self.args["file"], st, lg, c, verify=s.verify)
         if self.job == VENTOY:
-            return jobs.install_ventoy(self.drive, self.args["secure_boot"], st, lg, c)
+            version = jobs.install_ventoy(self.drive, self.args["secure_boot"], st, lg, c)
+            images = store.for_catalog(self.catalog)
+            self.notes += store.after_drive(images, store.VENTOY, images.dir / store.VENTOY,
+                                            "the Ventoy download now that it's installed")
+            for n in self.notes:
+                lg(n)
+            return version
         if self.job == FORMAT:
             return jobs.format_drive(self.drive, st, lg, c)
         if self.job == IMPORT:
@@ -643,6 +855,7 @@ class MainWindow(QMainWindow):
         self.progress = Progress()
         self._step = 0
         self._tasks: list[Task] = []
+        self.storage_note = ""  # the latest clean-up's one line, or ""
 
         self.stack = QStackedWidget()
         self.choose_page = self._build_choose()
@@ -690,6 +903,7 @@ class MainWindow(QMainWindow):
 
         QShortcut(QKeySequence(Qt.Key_Escape), self, activated=self._escape)
         self.refresh_drives()
+        self.refresh_storage()
         self.poll = QTimer(self, interval=2000, timeout=self._poll_drives)
         self.poll.start()
 
@@ -784,6 +998,11 @@ class MainWindow(QMainWindow):
         self.ventoy_bar.setVisible(False)
         lay.addWidget(self.ventoy_bar)
 
+        self.storage_line = StorageLine()
+        self.storage_line.keep.connect(self._set_keep)
+        self.storage_line.remove_all.connect(self._remove_all_images)
+        lay.addWidget(self.storage_line)
+
         self.empty_hint = label("", "hint")
         lay.addWidget(self.empty_hint)
 
@@ -830,6 +1049,12 @@ class MainWindow(QMainWindow):
         self.sb_text = label("", "hint")
         sb.addWidget(self.sb_text)
         lay.addWidget(self.sb_box)
+        self.keep_switch = Switch()
+        self.keep_card = Card("Keep the download", "", self.keep_switch)
+        self.keep_card.clicked.connect(self.keep_switch.toggle)
+        self.keep_switch.toggled.connect(lambda on: self._set_keep(self._keep_owner(), on))
+        lay.addWidget(self.keep_card)
+        lay.addSpacing(10)
         self.confirm_warning = label("", "banner")
         lay.addWidget(self.confirm_warning)
         lay.addSpacing(6)
@@ -1226,6 +1451,13 @@ class MainWindow(QMainWindow):
         self.confirm_tile.update()
         self.sb_box.setVisible(choice == VENTOY)
         self._set_secure_boot(self.secure_boot)
+        self.keep_card.setVisible(choice in (SYSTEM, VENTOY))
+        if choice in (SYSTEM, VENTOY):
+            self.keep_switch.blockSignals(True)
+            self.keep_switch.setChecked(self._store().is_kept(self._keep_owner()))
+            self.keep_switch.blockSignals(False)
+            self.keep_switch._at(1.0 if self.keep_switch.isChecked() else 0.0)
+            self._keep_detail()
         notes = []
         if choice == SYSTEM and distro.needs_password or choice in (FILE, VENTOY):
             what = "Ventoy is installed" if choice == VENTOY else f"{name} is written"
@@ -1321,7 +1553,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.work_page)
 
         self.thread = QThread(self)
-        self.worker = Worker(distro, drive, job, **args)
+        self.worker = Worker(distro, drive, job, catalog=self.catalog + self.labs_systems, **args)
         self._render_status()
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -1456,6 +1688,11 @@ class MainWindow(QMainWindow):
             if steps:
                 self.result_guide.setText(guide_html(steps, ventoy=job == VENTOY))
                 self.result_guide.setVisible(True)
+            freed = getattr(w, "notes", [])
+            if freed and job in (SYSTEM, VENTOY):
+                self.result_after.setText("\n".join(freed))
+                self.result_after.setVisible(True)
+                self.storage_note = freed[-1]
         elif status == "cancelled":
             self.result_title.setText("Stopped")
             self.result_text.setText(message)
@@ -1684,7 +1921,8 @@ class MainWindow(QMainWindow):
         self.test_btn.setEnabled(drive is not None)
         src = self._check_source()
         if src is None:
-            self.check_card.detail.setText("Pick a system you've made a drive with, or your own file, on the "
+            self.check_card.detail.setText("Pick a system whose download is on this computer (turn on Keep "
+                                           "the download before making the drive), or your own file, on the "
                                            "main screen first, then compare a drive with it.")
         else:
             self.check_card.detail.setText((f"Compare {drive.model} with {src[0]}" if drive else
@@ -1726,7 +1964,66 @@ class MainWindow(QMainWindow):
     def _back_to_start(self) -> None:
         self.drives = []
         self.refresh_drives()
+        self.refresh_storage()  # a job may have used or freed space
         self.stack.setCurrentWidget(self.choose_page)
+
+    # ------------------------------------------------------------ downloaded images
+
+    def _store(self) -> store.ImageStore:
+        return store.for_catalog(self.catalog + self.labs_systems)
+
+    def refresh_storage(self) -> None:
+        names = {d.id: d.name for d in self.catalog + self.labs_systems}
+        try:
+            entries = self._store().entries()
+        except OSError:
+            entries = []
+        self.storage_line.set_state(entries, self.storage_note, names)
+
+    def clean_on_start(self) -> None:
+        """Leftovers and images unused for two weeks, off the window's thread, as the app opens."""
+        if self.thread is not None:
+            return
+        t = Task(lambda: store.clean_on_start(self._store()), self)
+        self._tasks.append(t)
+
+        def done(note, _err):
+            self._tasks.remove(t)
+            if note:
+                self.storage_note = note
+            self.refresh_storage()
+
+        t.done.connect(done, Qt.QueuedConnection)
+        t.start()
+
+    def _keep_owner(self) -> str:
+        d = self._distro()
+        return store.VENTOY if self._choice() == VENTOY or d is None else d.id
+
+    def _keep_detail(self) -> None:
+        self.keep_card.detail.setText(
+            "Kept on this computer for next time. Remove it any time under Downloaded images."
+            if self.keep_switch.isChecked() else
+            "Deleted once the drive is made, to free the space. It downloads again when needed.")
+
+    def _set_keep(self, owner: str, on: bool) -> None:
+        try:
+            self._store().set_keep(owner, on)
+        except OSError:
+            return
+        if self.keep_card.isVisibleTo(self.confirm_page) and owner == self._keep_owner():
+            self._keep_detail()
+        self.refresh_storage()
+
+    def _remove_all_images(self) -> None:
+        if self.thread is not None:  # never under a running job
+            return
+        try:
+            freed = self._store().remove_all()
+        except OSError:
+            freed = 0
+        self.storage_note = store.freed_note(freed, "the downloaded images") if freed else ""
+        self.refresh_storage()
 
     def _escape(self) -> None:
         page = self.stack.currentWidget()
@@ -1758,4 +2055,5 @@ def run() -> int:
     app.setStyleSheet(STYLE)
     win = MainWindow()
     win.show()
+    win.clean_on_start()
     return app.exec()
