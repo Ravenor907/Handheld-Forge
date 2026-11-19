@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    # On the owner's PC while the repo variable HF_RUNNER is "local" (~/dev-setup/hf-ci); pull requests always run
+    # on GitHub. Jobs that need real root (drive images, udisks, the emulator) stay on GitHub.
+    runs-on: ${{ vars.HF_RUNNER == 'local' && github.event_name != 'pull_request' && fromJSON('["self-hosted", "handheldforge"]') || 'ubuntu-24.04' }}
     permissions:
       contents: write  # only for the temporary screenshot branch below
     strategy:
@@ -56,7 +58,7 @@ jobs:
 
   catalog-links:
     # Download URLs change upstream (CachyOS names each build by date), so check them from the internet.
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.HF_RUNNER == 'local' && github.event_name != 'pull_request' && fromJSON('["self-hosted", "handheldforge"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

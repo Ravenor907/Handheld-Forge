@@ -23,7 +23,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    # On the owner's PC while the repo variable HF_RUNNER is "local" (~/dev-setup/hf-ci); pull requests always run
+    # on GitHub. Jobs that need real root (drive images, udisks, the emulator) stay on GitHub.
+    runs-on: ${{ vars.HF_RUNNER == 'local' && github.event_name != 'pull_request' && fromJSON('["self-hosted", "handheldforge"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
@@ -225,7 +227,7 @@ jobs:
     # so bumping versionName in android/app/build.gradle.kts is what ships a build.
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/android-v')
     needs: [build, screens, drive-images]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.HF_RUNNER == 'local' && github.event_name != 'pull_request' && fromJSON('["self-hosted", "handheldforge"]') || 'ubuntu-24.04' }}
     permissions:
       contents: write
     steps:
@@ -243,6 +245,11 @@ jobs:
             echo "Release $tag already exists, nothing to publish"
             exit 0
           fi
-          gh release create "$tag" "HandheldForge-$v.apk" -R "${{ github.repository }}" --target "$GITHUB_SHA" \
-            --title "Handheld Forge for Android $v" \
-            --notes "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite, SteamOS or CachyOS boot drive. Keep the app open and the phone alone until it finishes. Signed with the shared test key."
+          # Plain-words notes for this version, when written (docs/release-notes/<version>.md), then how to install.
+          notes=$(mktemp)
+          if [ -f "docs/release-notes/$v.md" ]; then cat "docs/release-notes/$v.md"; echo; echo "## Installing"; echo; fi > "$notes"
+          echo "Install the APK on an Android phone, plug in a USB drive with a USB-C adapter, and create a Bazzite, SteamOS or CachyOS boot drive. Keep the app open and the phone alone until it finishes. Signed with the shared test key." >> "$notes"
+          sha256sum "HandheldForge-$v.apk" > "HandheldForge-$v.apk.sha256"
+          gh release create "$tag" "HandheldForge-$v.apk" "HandheldForge-$v.apk.sha256" -R "${{ github.repository }}" \
+            --target "$GITHUB_SHA" --title "Handheld Forge for Android $v" --notes-file "$notes"
+          rm -f "$notes"
