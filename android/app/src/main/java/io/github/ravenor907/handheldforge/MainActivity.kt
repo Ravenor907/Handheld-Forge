@@ -22,7 +22,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -68,6 +78,7 @@ import io.github.ravenor907.handheldforge.core.Distro
 import io.github.ravenor907.handheldforge.core.DriveTest
 import io.github.ravenor907.handheldforge.core.Fix
 import io.github.ravenor907.handheldforge.core.ImageKind
+import io.github.ravenor907.handheldforge.core.ImageStore
 import io.github.ravenor907.handheldforge.core.PhoneState
 import io.github.ravenor907.handheldforge.core.Preflight
 import io.github.ravenor907.handheldforge.core.Progress
@@ -183,7 +194,7 @@ class MainActivity : ComponentActivity() {
         val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         val demo = if (debuggable) intent.getStringExtra("demo") else null
         labs.value = Labs.isOn(this) || demo in setOf("labs", "confirm-labs", "labs-tools", "done-test")
-        if (demo != null) startDemo(demo, catalog)
+        if (demo != null) startDemo(demo, catalog) else Storage.cleanOnStart(this)
         setContent { App(catalog, demo) }
     }
 
@@ -259,6 +270,22 @@ class MainActivity : ComponentActivity() {
         demoPhone = when (demo) {
             "confirm" -> PhoneState(18, charging = false, online = true, unmetered = false, backgroundAllowed = false)
             else -> PhoneState(76, charging = true, online = true, unmetered = true, backgroundAllowed = true)
+        }
+        if (demo == "storage") {
+            val dir = ForgeService.isoDir(this)
+            val day = 24L * 60 * 60 * 1000
+            val now = System.currentTimeMillis()
+            Storage.demo(
+                Storage.State(
+                    listOf(
+                        ImageStore.Entry(java.io.File(dir, "bazzite-deck-stable-live-amd64.iso"), "bazzite-deck", 8_600_000_000, now - day, keep = true),
+                        ImageStore.Entry(java.io.File(dir, "steamdeck-repair-latest.img.bz2"), "steamos", 2_900_000_000, now - 3 * day, keep = false),
+                    ),
+                    kept = setOf("bazzite-deck"),
+                    note = ImageStore.freedNote(7_400_000_000, "images not used for 14 days"),
+                    loaded = true,
+                ),
+            )
         }
         when (demo) {
             "working", "stop" -> Jobs.demo(
@@ -419,6 +446,8 @@ class MainActivity : ComponentActivity() {
             keepScreenOn(job is JobState.Running)
             // A finished job may have changed the drive (now Ventoy, now plain): look at it again.
             if (job is JobState.Finished && demo == null) sticks.forget()
+            // Back on the main screen: show what's stored now (a job may have used or freed space).
+            if (job is JobState.Idle && demo == null) Storage.refresh(this@MainActivity)
         }
 
         // Hiding experimental options again shouldn't leave one of them picked.
@@ -683,6 +712,7 @@ class MainActivity : ComponentActivity() {
                 QuietButton("Add images", onClick = onAddToVentoy)
             }
         }
+        StorageLine(catalog)
         Gap(10)
         if (hint.isNotEmpty()) {
             Txt(hint, Forge.hint.copy(color = Forge.Danger))
@@ -760,6 +790,17 @@ class MainActivity : ComponentActivity() {
             }
             distro.warning?.let {
                 Banner(it)
+                Gap(14)
+            }
+            if (needsInternet) {
+                val kept by Storage.state.collectAsState()
+                val on = distro.id in kept.kept
+                Toggle(
+                    "Keep the download",
+                    if (on) "Kept on this phone for next time. Remove it any time under Downloaded images."
+                    else "Deleted once the drive is made, to free the space. It downloads again when needed.",
+                    on,
+                ) { Storage.setKeep(this@MainActivity, distro.id, it) }
                 Gap(14)
             }
             // Only what needs attention; nothing at all when the phone is ready.
@@ -951,14 +992,86 @@ class MainActivity : ComponentActivity() {
                 Txt(detail, Forge.hint.copy(fontSize = 13.sp, lineHeight = 18.sp))
             }
             Spacer(Modifier.width(12.dp))
-            val track = RoundedCornerShape(50)
+            Switch(on)
+        }
+    }
+
+    /** The on/off switch: the knob glides across and the track fades to molten. */
+    @Composable
+    private fun Switch(on: Boolean) {
+        val track = RoundedCornerShape(50)
+        val t by animateFloatAsState(if (on) 1f else 0f, tween(180, easing = FastOutSlowInEasing), label = "switch")
+        Box(
+            Modifier.width(48.dp).height(28.dp).clip(track).background(Forge.Seam)
+                .drawBehind { drawRect(Forge.molten, alpha = t) }
+                .padding(3.dp),
+        ) {
             Box(
-                Modifier.width(48.dp).height(28.dp).clip(track)
-                    .then(if (on) Modifier.background(Forge.molten) else Modifier.background(Forge.Seam))
-                    .padding(3.dp),
-                contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart,
-            ) {
-                Box(Modifier.size(22.dp).clip(track).background(if (on) Forge.Ink else Forge.Ash))
+                Modifier.offset(x = 20.dp * t).size(22.dp).clip(track)
+                    .background(androidx.compose.ui.graphics.lerp(Forge.Ash, Forge.Ink, t)),
+            )
+        }
+    }
+
+    /**
+     * Space taken by downloaded images, on the main screen. Tap it to see each one with a Keep
+     * switch and a button that removes them all. Shown only when there's something to say.
+     */
+    @Composable
+    private fun StorageLine(catalog: List<Distro>) {
+        val st by Storage.state.collectAsState()
+        var open by rememberSaveable { mutableStateOf(false) }
+        val show = st.entries.isNotEmpty() || st.note.isNotEmpty()
+        AnimatedVisibility(show, enter = fadeIn(tween(220)) + expandVertically(tween(260)), exit = fadeOut(tween(180)) + shrinkVertically(tween(240))) {
+            Column(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Forge.Iron).animateContentSize(tween(240))) {
+                Row(
+                    Modifier.fillMaxWidth().clickable(enabled = st.entries.isNotEmpty()) { open = !open }
+                        .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Txt(
+                        if (st.entries.isEmpty()) "Downloaded images: none" else "Downloaded images: ${gb(st.bytes)}",
+                        TextStyle(color = Forge.Bone, fontSize = 15.sp, fontWeight = FontWeight.SemiBold), Modifier.weight(1f),
+                    )
+                    if (st.entries.isNotEmpty()) {
+                        val turn by animateFloatAsState(if (open) 180f else 0f, tween(220), label = "chevron")
+                        Txt("\u25BE", Forge.hint, Modifier.rotate(turn))
+                    }
+                }
+                if (st.note.isNotEmpty()) {
+                    Txt(st.note, Forge.hint.copy(fontSize = 13.sp, lineHeight = 18.sp), Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp))
+                }
+                if (open && st.entries.isNotEmpty()) {
+                    st.entries.forEach { e ->
+                        val name = catalog.firstOrNull { it.id == e.owner }?.name
+                            ?: if (e.owner == ImageStore.VENTOY) "Ventoy" else e.file.name
+                        Row(
+                            Modifier.fillMaxWidth().clickable { Storage.setKeep(this@MainActivity, e.owner, !e.keep) }
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Txt(name, TextStyle(color = Forge.Bone, fontSize = 15.sp), maxLines = 1)
+                                Txt(
+                                    gb(e.bytes) + if (e.keep) ", kept" else ", deleted after the next drive",
+                                    Forge.hint.copy(fontSize = 13.sp, lineHeight = 17.sp), maxLines = 1,
+                                )
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Txt("Keep", Forge.hint.copy(fontSize = 13.sp))
+                            Spacer(Modifier.width(8.dp))
+                            Switch(e.keep)
+                        }
+                    }
+                    Gap(6)
+                    QuietButton(
+                        "Remove all downloaded images",
+                        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                    ) {
+                        open = false
+                        Storage.removeAll(this@MainActivity)
+                    }
+                }
             }
         }
     }
@@ -1047,6 +1160,10 @@ class MainActivity : ComponentActivity() {
                 },
                 Forge.hint,
             )
+            if (ok && !imported && !tested && !checked && !ventoy && j.message.isNotBlank()) {
+                Gap(10)
+                j.message.lines().filter { it.isNotBlank() }.forEach { Txt(it, Forge.hint.copy(fontSize = 13.sp, lineHeight = 18.sp)) }
+            }
             if (ok && (imported || tested)) {
                 Gap(12)
                 j.message.lines().filter { it.isNotBlank() }.forEach {
